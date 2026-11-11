@@ -1,0 +1,56 @@
+{
+  "name": "@local/dsh-data-analysis",
+  "version": "0.1.0",
+  "private": true,
+  "description": "实证研究工作台：把 empirical-research-pipeline 技能变成可点、可看、可拦住的数据分析流水线（面板 + 工具）。",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./icon": "./icon.svg",
+    "./locale/*.json": "./locale/*.json",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "icon": "./icon.svg",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ]
+    },
+    "manifestVersion": 1
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-client-ui-slots": "*",
+    "@deepseek-ai/dsh-host-webserver": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "react": "*"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "icon.svg",
+    "src",
+    "locale",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "data-analysis",
+    "research-workbench"
+  ],
+  "license": "MIT"
+}
