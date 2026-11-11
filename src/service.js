@@ -19,13 +19,27 @@ import {
 } from './defaults.js';
 import { evaluateProject, summarizeStages, gateTotals } from './gates.js';
 import { createProject, projectId, readProject, writeProject, runsDir } from './projects.js';
-import { fingerprint, isInside, resolveSkillRoot, scriptPath, listScripts } from './skill.js';
+import { fingerprint, resolveSkillRoot, resolveStageScript, listScripts } from './skill.js';
 import { scanArtifacts } from './audit.js';
 import { runPreflight } from './preflight.js';
 import { buildTaskCard } from './taskcard.js';
 import { applyPatch, buildEvidence, readIssues, recheckSummary, writeIssues } from './recheck.js';
 
 const EMPTY_SKILL = { ok: false, reason: '未配置 skillRoot', root: '', packageDir: '', version: '', sha256: '', scripts: [] };
+
+/**
+ * 脚本找不到时，把「为什么找不到」说清楚。
+ *
+ * 谎报「脚本不存在」会把排查引向错误方向：文件明明躺在磁盘上，问题在路径写法。
+ * 所以区分两种失败——落在受保护范围之外（读得到，但不准读）与两处都没有这个文件。
+ */
+function scriptErrorMessage(stage, scriptRel, found, projectRoot, skill) {
+  const scope = `项目 ${projectRoot}${skill?.ok ? ` / 技能包 ${skill.packageDir}` : '（技能包未配置）'}`;
+  if (found.code === 'outside') {
+    return `脚本指向受保护范围之外：${scriptRel}（文件存在，但阶段脚本只能读项目内或技能包内的文件；请把它放进项目的 scripts/ 再按相对路径登记）`;
+  }
+  return `脚本不存在：${scriptRel}（${scope} 里都没有；阶段脚本请写相对路径，如 scripts/auto_stats.py）`;
+}
 
 export class Workbench {
   constructor({ getConfig, store, runner, onChange }) {
@@ -525,13 +539,9 @@ export class Workbench {
       const scriptRel = item?.script;
       if (!scriptRel) return { ok: false, error: `${stage.name} 没有登记脚本：这一步由人/模型完成，面板只做验收`, steps: [] };
 
-      const localScript = path.resolve(projectRoot, scriptRel);
-      let scriptAbs = '';
-      if (fs.existsSync(localScript) && isInside(projectRoot, localScript)) scriptAbs = localScript;
-      else if (skill.ok) scriptAbs = scriptPath({ ok: true, packageDir: skill.packageDir }, scriptRel) || '';
-      if (!scriptAbs || !fs.existsSync(scriptAbs)) {
-        return { ok: false, error: `脚本不存在：${scriptRel}（既不在项目里，也不在 skill 包里）`, steps: [] };
-      }
+      const found = resolveStageScript({ projectRoot, skill, script: scriptRel });
+      if (!found.ok) return { ok: false, error: scriptErrorMessage(stage, scriptRel, found, projectRoot, skill), steps: [] };
+      const scriptAbs = found.abs;
 
       const args = Array.isArray(item.args) ? item.args : [];
       // 宽表规范位置是 output/dataset/analysis.csv；旧项目仍在 data/ 时自动回退，

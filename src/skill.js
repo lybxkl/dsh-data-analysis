@@ -120,6 +120,42 @@ export function listScripts(skill) {
   }
 }
 
+/**
+ * 阶段脚本解析：只允许读到「项目根」与「技能包」这两处。
+ *
+ * 隔离契约约束的是「能读到哪」，不是「路径长什么样」：
+ * 指向包外的绝对路径一律拒绝，但落在项目内或技能包内的绝对路径本身不越界，可以接受
+ * （project.json 是数据，面板/AI 把人手写的绝对路径登记进来是很常见的，不该因此跑不动）。
+ *
+ * 返回 { ok: true, abs, source } 或 { ok: false, code }：
+ *   code='empty'   没登记脚本
+ *   code='outside' 文件在磁盘上存在，但落在项目与技能包之外
+ *   code='missing' 两处都没有这个文件
+ */
+export function resolveStageScript({ projectRoot, skill, script } = {}) {
+  const rel = String(script || '').trim();
+  if (!rel) return { ok: false, code: 'empty' };
+
+  const root = path.resolve(projectRoot || '.');
+  const local = path.resolve(root, rel);
+  const skillDir = skill?.ok ? path.resolve(skill.packageDir) : '';
+  const insideProject = isInside(root, local);
+  const insideSkill = Boolean(skillDir) && isInside(skillDir, local);
+
+  if ((insideProject || insideSkill) && fs.existsSync(local)) {
+    return { ok: true, abs: local, source: insideProject ? 'project' : 'skill' };
+  }
+
+  // 相对路径在技能包里再找一次：scripts/xxx.py 指的是技能包自己那份（项目没覆盖同名脚本时）
+  if (skill?.ok && !path.isAbsolute(rel)) {
+    const inSkill = scriptPath(skill, rel);
+    if (inSkill && fs.existsSync(inSkill)) return { ok: true, abs: inSkill, source: 'skill' };
+  }
+
+  const outside = !insideProject && !insideSkill;
+  return { ok: false, code: outside && fs.existsSync(local) ? 'outside' : 'missing' };
+}
+
 /** 校验某个阶段脚本是否真的存在（运行前用它把「脚本没了」变成可读错误）。 */
 export function scriptPath(skill, relative) {
   if (!skill?.ok || !relative) return '';
