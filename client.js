@@ -124,7 +124,7 @@
         envWarn: '环境可用，但有降级',
         envPending: '正在检查运行环境…',
         recheck: '重新检查',
-        envHint: '技能包与 Python 依赖在启动时自动检查；这里只探测，不会自动安装任何东西。',
+        envHint: '技能包与 Python 依赖在启动时自动检查；缺了可以点「让 AI 装好环境」，它会自己 clone 技能包、装依赖（没有 Python 连 Python 一起装）。',
         checkedAt: '检查时间',
         advice: '处理建议',
         draft: 'AI 起草',
@@ -803,8 +803,9 @@
         '.dsa-chip.ok{color:var(--dsa-ok);border-color:color-mix(in srgb,var(--dsa-ok) 35%,var(--dsa-line));}',
         '.dsa-chip.warn{color:var(--dsa-warn);border-color:color-mix(in srgb,var(--dsa-warn) 35%,var(--dsa-line));}',
         '.dsa-chip.err{color:var(--dsa-err);border-color:color-mix(in srgb,var(--dsa-err) 35%,var(--dsa-line));}',
+        // 默认按钮要有「填充」才像按钮：原来白底白边框，落在白色弹窗里就成了一条细线
         '.dsa-btn{appearance:none;height:30px;padding:0 11px;border:1px solid var(--dsa-line2);border-radius:4px;',
-        '  background:var(--dsa-panel);color:var(--dsa-ink);font:inherit;font-size:12.5px;cursor:pointer;white-space:nowrap;}',
+        '  background:var(--dsa-band);color:var(--dsa-ink);font:inherit;font-size:12.5px;cursor:pointer;white-space:nowrap;}',
         '.dsa-btn:hover{background:var(--dsa-hover);}',
         '.dsa-btn:disabled{opacity:.5;cursor:default;}',
         '.dsa-btn.primary{background:var(--dsa-accent);border-color:var(--dsa-accent);color:#fff;}',
@@ -1376,7 +1377,7 @@
             { className: 'dsa-banner-text' },
             fails.map(function (item) { return item.label + '：' + item.detail; }).join('；')
           ),
-          h(Btn, { variant: 'ghost', disabled: props.busy, onClick: props.onRecheck }, t('recheck'))
+          h(Btn, { disabled: props.busy, onClick: props.onRecheck }, t('recheck'))
         );
       }
 
@@ -1422,8 +1423,8 @@
                 { variant: 'primary', disabled: props.busy, onClick: props.onAi },
                 props.busy ? '正在开临时会话…' : '让 AI 装好环境'
               ),
-              h(Btn, { variant: 'ghost', onClick: props.onSettings }, '手动配置'),
-              h(Btn, { variant: 'ghost', disabled: props.busy, onClick: props.onRecheck }, t('recheck'))
+              h(Btn, { disabled: props.busy, onClick: props.onSettings }, '手动配置'),
+              h(Btn, { disabled: props.busy, onClick: props.onRecheck }, t('recheck'))
             ),
             h(
               'div',
@@ -3144,6 +3145,7 @@
           if (d.kind === 'settings') {
             return h(SettingsDialog, {
               busy: busy,
+              aiBusy: envBusy,
               error: error,
               skill: snap && snap.skill,
               preflight: preflight,
@@ -3614,11 +3616,17 @@
               h(PreflightList, { preflight: props.preflight }),
               h(
                 'div',
-                { className: 'dsa-inline', style: { marginTop: '4px' } },
-                h(Btn, { variant: 'ghost', disabled: props.busy, onClick: props.onRecheck }, t('recheck')),
+                { className: 'dsa-inline', style: { marginTop: '6px' } },
+                // 这两颗是「出路」，不是页脚链接：主路（找 AI 装）用实心，次路（自己再看一眼）用带框按钮，
+                // 之前两颗都是 ghost（透明底透明边灰字），在设置页里看着就是一行文字。
                 props.onAi
-                  ? h(Btn, { variant: 'ghost', disabled: props.busy, onClick: props.onAi }, '让 AI 装好环境')
+                  ? h(
+                      Btn,
+                      { variant: 'primary', disabled: props.busy || props.aiBusy, onClick: props.onAi },
+                      props.aiBusy ? '正在开临时会话…' : '让 AI 装好环境'
+                    )
                   : null,
+                h(Btn, { disabled: props.busy || props.aiBusy, onClick: props.onRecheck }, t('recheck')),
                 props.preflight && props.preflight.checkedAt
                   ? h('span', { className: 'dsa-hint' }, t('checkedAt') + ' ' + props.preflight.checkedAt.replace('T', ' ').slice(0, 19))
                   : null
