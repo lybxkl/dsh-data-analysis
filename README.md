@@ -19,9 +19,34 @@
 ## 安装
 
 工作台只负责「跑、看、拦」，真正干活的是技能包 [SPSS-Style-Charting-Skill](https://github.com/lybxkl/SPSS-Style-Charting-Skill)。
-**先装技能，再装工作台。**
+**两步：装插件 → 让 AI 把环境装齐。**
 
-### 1. 装技能包（依赖）
+### 1. 装工作台（插件）
+
+`plugin_manager`，`action=install_bundle`，`target` 填**本目录的绝对路径**。
+图形界面下的等价操作是 **插件 → 添加插件 → 选本地目录**。
+
+装好刷新页面，侧栏出现「实证研究工作台」图标。已装过的重装/重载：先 `set_plugin` 停用再启用
+（`target` 用 entry id `include:data-analysis`），或直接重启 DSH。
+
+> 改了 host 侧代码（`src/*.js`、`index.js`）要重启 DSH 才生效；只改 `client.js` 刷新页面即可。
+
+### 2. 让 AI 把环境装好
+
+打开面板。环境没齐时它不会让你往下做，而是先拦在「环境还没就绪」这一屏，点**「让 AI 装好环境」**：
+工作台会开一个临时会话，把安装清单交给那个会话里的 Agent，它会自己去
+
+- `git clone` 技能包并放进 `~/.agents/skills/`（或 `~/.dsh/skills/`）；
+- 检查 Python：没有就装最新的 Python 3（Windows `winget install Python.Python.3.13`，macOS `brew install python`，Linux 用发行版包管理器）；
+- `pip install` 那 9 个依赖；
+- 装完自己跑一遍 `data_analysis_doctor`，必要时把 `pythonPath` / `skillRoot` 填进设置。
+
+装完回到面板，它每 12 秒复查一次，环境齐了就自动放行。也可以直接在对话里说「把实证研究工作台的环境装好」。
+
+> 面板是「拦住」不是「提示」：`skillRoot` 解析不到、Python 跑不起来、依赖缺任何一个，工作台主体都不显示，
+> 只给「让 AI 装好环境 / 手动配置 / 重新检查」三个出口。Mac 上没有 Word COM 属于平台限制，判为「判不了」，不拦。
+
+### 备选：手动装
 
 DSH 从这些目录发现技能：`~/.agents/skills`（用户级）、`~/.dsh/skills`、`<工作区>/.dsh/skills`、`<工作区>/.agents/skills`。
 技能包要能放在「`SKILL.md` 直接在这一层」的位置。
@@ -43,18 +68,6 @@ pip3 install -r SPSS-Style-Charting-Skill/requirements.txt
 
 装好后 `~/.agents/skills/empirical-research-pipeline/SKILL.md` 应该存在，DSH 的技能目录里能看到它。
 技能装在哪只决定 Agent 能不能自己调用它；工作台的 `skillRoot` 指向同一份包，两边可以共用一个 clone。
-
-### 2. 装工作台（插件）
-
-用 DSH 的插件管理装本地包：`plugin_manager`，`action=install_bundle`，`target` 填**本目录的绝对路径**。
-图形界面下的等价操作是 **插件 → 添加插件 → 选本地目录**。
-
-装好刷新页面，侧栏出现「实证研究工作台」图标。已装过的重装/重载：先 `set_plugin` 停用再启用
-（`target` 用 entry id `include:data-analysis`），或直接重启 DSH。
-
-> 改了 host 侧代码（`src/*.js`、`index.js`）要重启 DSH 才生效；只改 `client.js` 刷新页面即可。
-
-### 3. 指一下技能在哪
 
 `skillRoot` 留空时会按顺序探测 `~/.agents/skills/empirical-research-pipeline`、`~/.dsh/skills/empirical-research-pipeline`、
 `~/SPSS-Style-Charting-Skill` 等常见位置。探测不到就在设置里手填——指向**仓库根**或**其中的
@@ -85,9 +98,11 @@ pip3 install -r SPSS-Style-Charting-Skill/requirements.txt
 | 阶段脚本 | 8 个阶段登记的脚本（含 `steps`）都在 | 对应阶段运行即报「脚本不存在」 |
 | Python | 能执行 `pythonPath -c ...`，版本 ≥ 3.9 | 所有脚本阶段都跑不起来 |
 | 依赖 | `pandas`、`numpy`、`scipy`、`statsmodels`、`matplotlib`、`fitz`(PyMuPDF)、`docx`(python-docx)、`openpyxl`、`PIL`(Pillow) 可导入 | 审计/统计/图表/终检按缺的包失败 |
-| Word→PDF | `pywin32` 可导入（另需本机 Word） | **warn**，只影响 Word 转 PDF，其它阶段不受影响 |
+| Word→PDF | `pywin32` 可导入（另需本机 Word） | Windows 上 **warn**，只影响 Word 转 PDF；macOS/Linux 判「判不了」（没有 COM） |
 
-自检只读探测：**不安装任何东西、不修改技能包**；缺包时给出 `pip install ...` 建议，由用户决定。改过 `skillRoot` / `pythonPath` 会立即作废旧结论并重查；结果缓存 5 分钟，面板上可点「重新检查」。
+自检只读探测：**不安装任何东西、不修改技能包**。有 fail 项时面板会被整块拦住（顶栏还在），给三个出口：
+「让 AI 装好环境」（开临时会话自动装）、「手动配置」（设置弹窗自己填路径）、「重新检查」。被拦期间面板每 12 秒强制复查一次。
+改过 `skillRoot` / `pythonPath` 会立即作废旧结论并重查；平时结果缓存 5 分钟，设置里可点「重新检查」。
 
 ## 9 个阶段
 
@@ -118,6 +133,9 @@ pip3 install -r SPSS-Style-Charting-Skill/requirements.txt
 
 面板是三段式工作区：左边阶段、中间当前阶段、右边运行台。**面板不自己算结论**，
 所有状态都来自服务端快照（闸门三态、运行记录、产物解析都在 host 侧算好）。
+
+打开面板时先过一道**环境闸门**：技能包 / 阶段脚本 / Python / 依赖有任何一项 fail，主体就不显示，
+只留「让 AI 装好环境｜手动配置｜重新检查」和一屏检查结果——九个阶段都靠这份环境跑，缺了它点进去也是白点。
 
 ```
 实证研究工作台 · <项目名>          [技能包就位 · v]   AI 接手▾   项目▾   运行台   刷新
@@ -351,11 +369,15 @@ PowerPoint `SaveAs(24)`。转换前先把文件复制到系统临时目录，免
 ## 测试
 
 ```bash
+npm test                         # = materials + client-smoke
 node tests/materials.test.mjs    # 通道分类、挂载、迁移、识图全流程、来源账（全在临时目录里造数据）
+node tests/client-smoke.test.mjs # 不开浏览器，用假 React 把面板渲染成树：环境闸门 / 主界面两条路径
 node tests/e2e-corpus.test.mjs   # 真实语料端到端（有材料包才跑；用 DSA_PROJECT / DSA_SOURCE 指定路径）
 ```
 
 识图小节用假模型跑，不花 token；真实模型只在面板里手工试。
+`client-smoke` 会把 `client.js` 的两个 `useState` 初值替换成测试夹具再渲染，所以它同时是个结构探针：
+面板里那几行初始化被改写，测试会直接报「结构变了」，提醒同步更新。
 
 ## 第 9 阶段：复核与修订（完整闭环）
 

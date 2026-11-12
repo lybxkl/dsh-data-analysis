@@ -410,6 +410,72 @@
         if (layout && typeof layout.selectPanel === 'function') layout.selectPanel('data-analysis');
       }
 
+      /* ------------------------------------------------------------------ *
+       * 让 AI 装环境：开一个临时会话，把「装什么、怎么验」一次说清
+       * 会话由宿主建（sessions.create + retain + prompt），工作台不自己实现聊天。
+       * ------------------------------------------------------------------ */
+
+      var ENV_PROMPT = [
+        '帮我把「实证研究工作台」（DSH 插件 dsh-data-analysis）的运行环境一次性装好，装完自己验一遍再回话。',
+        '',
+        '需要两样东西：',
+        '',
+        '1) 技能包 empirical-research-pipeline',
+        '   仓库：https://github.com/lybxkl/SPSS-Style-Charting-Skill',
+        '   做法：git clone 到临时目录，把里面的 empirical-research-pipeline 整个目录复制到 ~/.agents/skills/',
+        '   （Windows 是 %USERPROFILE%\\.agents\\skills\\）。装完确认 ~/.agents/skills/empirical-research-pipeline/SKILL.md 存在。',
+        '',
+        '2) Python 3.9+ 与依赖',
+        '   依赖：pandas numpy scipy statsmodels matplotlib PyMuPDF python-docx openpyxl Pillow',
+        '   没有 Python（或低于 3.9）就先装最新的 Python 3：Windows 用 winget install Python.Python.3.13 或官网安装包，',
+        '   macOS 用 brew install python，Linux 用发行版的包管理器。',
+        '   然后 pip install -r <技能仓库>/requirements.txt；缺哪个包单独补装也行。',
+        '   Windows 上还想用 Word→PDF 这一步的话，再装 pywin32（可选，缺了只影响那一步）。',
+        '',
+        '装完请依次做：',
+        '- 调 data_analysis_doctor 自查，把每一项结果原样贴出来；',
+        '- 如果 Python 不在 PATH，或用的是别的解释器，用 data_analysis_configure 把 pythonPath 设成绝对路径；',
+        '- 如果技能包装在别处，用 data_analysis_configure 把 skillRoot 指过去（仓库根或包目录都行）；',
+        '- 再调一次 data_analysis_doctor 确认全部通过。',
+        '',
+        '约束：不要动用户的研究资料，不要修改技能包里的脚本，不要装上面没提到的软件。',
+        '最后用一句话说明「环境已就绪」，并附上 Python 可执行文件路径与版本。'
+      ].join('\n');
+
+      /**
+       * 开一个临时会话并把安装提示词投进去。
+       * 用自己的一条 ref，不碰 runtime.ref（那是「研究对话」在用的），失败一律如实抛出。
+       */
+      function startInstallSession(cwd) {
+        var sessions = sessionService();
+        if (!sessions || typeof sessions.create !== 'function') {
+          return Promise.reject(new Error('宿主没有会话服务，开不了临时会话'));
+        }
+        if (runtime.installRef) {
+          try {
+            runtime.installRef.release();
+          } catch (e) {
+            /* ignore */
+          }
+          runtime.installRef = null;
+        }
+        var created = typeof cwd === 'string' && cwd ? sessions.create({ cwd: cwd }) : sessions.create({});
+        return Promise.resolve(created).then(function (sessionId) {
+          var ref = sessions.retain(sessionId, { source: 'gateway' });
+          return Promise.resolve(ref.ready).then(function () {
+            runtime.installRef = ref;
+            return ref.binding.session.prompt([{ type: 'text', text: ENV_PROMPT }], 'queue');
+          }).then(function (result) {
+            if (!result || result.ok !== true) {
+              var detail = result && result.error && (result.error.message || result.error.code);
+              throw new Error('投递失败：' + (detail || '宿主拒绝了这条消息'));
+            }
+            openConversation(sessionId);
+            return sessionId;
+          });
+        });
+      }
+
       function textOfBlocks(content) {
         if (!Array.isArray(content)) return '';
         var out = [];
@@ -1242,6 +1308,61 @@
         );
       }
 
+      /** 环境不全（有 error 级检查没通过）时，工作台整体不可用。还没查到结论时不算拦。 */
+      function envBlocked(pre) {
+        if (!pre) return false;
+        if (pre.status === 'fail') return true;
+        return (pre.checks || []).some(function (item) { return item.status === 'fail'; });
+      }
+
+      /**
+       * 环境闸门：拦在整个工作台前面。
+       * 只有两条出路——让 AI 装好，或者自己去设置里填路径；判不了/warn 不算拦（Mac 上没有 Word COM 是正常的）。
+       */
+      function EnvGate(props) {
+        var pre = props.preflight;
+        var fails = (pre && pre.checks ? pre.checks : []).filter(function (item) { return item.status === 'fail'; });
+        return h(
+          'div',
+          { className: 'dsa-main', style: { overflow: 'auto' } },
+          h(
+            'div',
+            { className: 'dsa-card dsa-pad', style: { maxWidth: '760px', margin: '28px auto', padding: '22px 24px' } },
+            h('h1', { className: 'dsa-h1', style: { marginBottom: '6px' } }, '环境还没就绪'),
+            h(
+              'p',
+              { className: 'dsa-sub', style: { marginTop: 0 } },
+              '工作台不自己算数：脚本来自技能包，跑在 Python 子进程里。这两样缺一样，九个阶段一个都跑不起来，所以先把环境装齐再进来。'
+            ),
+            fails.length
+              ? h(
+                  'div',
+                  { className: 'dsa-hint', style: { marginBottom: '8px' } },
+                  '卡住的是：' + fails.map(function (item) { return item.label; }).join('、') + '（共 ' + fails.length + ' 项）'
+                )
+              : null,
+            h(PreflightList, { preflight: pre }),
+            h(
+              'div',
+              { className: 'dsa-inline', style: { marginTop: '16px', gap: '8px', flexWrap: 'wrap' } },
+              h(
+                Btn,
+                { variant: 'primary', disabled: props.busy, onClick: props.onAi },
+                props.busy ? '正在开临时会话…' : '让 AI 装好环境'
+              ),
+              h(Btn, { variant: 'ghost', onClick: props.onSettings }, '手动配置'),
+              h(Btn, { variant: 'ghost', disabled: props.busy, onClick: props.onRecheck }, t('recheck'))
+            ),
+            h(
+              'div',
+              { className: 'dsa-hint', style: { marginTop: '10px' } },
+              '点「让 AI 装好环境」会开一个临时会话：它自己 clone 技能包、装 Python 依赖（机器上没有 Python 的话连 Python 一起装），再用 data_analysis_doctor 自查。装完回到这里会自动复查，通过后就能正常使用。'
+            ),
+            props.note ? h('div', { className: 'dsa-error', style: { marginTop: '8px' } }, props.note) : null
+          )
+        );
+      }
+
       /* ------------------------------------------------------------------ *
        * 面板
        * ------------------------------------------------------------------ */
@@ -1302,6 +1423,13 @@
         var preflightState = useState(null);
         var preflight = preflightState[0];
         var setPreflight = preflightState[1];
+        // 环境闸门：开临时会话让 AI 装环境时的状态
+        var envBusyState = useState(false);
+        var envBusy = envBusyState[0];
+        var setEnvBusy = envBusyState[1];
+        var envNoteState = useState('');
+        var envNote = envNoteState[0];
+        var setEnvNote = envNoteState[1];
 
         var measureRoot = useCallback(function () {
           var el = rootRef.current;
@@ -1560,6 +1688,55 @@
             return json;
           });
         }, [action]);
+
+        /* ---------------- 环境闸门 ---------------- */
+
+        // 让 AI 装环境：开临时会话投递安装提示词，然后把界面切过去
+        var doAiInstall = useCallback(function () {
+          setEnvNote('');
+          setEnvBusy(true);
+          var cwd = snap && snap.active ? snap.active.path : '';
+          return startInstallSession(cwd)
+            .then(function (sessionId) {
+              setEnvNote('已在新会话里开始安装（' + String(sessionId).slice(0, 22) + '…）。装完回到这里会自动复查。');
+              return sessionId;
+            })
+            .catch(function (e) {
+              setEnvNote('没能开出临时会话：' + String((e && e.message) || e) + '。可以点「手动配置」自己填路径，或直接在对话里新建一个会话让我装。');
+              return null;
+            })
+            .then(function (value) {
+              setEnvBusy(false);
+              return value;
+            });
+        }, [snap]);
+
+        // 被环境挡住时每 12 秒强制复查一次：AI 那边装完，这里应该自己放行。
+        // 用 refresh 而不是取缓存的 /preflight —— 否则最长要等 5 分钟缓存过期才看到变化。
+        var envBlockedNow = envBlocked(preflight);
+        useEffect(function () {
+          if (!envBlockedNow) return undefined;
+          var stopped = false;
+          var inflight = false;
+          var timer = setInterval(function () {
+            if (inflight) return;
+            inflight = true;
+            request('POST', '/preflight/refresh', {})
+              .then(function (json) {
+                if (!stopped && json && json.preflight) setPreflight(json.preflight);
+              })
+              .catch(function () {
+                /* 复查失败不打扰，下一轮再说 */
+              })
+              .then(function () {
+                inflight = false;
+              });
+          }, 12000);
+          return function () {
+            stopped = true;
+            clearInterval(timer);
+          };
+        }, [envBlockedNow]);
 
         /* ---------------- 研究对话 ---------------- */
 
@@ -2785,7 +2962,16 @@
           drawer && width !== 'wide'
             ? h('div', { className: 'dsa-scrim', onClick: function () { setDrawer(false); } })
             : null,
-          h('div', { className: 'dsa-body' }, rail, main, side),
+          envBlockedNow
+            ? h(EnvGate, {
+                preflight: preflight,
+                busy: envBusy,
+                note: envNote,
+                onAi: doAiInstall,
+                onSettings: function () { setDialog({ kind: 'settings' }); },
+                onRecheck: doRecheck
+              })
+            : h('div', { className: 'dsa-body' }, rail, main, side),
           dialog ? renderDialog(dialog) : null
         );
 
@@ -2843,6 +3029,7 @@
               preflight: preflight,
               config: snap && snap.config,
               onRecheck: doRecheck,
+              onAi: doAiInstall,
               onCancel: function () { setDialog(null); },
               onConfirm: function (patch) {
                 action('/config', { patch: patch }).then(function (json) {
@@ -3305,6 +3492,9 @@
                 'div',
                 { className: 'dsa-inline', style: { marginTop: '4px' } },
                 h(Btn, { variant: 'ghost', disabled: props.busy, onClick: props.onRecheck }, t('recheck')),
+                props.onAi
+                  ? h(Btn, { variant: 'ghost', disabled: props.busy, onClick: props.onAi }, '让 AI 装好环境')
+                  : null,
                 props.preflight && props.preflight.checkedAt
                   ? h('span', { className: 'dsa-hint' }, t('checkedAt') + ' ' + props.preflight.checkedAt.replace('T', ' ').slice(0, 19))
                   : null

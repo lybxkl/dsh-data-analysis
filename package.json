@@ -47,8 +47,9 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node tests/materials.test.mjs",
-    "test:e2e": "node tests/e2e-corpus.test.mjs"
+    "test": "node tests/materials.test.mjs && node tests/client-smoke.test.mjs",
+    "test:e2e": "node tests/e2e-corpus.test.mjs",
+    "test:client": "node tests/client-smoke.test.mjs"
   },
   "keywords": [
     "dsh",
