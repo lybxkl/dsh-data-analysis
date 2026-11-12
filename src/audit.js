@@ -653,6 +653,38 @@ function figureSummary(rows) {
 }
 
 /** 把项目里所有产物扫一遍，返回面板要的只读快照。 */
+/**
+ * manuscript.json 的现状：第 7 阶段真正吃的是它，docx 只是产物。
+ * 骨架里会留「待补」占位段，这里数出来，面板才能说清「还差几段正文」。
+ */
+export function readManuscriptSpec(projectRoot) {
+  const rel = 'manuscript.json';
+  const file = path.join(projectRoot, rel);
+  const info = statOf(file);
+  if (!info.exists) return { rel, exists: false };
+  let data = null;
+  let error = '';
+  try {
+    data = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (err) {
+    error = String(err && err.message ? err.message : err).slice(0, 160);
+  }
+  const blocks = Array.isArray(data && data.blocks) ? data.blocks : [];
+  const typeOf = (block) => String((block && block.type) || '');
+  const isPlaceholder = (block) => typeOf(block) === 'para' && /待补|待写|TODO/.test(String(block.text || ''));
+  return {
+    rel,
+    exists: true,
+    bytes: info.size,
+    mtimeMs: info.mtimeMs,
+    error,
+    blocks: blocks.length,
+    figures: blocks.filter((block) => typeOf(block) === 'figure').length,
+    tables: blocks.filter((block) => typeOf(block) === 'table').length,
+    placeholders: blocks.filter(isPlaceholder).length,
+  };
+}
+
 export function scanArtifacts(projectRoot) {
   const figures = readFigures(projectRoot);
   const enriched = figures.rows.map((row) => ({ ...row, badges: figureBadges(row) }));
@@ -674,7 +706,7 @@ export function scanArtifacts(projectRoot) {
     models: readModels(projectRoot),
     verify: readVerify(projectRoot),
     qa: readQaReports(projectRoot),
-    manuscript: statOf(path.join(projectRoot, 'output', 'manuscript.docx')),
+    manuscript: { ...statOf(path.join(projectRoot, 'output', 'manuscript.docx')), spec: readManuscriptSpec(projectRoot) },
     analysisRel: analysisTarget.rel,
     analysisCsv: statOf(analysisTarget.abs),
     analysis: readAnalysisSummary(projectRoot),

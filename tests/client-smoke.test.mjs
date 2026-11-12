@@ -530,6 +530,48 @@ scenario(
   },
 );
 
+/* 7b. 手稿骨架：第 7 阶段的输入文件脚本造不出来，面板要给它一条入口 */
+const MANUSCRIPT_STAGES = STAGES.concat([
+  stage('figures', 5, '出版级图表', 'todo', []),
+  stage('manuscript', 6, '文稿组装', 'todo', []),
+  stage('qa', 7, '终检与复核', 'todo', []),
+]);
+scenario(
+  '手稿骨架：还没有 manuscript.json',
+  {
+    selected: 'manuscript',
+    snap: Object.assign({}, SNAP, {
+      stages: MANUSCRIPT_STAGES,
+      artifacts: Object.assign({}, SNAP.artifacts, { manuscriptSpec: { exists: false } }),
+    }),
+  },
+  (tree, text) => {
+    check(text.includes('还没有 manuscript.json'), '说清缺什么');
+    check(text.includes('生成手稿骨架'), '给「生成手稿骨架」按钮');
+    check(!text.includes('让 AI 写成正文'), '没有骨架时不给改稿按钮');
+    check(!text.includes('undefined'), '没有 undefined 漏到界面上');
+  },
+);
+scenario(
+  '手稿骨架：结构在但正文还空着',
+  {
+    selected: 'manuscript',
+    snap: Object.assign({}, SNAP, {
+      stages: MANUSCRIPT_STAGES,
+      artifacts: Object.assign({}, SNAP.artifacts, {
+        manuscriptSpec: { exists: true, blocks: 7, figures: 3, tables: 1, placeholders: 2 },
+      }),
+    }),
+  },
+  (tree, text) => {
+    check(text.includes('manuscript.json 已就绪'), '说清现状');
+    check(text.includes('待补 2 段'), '把待补段落数摆出来');
+    check(text.includes('让 AI 写成正文'), '给「让 AI 写成正文」按钮');
+    check(text.includes('重排骨架'), '已有文件时按钮改成重排');
+    check(!text.includes('undefined'), '没有 undefined 漏到界面上');
+  },
+);
+
 /* 8. 运行台 / 运行日志的边界：没有运行记录、没有日志 */scenario('没有运行记录', { snap: Object.assign({}, SNAP, { runs: [], activeRuns: {} }) }, (tree, text) => {
   check(hasClass(tree, 'dsa-side'), '右运行台仍在');
   check(!text.includes('undefined'), '没有 undefined 漏到界面上');

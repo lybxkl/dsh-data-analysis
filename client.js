@@ -1881,6 +1881,13 @@
         var envNoteState = useState('');
         var envNote = envNoteState[0];
         var setEnvNote = envNoteState[1];
+        // 手稿骨架：生成 / 取改稿说明时各自按钮转圈，文案各自记
+        var manBusyState = useState('');
+        var manBusy = manBusyState[0];
+        var setManBusy = manBusyState[1];
+        var manNoteState = useState('');
+        var manNote = manNoteState[0];
+        var setManNote = manNoteState[1];
 
         var measureRoot = useCallback(function () {
           var el = rootRef.current;
@@ -2139,6 +2146,61 @@
             return json;
           });
         }, [action]);
+
+        /* ---------------- 手稿骨架 ---------------- */
+
+        var doScaffold = useCallback(function (overwrite) {
+          setManBusy('scaffold');
+          setManNote('');
+          return request('POST', '/manuscript/scaffold', { overwrite: Boolean(overwrite) })
+            .then(function (json) {
+              if (!json || !json.ok) {
+                setManNote((json && json.error) || t('actionFail'));
+                return json;
+              }
+              setManNote(
+                '已生成 ' + json.file + '：' + json.blocks + ' 块（图 ' + json.figures + ' / 表 ' + json.tables + ' / 待补 ' + json.placeholders + '）'
+              );
+              return load(true).then(function () {
+                return json;
+              });
+            })
+            .catch(function (e) {
+              setManNote(String((e && e.message) || e));
+              return { ok: false };
+            })
+            .then(function (json) {
+              setManBusy('');
+              return json;
+            });
+        }, [load]);
+
+        var doBrief = useCallback(function () {
+          setManBusy('brief');
+          setManNote('');
+          return request('GET', '/manuscript/brief')
+            .then(function (json) {
+              if (!json || !json.ok) {
+                setManNote((json && json.error) || t('actionFail'));
+                return json;
+              }
+              var dir = snap && snap.active && snap.active.path;
+              var sid = snap && snap.active && snap.active.sessionId;
+              return deliverText(json.text, dir, sid).then(function (result) {
+                if (result && result.state) setSnap(result.state);
+                setManNote((result && result.warning) || '已把改稿说明投进研究对话');
+                return json;
+              });
+            })
+            .catch(function (e) {
+              setManNote(String((e && e.message) || e));
+              return { ok: false };
+            })
+            .then(function (json) {
+              setManBusy('');
+              return json;
+            });
+        }, [snap, deliverText]);
 
         /* ---------------- 环境闸门 ---------------- */
 
@@ -3328,6 +3390,80 @@
           kpiOf('fail', '闸门未过', gateTotals.fail || 0, '项', false)
         );
 
+        // 手稿骨架：第 7 阶段的输入文件脚本造不出来，给它一条明确的入口，别让人猜
+        var manuscriptBlock = null;
+        if (current && current.id === 'manuscript') {
+          var spec = (snap && snap.artifacts && snap.artifacts.manuscriptSpec) || { exists: false };
+          var specTitle = !spec.exists
+            ? '还没有 manuscript.json'
+            : spec.error
+              ? 'manuscript.json 解析失败'
+              : 'manuscript.json 已就绪';
+          var specParts = [];
+          if (spec.exists && !spec.error) {
+            specParts.push('块 ' + spec.blocks);
+            specParts.push('图 ' + spec.figures);
+            specParts.push('表 ' + spec.tables);
+            if (spec.placeholders) specParts.push('待补 ' + spec.placeholders + ' 段');
+          }
+          manuscriptBlock = h(
+            'div',
+            { className: 'dsa-section', style: { marginTop: '14px' } },
+            h('h3', null, '手稿骨架'),
+            h(
+              'div',
+              { className: 'dsa-card dsa-pad' },
+              h(
+                'div',
+                { className: 'dsa-inline', style: { justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' } },
+                h(
+                  'div',
+                  { style: { minWidth: '0' } },
+                  h('div', { style: { fontSize: '12.5px', fontWeight: 600 } }, specTitle),
+                  h(
+                    'div',
+                    { className: 'dsa-hint', style: { marginTop: '3px' } },
+                    specParts.length
+                      ? specParts.join(' · ')
+                      : '这一阶段吃项目根的 manuscript.json；工作台只按图表清单拼结构，正文留「待补」，不编数字。'
+                  )
+                ),
+                h(
+                  'div',
+                  { className: 'dsa-inline', style: { flex: '0 0 auto', gap: '8px' } },
+                  h(
+                    Btn,
+                    {
+                      variant: spec.exists ? 'default' : 'primary',
+                      disabled: !!manBusy,
+                      title: spec.exists ? '按图表清单重排骨架（会冲掉现有正文）' : '按图表清单生成骨架',
+                      onClick: function () {
+                        doScaffold(spec.exists);
+                      }
+                    },
+                    manBusy === 'scaffold' ? '生成中…' : spec.exists ? '重排骨架' : '生成手稿骨架'
+                  ),
+                  spec.exists
+                    ? h(
+                        Btn,
+                        { variant: 'primary', disabled: !!manBusy, title: '把改稿说明投进研究对话', onClick: doBrief },
+                        manBusy === 'brief' ? '投递中…' : '让 AI 写成正文'
+                      )
+                    : null
+                )
+              ),
+              spec.exists && spec.placeholders
+                ? h(
+                    'div',
+                    { className: 'dsa-hint', style: { marginTop: '7px' } },
+                    '正文还没写：「待补」段落要按改稿说明补成真正段落，写进去的每个数字都要能追到 output/models/ 或 output/dataset/analysis.csv。'
+                  )
+                : null,
+              manNote ? h('div', { className: 'dsa-hint', style: { marginTop: '7px' } }, manNote) : null
+            )
+          );
+        }
+
         var main = h(
           'div',
           { className: 'dsa-main' },
@@ -3377,6 +3513,7 @@
             )
           ),
           kpiStrip,
+          manuscriptBlock,
           nextView,
           error ? h('div', { className: 'dsa-error', role: 'alert', style: { margin: '10px 0' } }, error) : null,
           hasScript

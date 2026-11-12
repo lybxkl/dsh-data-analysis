@@ -20,7 +20,7 @@ import {
 import { evaluateProject, summarizeStages, gateTotals } from './gates.js';
 import { createProject, projectId, readProject, writeProject, runsDir } from './projects.js';
 import { fingerprint, resolveSkillRoot, resolveStageScript, listScripts } from './skill.js';
-import { clearCorpusScan, scanArtifacts } from './audit.js';
+import { clearCorpusScan, readFigures, readManuscriptSpec, scanArtifacts } from './audit.js';
 import { runPreflight } from './preflight.js';
 import { buildTaskCard } from './taskcard.js';
 import { applyPatch, buildEvidence, fileHash, readIssues, recheckSummary, writeIssues } from './recheck.js';
@@ -64,6 +64,33 @@ const CARD_MOUNT_NOTE = {
   'missing-target': '源目录不在了',
   retargeted: '挂载指到了别的目录',
 };
+
+/** 手稿骨架里的占位段落：明确说「数字要有出处」，也不含任何数字本身。 */
+const MANUSCRIPT_PLACEHOLDER =
+  '待补：这一节的论证、数据口径与主要发现。写进去的每个数字都要能在 output/models/ 或 output/dataset/analysis.csv 里找到原值。';
+
+/** 中文小序号，够手稿的分节用；超了就直接用阿拉伯数字，不硬凑。 */
+const CN_NUM = [
+  '一', '二', '三', '四', '五', '六', '七', '八', '九', '十',
+  '十一', '十二', '十三', '十四', '十五', '十六', '十七', '十八', '十九', '二十',
+];
+
+/** 手稿里默认挂的模型表：存在且有数据行才放进去。 */
+const MANUSCRIPT_TABLES = [
+  { csv: 'output/models/coef_all.csv', caption: '模型系数汇总' },
+  { csv: 'output/models/descriptives.csv', caption: '描述统计' },
+  { csv: 'output/models/fit.csv', caption: '模型拟合指标' },
+];
+
+/** CSV 里除了表头还有没有数据行。 */
+function csvHasRows(file) {
+  try {
+    const text = fs.readFileSync(file, 'utf8');
+    return text.split(/\r?\n/).filter((line) => line.trim()).length > 1;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * 脚本找不到时，把「为什么找不到」说清楚。
@@ -1213,6 +1240,7 @@ export class Workbench {
       },
       analysis: artifacts.analysis,
       manuscript: artifacts.manuscript.exists ? artifacts.manuscript.size : 0,
+      manuscriptSpec: artifacts.manuscript.spec || { exists: false },
       analysisCsv: artifacts.analysisCsv.exists ? artifacts.analysisCsv.size : 0,
       tables: artifacts.tables,
     };
@@ -1390,6 +1418,116 @@ export class Workbench {
     const lines = this.runner.logTail(runId, limit);
     const run = this.runner.getRun(runId);
     return { ok: Boolean(run), run, lines };
+  }
+
+  /* ----------------------------- 手稿骨架 ----------------------------- */
+
+  /**
+   * 第 7 阶段吃的是 manuscript.json，而这个文件只有人/模型能写。
+   * 这里把「机械的部分」拼好：图表清单里的每个 section、图块与题注、模型表。
+   * 正文段落留成「待补」占位——骨架不放任何自己编的数字，第 8 阶段报出来的
+   * 数字问题就都是真的，不会被骨架自己制造的假错淹掉。
+   */
+  manuscriptScaffold({ overwrite = false } = {}) {
+    const active = this.active();
+    if (!active.ok) return { ok: false, error: active.error };
+    const root = active.path;
+    const rel = 'manuscript.json';
+    const specPath = path.join(root, rel);
+    if (fs.existsSync(specPath) && !overwrite) {
+      return {
+        ok: false,
+        error: 'manuscript.json 已经存在（可能是你或 AI 改过的稿子）。确认要重排骨架，请显式 overwrite。',
+        file: rel,
+      };
+    }
+
+    const blocks = [{ type: 'title', text: String(active.project.name || '').trim() || '（标题待写）' }];
+    blocks.push({ type: 'heading', level: 1, text: `${CN_NUM[0]}、研究设计` });
+    blocks.push({ type: 'para', text: MANUSCRIPT_PLACEHOLDER });
+
+    const figureRows = (readFigures(root).rows || []).filter(
+      (row) => row && row.png && String(row.status || 'ok') === 'ok',
+    );
+    const groups = [];
+    for (const row of figureRows) {
+      const name = String(row.section || '').trim() || '其他图表';
+      let group = groups.find((item) => item.name === name);
+      if (!group) {
+        group = { name, rows: [] };
+        groups.push(group);
+      }
+      group.rows.push(row);
+    }
+    let headingIndex = 1;
+    for (const group of groups) {
+      const label = CN_NUM[headingIndex] || String(headingIndex + 1);
+      blocks.push({ type: 'heading', level: 1, text: `${label}、${group.name.replace(/^[A-Z]\s*/, '')}` });
+      blocks.push({ type: 'para', text: MANUSCRIPT_PLACEHOLDER });
+      headingIndex += 1;
+      for (const row of group.rows) {
+        const block = {
+          type: 'figure',
+          png: `output/chart_pack/${String(row.png).replace(/^\/+/, '')}`,
+          caption: String(row.caption || row.question || '').trim() || '（图题待写）',
+        };
+        const n = Number(row.n);
+        if (Number.isFinite(n) && n > 0) block.n = n;
+        blocks.push(block);
+      }
+    }
+
+    const tables = MANUSCRIPT_TABLES.filter((item) => csvHasRows(path.join(root, item.csv)));
+    if (tables.length) {
+      const label = CN_NUM[headingIndex] || String(headingIndex + 1);
+      blocks.push({ type: 'heading', level: 1, text: `${label}、模型与描述统计` });
+      blocks.push({ type: 'para', text: MANUSCRIPT_PLACEHOLDER });
+      for (const item of tables) blocks.push({ type: 'table', csv: item.csv, caption: item.caption });
+    }
+
+    fs.writeFileSync(specPath, `${JSON.stringify({ style: {}, page: {}, blocks }, null, 2)}\n`, 'utf8');
+    this.invalidateSummary();
+    this.onChange({ kind: 'manuscript-scaffold', file: rel });
+    const spec = readManuscriptSpec(root);
+    return {
+      ok: true,
+      file: rel,
+      overwritten: Boolean(overwrite),
+      figures: figureRows.length,
+      tables: tables.length,
+      sections: groups.length,
+      blocks: blocks.length,
+      placeholders: blocks.filter((block) => block.type === 'para').length,
+      spec,
+      brief: this.manuscriptBrief(spec),
+    };
+  }
+
+  /** 交给会话的改稿说明：说清哪些不许动、数字从哪来、跑完看什么。 */
+  manuscriptBrief(spec = null) {
+    const active = this.active();
+    if (!active.ok) return { ok: false, error: active.error };
+    const root = active.path;
+    const state = spec || readManuscriptSpec(root);
+    const stateLine = state.exists
+      ? `${state.blocks} 块（图 ${state.figures} / 表 ${state.tables} / 待补段落 ${state.placeholders}）`
+      : '还没有 manuscript.json —— 先生成骨架';
+    const text = [
+      '【手稿正文】把第 7 阶段（文稿组装）的骨架写成正文',
+      '',
+      `项目目录：${root}`,
+      `manuscript.json：${stateLine}`,
+      '',
+      '怎么做：',
+      '1. 读 manuscript.json。figure 块的 png / caption / n 不要改——图注里的 N 是第 8 阶段核对的统计口径；只按论证需要调整顺序、补 note。',
+      '2. 把每个「待补」的 para 换成真正的段落（问题、数据、方法、发现、局限）。每个数字都要能在 output/models/*.csv 或 output/dataset/analysis.csv 里找到原值；找不到就补一张表，不要在正文里估一个数出来。',
+      '3. 正文至少引用每个图号一次（图1、图2…），图号从 1 连续；要加表就写 {"type":"table","csv":"output/models/coef_m1_probation.csv","caption":"…"}，数字由脚本从 CSV 取，不要抄进正文。',
+      '4. 只改 manuscript.json，写完自己 JSON.parse 一遍；不要动 output/ 下的产物，也不要改 data/ 里的资料。',
+      '5. 写完跑 data_analysis_run_stage(stageId="manuscript")，再跑终检，按 qa 报告逐条修。',
+      '',
+      '产物落点：output/manuscript.docx；闸门只认它和 manuscript.json。',
+    ].join('\n');
+    return { ok: true, text, spec: state };
   }
 
   /* ------------------------------- 裁定 ------------------------------- */

@@ -635,9 +635,20 @@ export function registerTools(ctx, workbench, helpers = {}) {
     return lines.join('\n');
   }
 
+  /** manuscript.json 的一行现状：没有 / 有但还没写正文 / 已经改过。 */
+  function manifestStatusLine(spec) {
+    if (!spec || !spec.exists) return 'manuscript.json：还没有 —— 第 7 阶段会报「spec not found」，先 action=scaffold 生成骨架';
+    if (spec.error) return `manuscript.json：解析失败（${spec.error}）—— 先修 JSON 再跑第 7 阶段`;
+    const parts = [`${spec.blocks} 块`, `图 ${spec.figures}`, `表 ${spec.tables}`];
+    if (spec.placeholders) {
+      parts.push(`${spec.placeholders} 段待补`);
+      return `manuscript.json：${parts.join(' / ')} —— 结构可跑，但正文还没写（action=brief 拿改稿说明）`;
+    }
+    return `manuscript.json：${parts.join(' / ')} —— 没有待补段落了`;
+  }
+
   /** status 里的一行材料摘要；没挂任何材料时返回空串，不占版面。 */
-  function materialsLine(materials) {
-    if (!materials) return '';
+  function materialsLine(materials) {    if (!materials) return '';
     const mounts = materials.mounts || [];
     const sources = materials.sources || [];
     if (!mounts.length) {
@@ -733,6 +744,52 @@ export function registerTools(ctx, workbench, helpers = {}) {
         return { ok: true, text: lines.join('\n'), fixed: result.fixed };
       }
       return { ok: false, text: `不认识的 action：${action}（list|add|remove|mount|unmount|repair）` };
+    },
+  }));
+
+  register(defineTool({
+    name: 'data_analysis_manuscript',
+    description:
+      '第 7 阶段（文稿组装）的入场券：这一阶段吃的是项目根的 manuscript.json，工作台不会替你写它。'
+      + 'action=scaffold 按图表清单与模型表拼一份骨架（figure 块的 png/caption/n 已填好，正文段落留「待补」占位；'
+      + '不覆盖已有文件，要重排得显式 overwrite）；'
+      + 'action=brief 取一段「怎么把骨架写成正文」的说明（哪些字段不许改、数字从哪来、跑完看什么）；'
+      + 'action=status 只看 manuscript.json 现状（块数 / 图 / 表 / 还有几段待补）。'
+      + '骨架不放任何自己编的数字：写完第 8 阶段报出来的数字问题都是真的。',
+    parameters: {
+      action: { type: 'string', required: true, description: 'scaffold | brief | status' },
+      overwrite: { type: 'boolean', description: 'scaffold：覆盖已有的 manuscript.json（会冲掉人工/模型改过的稿子）' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '手稿骨架已更新') },
+    async execute(args) {
+      const action = String(args?.action || 'status');
+      if (action === 'status') {
+        const spec = workbench.manuscriptBrief();
+        if (!spec.ok) return { ok: false, error: spec.error, text: `读不到项目：${spec.error}` };
+        return { ok: true, text: manifestStatusLine(spec.spec), spec: spec.spec };
+      }
+      if (action === 'brief') {
+        const result = workbench.manuscriptBrief();
+        if (!result.ok) return { ok: false, error: result.error, text: `读不到项目：${result.error}` };
+        return { ok: true, text: result.text, spec: result.spec };
+      }
+      if (action === 'scaffold') {
+        const result = workbench.manuscriptScaffold({ overwrite: isTrue(args?.overwrite) });
+        if (!result.ok) return { ok: false, error: result.error, text: `没有生成骨架：${result.error}` };
+        return {
+          ok: true,
+          text: [
+            `已写出 ${result.file}：${result.blocks} 块（${result.sections} 个图表段 / 图 ${result.figures} / 表 ${result.tables} / 待补段落 ${result.placeholders}）`,
+            '骨架只保证结构可跑；正文要靠人/模型按 brief 改，改完再跑第 7 阶段。',
+            '',
+            result.brief,
+          ].join('\n'),
+          file: result.file,
+          spec: result.spec,
+          brief: result.brief,
+        };
+      }
+      return { ok: false, text: `不认识的 action：${action}（scaffold|brief|status）` };
     },
   }));
 

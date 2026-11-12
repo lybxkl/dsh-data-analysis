@@ -114,7 +114,7 @@ pip3 install -r SPSS-Style-Charting-Skill/requirements.txt
 | 4 | 数据集 | 人工 | `output/dataset/analysis.csv` |
 | 5 | 统计分析 | `auto_stats.py` | `output/models/coef_*.csv`、`fit*.csv` |
 | 6 | 出版级图表 | `auto_chart_pack.py` | `output/chart_pack/chart_manifest.csv` |
-| 7 | 文稿组装 | `assemble_manuscript.py` | `output/manuscript.docx` |
+| 7 | 文稿组装 | `assemble_manuscript.py` | `manuscript.json` → `output/manuscript.docx` |
 | 8 | 终检 | `qa_outputs.py` → `verify_numbers.py` | `output/qa/qa_report.json`、`output/verify/number_issues.csv` |
 | 9 | 复核与修订 | 机器复算 + 模型审计（无脚本） | `output/recheck/issues.jsonl`、`coverage.json`、`report.md` |
 
@@ -284,6 +284,9 @@ data_analysis_status
   **退出码 0 不等于阶段完成**，完成与否要下面那排闸门。
 - **KPI 条**：`有效语料 / 总体积 / 阶段完成 / 待裁定 / 闸门未过` 五个数。它们只做「一眼定位」，
   点进去还是以闸门为准——`闸门未过` 跳过还没开工的阶段，所以它不会因为「还没跑」而虚高。
+- **手稿骨架卡**：只在第 7 阶段出现。没有 `manuscript.json` 时只有一个「生成手稿骨架」按钮；
+  有了之后显示块数 / 图 / 表 / 还有几段「待补」，并多出「让 AI 写成正文」（把改稿说明投进研究对话）。
+  已有文件时按钮改成「重排骨架」——它会冲掉现有正文，所以别在有稿子时顺手点。
 - **人工裁定**：只有标了「人工」的闸门有「现在拍板」按钮；弹窗先摆证据（闸门结论、来源、阶段、
   最近一次运行），再让你写理由并选「确认通过 / 打回重做」。阶段重跑后旧裁定自动失效
   （详情里会写明两次时间），需要对新产物重新确认。未开工阶段不出现拍板按钮。
@@ -375,7 +378,14 @@ data_analysis_status
 - **统计**：`auto_stats.py` 默认找不到因变量会直接 exit 2（`no outcome column found; pass config.outcome`），
   项目里要先写 `config` / `spec` 指定 outcome 与模型，工作台只负责把命令跑起来。
 - **文稿**：`assemble_manuscript.py` 需要项目根的 `manuscript.json`，没有会报 `spec not found`；
-  所以文稿阶段不是「点了就出 docx」，缺 spec 时失败是正确行为。
+  所以文稿阶段不是「点了就出 docx」，缺 spec 时失败是正确行为。工作台给这条路开了口子：
+  `data_analysis_manuscript`（面板第 7 阶段的「手稿骨架」卡也走同一套）——
+  - `action=scaffold` 按 `chart_manifest.csv` 的 section 分组拼骨架：figure 块照抄 png / caption / n，
+    模型表转 table 块，正文段落一律留「待补」。**骨架里不出现任何自己编的数字**；已有 `manuscript.json` 时不覆盖，重排要显式 `overwrite`。
+  - `action=brief` 给一段改稿说明：figure 的 png / caption / n 不许改（N 是第 8 阶段的核对口径）、
+    每个数字都要追到 `output/models/*.csv` 或 `output/dataset/analysis.csv`、图号从 1 连续、写完自己 parse。
+  - `action=status` 只看现状（块数 / 图 / 表 / 还有几段待补）。
+  面板里对应「生成手稿骨架 → 让 AI 写成正文」两个按钮，后者会把改稿说明投进研究对话。
 
 ## 闸门的关键判定（来自源码，不来自文档叙述）
 
@@ -402,11 +412,12 @@ data_analysis_status
 - **未开工 ≠ 未过**：还没产物、没运行、也没裁定的阶段是「未开始」，不计入「未过」总数，也不画成 ✗。
 - **多步阶段**：终检是 `qa_outputs.py → verify_numbers.py` 两步；面板显示两步脚本名，参数在任务卡与运行日志里。
 
-## 模型工具（17 个）
+## 模型工具（18 个）
 
 `data_analysis_status`（状态与闸门）、`doctor`（环境自检）、`list_stages`、`figures`、`create_project`、`open_project`、
 `run_stage`、`run_log`、`cancel_stage`、`adjudicate`、`configure`、`draft`（起草文本）、`recheck`（复核）、`issue`（写问题）、
-`materials`（材料库：登记/挂载/摘下/修复）、`vision`（识图：计划/跑/核对）、`migrate`（旧副本换联接）。
+`materials`（材料库：登记/挂载/摘下/修复）、`vision`（识图：计划/跑/核对）、`migrate`（旧副本换联接）、
+`manuscript`（手稿骨架：scaffold / brief / status）。
 没有「转码」工具：doc/xls/ppt 交给会话或用户去转，工作台只负责分类与记账。
 状态类工具只回摘要与闸门，不回整份产物快照（避免一次读进 60 张图的全部列）。
 
@@ -415,7 +426,7 @@ data_analysis_status
 ```bash
 npm test                          # 下面七套全跑，一条命令（e2e 单独跑，见最后一行）
 node tests/materials.test.mjs     # 通道分类、挂载、迁移、识图全流程、来源账、移除项目（全在临时目录里造数据）
-node tests/runner.test.mjs        # 运行器视图与阶段命令：跑着的 run 有 status、可选 --config/--spec、并发阶段守卫
+node tests/runner.test.mjs        # 运行器视图与阶段命令：跑着的 run 有 status、可选 --config/--spec、并发阶段守卫、手稿骨架与改稿说明
 node tests/gates.test.mjs         # 闸门三态：pass / fail / unjudged 的边界，用合成项目逐条打
 node tests/recheck.test.mjs       # 复核与补丁：baseHash、越界、目录联接穿透、备份命名、12 项复算口径
 node tests/consistency.test.mjs   # 静态对账：文案键 / CSS 类 / 接口路径 / 工具名 / 快照字段

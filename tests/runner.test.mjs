@@ -205,5 +205,59 @@ section('三、并发阶段守卫');
   check('同一阶段重入仍被 runner 挡住', Boolean(cmd.ok));
 }
 
+/* -------------------- 四、手稿骨架：只拼结构、不编数字 -------------------- */
+
+section('四、手稿骨架与改稿说明');
+{
+  const bench = makeBench();
+  bench.wb.openProject(bench.proj);
+  const pack = path.join(bench.proj, 'output', 'chart_pack');
+  fs.mkdirSync(pack, { recursive: true });
+  fs.writeFileSync(
+    path.join(pack, 'chart_manifest.csv'),
+    [
+      'id,section,caption,png,n',
+      'F01,A 描述统计,样本描述,f01.png,320',
+      'F02,A 描述统计,,f02.png,320',
+      'F03,B 回归结果,基准模型,f03.png,318',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  fs.writeFileSync(path.join(pack, 'f01.png'), 'x', 'utf8');
+  fs.mkdirSync(path.join(bench.proj, 'output', 'models'), { recursive: true });
+  fs.writeFileSync(path.join(bench.proj, 'output', 'models', 'coef_all.csv'), 'model,var,coef\nm1,a,1\n', 'utf8');
+
+  const specPath = path.join(bench.proj, 'manuscript.json');
+  const built = bench.wb.manuscriptScaffold({});
+  check('生成 manuscript.json', built.ok === true && fs.existsSync(specPath), built.error || '');
+  check('figure 块 3 个', built.figures === 3, String(built.figures));
+  check('按 section 分成 2 段', built.sections === 2, String(built.sections));
+  check('表块 1 个（只算真有数据的 CSV）', built.tables === 1, String(built.tables));
+  check('待补段落 = 研究设计 + 2 段 + 表段', built.placeholders === 4, String(built.placeholders));
+
+  const spec = JSON.parse(fs.readFileSync(specPath, 'utf8'));
+  const figs = spec.blocks.filter((block) => block.type === 'figure');
+  check('标题取项目名', spec.blocks[0].type === 'title' && spec.blocks[0].text === '运行器回归', spec.blocks[0].text);
+  check('png 走项目相对路径', figs[0].png === 'output/chart_pack/f01.png', figs[0].png);
+  check('n 带进 figure 块', figs[0].n === 320, String(figs[0].n));
+  check('空图题有占位', figs[1].caption === '（图题待写）', figs[1].caption);
+  check('正文段落不带自造数字', spec.blocks.filter((block) => block.type === 'para').every((block) => !/[0-9]/.test(block.text)));
+
+  const again = bench.wb.manuscriptScaffold({});
+  check('已有文件时不覆盖', again.ok === false && /已经存在/.test(again.error), again.error || '');
+  const over = bench.wb.manuscriptScaffold({ overwrite: true });
+  check('显式 overwrite 才重排', over.ok === true && over.overwritten === true, over.error || '');
+
+  const brief = bench.wb.manuscriptBrief();
+  check('brief 认得出骨架', brief.ok === true && brief.spec.exists === true, brief.error || '');
+  check('brief 说清 figure 字段不许动', /png \/ caption \/ n 不要改/.test(brief.text));
+  check('brief 要求图号从 1 连续', /图号从 1 连续/.test(brief.text));
+  check('brief 要求数字可追到 CSV', /output\/models\/\*\.csv/.test(brief.text));
+
+  const fresh = bench.wb.manuscriptBrief({ exists: false, blocks: 0, figures: 0, tables: 0, placeholders: 0 });
+  check('没有 spec 时 brief 直说「先生成骨架」', /先生成骨架/.test(fresh.text));
+}
+
 console.log(failed ? `\n✗ ${failed} 条失败` : '\n✓ 全部通过');
 process.exit(failed ? 1 : 0);

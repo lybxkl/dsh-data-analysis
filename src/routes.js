@@ -357,6 +357,26 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
       },
     },
     {
+      path: `${basePath}/api/manuscript/brief`,
+      method: 'GET',
+      handler: () => {
+        // 面板「让 AI 写成正文」拿这张卡投进研究对话；改稿与跑阶段都由会话决定
+        const result = workbench.manuscriptBrief();
+        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
+        return result;
+      },
+    },
+    {
+      path: `${basePath}/api/manuscript/scaffold`,
+      method: 'POST',
+      handler: (body) => {
+        // 破坏性：overwrite 会覆盖已有的 manuscript.json，字符串 'false' 不能被当成真
+        const result = workbench.manuscriptScaffold({ overwrite: isTrue(body?.overwrite) });
+        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error, file: result.file } };
+        return result;
+      },
+    },
+    {
       path: `${basePath}/api/materials/add`,
       method: 'POST',
       handler: (body) => {
