@@ -235,8 +235,8 @@ function serialize(node) {
   return open + inner + '</' + tag + '>';
 }
 
-function buildPage({ panel, css, snap, pre, width, theme }) {
-  globalThis.__DSA__ = { snap, pre, loading: false, dialog: null, width, theme, selected: 'audit' };
+function buildPage({ panel, css, snap, pre, width, theme, selected = 'audit' }) {
+  globalThis.__DSA__ = { snap, pre, loading: false, dialog: null, width, theme, selected };
   const tree = renderRoot(panel, {});
   const body = serialize(tree);
   return [
@@ -770,6 +770,20 @@ const PROBE = `(() => {
     kpiValues: [...document.querySelectorAll('.dsa-kpis .dsa-kpi .v')].map((el) => el.textContent.trim()),
     kpiCols,
     kpiCount: kpis ? kpis.children.length : 0,
+    // 手稿骨架卡（只在第 7 阶段出现）：宽窄两档都要能渲染、按钮齐全、不撑破中栏
+    manuscript: (() => {
+      const heading = [...document.querySelectorAll('.dsa-main h3')].find((el) => /手稿骨架/.test(el.textContent || ''));
+      const sec = heading ? heading.parentElement && heading.parentElement.parentElement : null;
+      if (!sec) return null;
+      const r = sec.getBoundingClientRect();
+      return {
+        w: Math.round(r.width),
+        h: Math.round(r.height),
+        bottom: Math.round(r.bottom),
+        buttons: [...sec.querySelectorAll('button')].map((el) => el.textContent.trim()),
+        text: (sec.textContent || '').replace(/\s+/g, ' ').slice(0, 160),
+      };
+    })(),
     // 形状层：确认 C 的视觉语言真的落到了计算样式上（不是只写在 CSS 里没人用）
     styles: (() => {
       const cs = (sel) => {
@@ -877,6 +891,9 @@ const VARIANTS = [
   { key: 'compact', width: 1000, height: 900, widthClass: 'compact', theme: 'light', projects: 14 },
   { key: 'narrow', width: 820, height: 900, widthClass: 'narrow', theme: 'light', projects: 4 },
   { key: 'dark', width: 1560, height: 1000, widthClass: 'wide', theme: 'dark', projects: 3 },
+  // 第 7 阶段的手稿骨架卡：宽屏与窄屏各渲一次，量它的宽度与按钮
+  { key: 'manuscript', width: 1560, height: 1000, widthClass: 'wide', theme: 'light', projects: 3, selected: 'manuscript' },
+  { key: 'manuscript-narrow', width: 820, height: 900, widthClass: 'narrow', theme: 'light', projects: 2, selected: 'manuscript' },
 ];
 
 async function main() {
@@ -891,6 +908,10 @@ async function main() {
   await withChrome(async ({ port }) => {
     for (const variant of VARIANTS) {
       const snap = snapshot(variant.projects);
+      if (variant.selected === 'manuscript') {
+        // 第 7 阶段的「手稿骨架」卡只有在选中该阶段时才渲染，这里给它一份真实的 spec
+        snap.artifacts.manuscriptSpec = { exists: true, blocks: 14, figures: 3, tables: 1, placeholders: 5 };
+      }
       const html = buildPage({
         panel,
         css,
@@ -898,6 +919,7 @@ async function main() {
         pre: PRE_OK,
         width: variant.widthClass,
         theme: variant.theme,
+        selected: variant.selected || 'audit',
       });
       const file = path.join(OUT, 'panel-' + variant.key + '.html');
       fs.writeFileSync(file, html, 'utf8');
@@ -988,6 +1010,14 @@ async function main() {
     for (const [name, pair] of Object.entries(probe.contrast)) {
       if (!pair || pair.ratio === null) continue;
       check(pair.ratio >= 4.5, tag + ' ' + name + ' 对比度只有 ' + pair.ratio + '（' + pair.color + ' on ' + pair.bg + '）');
+    }
+    if (variant.selected === 'manuscript') {
+      check(Boolean(probe.manuscript), tag + ' 手稿骨架卡没渲染出来');
+      if (probe.manuscript) {
+        check(probe.manuscript.buttons.length >= 2, tag + ' 手稿骨架卡按钮不全：' + probe.manuscript.buttons.join(' | '));
+        check(/让 AI 写成正文/.test(probe.manuscript.text), tag + ' 缺少「让 AI 写成正文」：' + probe.manuscript.text);
+        check(probe.manuscript.w <= 1100, tag + ' 手稿骨架卡太宽：' + probe.manuscript.w);
+      }
     }
 
     // 形状层：圆角、阴影、尺寸这些「看起来像不像」的东西，只有算出来的值才算数

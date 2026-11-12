@@ -32,7 +32,7 @@ const LINES = [
   "5. 报告结论前 → 重跑 `data_analysis_status`（verbose 看逐条闸门），引用具体的 stageId / gateId。",
   "6. 需要起草文字（研究范围、变量字典、图表题注、文稿小节、质检说明）→ `data_analysis_draft`：它用 **DSH 当前默认模型**，只读项目产物拼上下文；save=true 会写入该任务固定的 docs/ 文件。模型在这条路上没有工具，不会跑脚本。",
   "7. 面板里的「让 AI 做这一步」会把**阶段任务卡**投递到当前项目绑定的 DSH 原生会话（绑定存在台账里）。你在这条会话里按卡上的命令与约束执行即可；卡是工作台按闸门现况生成的，不要自己改口径。输入行的「运行下一步」是工作台直接起脚本，与你在会话里执行是两条路，别重复跑同一阶段。",
-  "7b. **第 7 阶段（文稿组装）**吃项目根的 `manuscript.json`，脚本不会自己造：先 `data_analysis_manuscript` action=scaffold 生成骨架（只拼结构——figure 的 png/caption/n 取自图表清单，正文段落一律留「待补」，不写任何自己编的数字；已有文件时不会覆盖，要重排得显式 overwrite），再按 action=brief 的改稿说明把「待补」写成正文（每个数字都要能追到 `output/models/*.csv` 或 `output/dataset/analysis.csv`），改完再跑第 7 阶段。骨架都不是你写的时候，别凭空编一份 manuscript.json 出来。",
+  "7b. **第 7 阶段（文稿组装）**吃项目根的 `manuscript.json`，脚本不会自己造：先 `data_analysis_manuscript` action=scaffold 生成骨架（只拼结构——figure 的 png/caption/n 取自图表清单，正文段落一律留「待补」，不写任何自己编的数字；题注已带 N= 时不会再追加 n；png 缺失**或 status 不是 ok** 的图会被跳过；action=status 可先看现状。已有文件时不会覆盖，要重排得显式 overwrite——**overwrite 会把现有正文整体替换掉**，只留一份 `manuscript.json.bak-*` 备份，动之前先跟用户确认），再按 action=brief 的改稿说明把「待补」写成正文（每个数字都要能追到 `output/models/*.csv` 或 `output/dataset/analysis.csv`；调换 figure 块顺序会让图号跟着块序变，正文引用要同步改），改完**必须重跑第 7 阶段**生成 `output/manuscript.docx`（闸门只认这个 docx；改了 JSON 不重跑，阶段会停在「手稿与成稿同步」未判定），再跑第 8 阶段终检。骨架都不是你写的时候，别凭空编一份 manuscript.json 出来。",
   "8. **第 9 阶段复核**：先 `data_analysis_recheck`（action=status）看 12 项机器复算，再 action=evidence 取证据包；逐条判断后用 `data_analysis_issue` 落库（severity / where / claim / evidence / fix_kind）。不要直接手改 output/ 让闸门变绿：要改就改 scripts/ 或 data/ 并重跑受影响阶段；补丁只能作为提案（patch.path + baseHash + content），由人在面板点「套用」后才落盘并自动重跑下游。最后写 12 项覆盖表 R1–R12（checked / unchecked+理由）与 report.md。",
   "",
   "### 材料库（用户的资料放在项目外）",

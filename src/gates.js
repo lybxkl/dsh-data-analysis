@@ -510,6 +510,22 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
 
     if (def.id === 'manuscript') {
       gates.push(fileGate('manuscript-docx', '成稿 output/manuscript.docx', { abs: path.join(root, 'output', 'manuscript.docx'), rel: 'output/manuscript.docx' }));
+      // 闸门只查 docx 存在，所以「改了 manuscript.json 却没重新组装」会一直显示 done，
+      // 读者拿到的还是旧稿。这里比一次 mtime，把这种静默不一致摆到台面上。
+      const specStat = statOf(path.join(root, 'manuscript.json'));
+      const docxStat = statOf(path.join(root, 'output', 'manuscript.docx'));
+      if (specStat.exists && docxStat.exists && specStat.mtimeMs > docxStat.mtimeMs + 1000) {
+        gates.push(
+          gate(
+            'manuscript-fresh',
+            '手稿与成稿同步',
+            'warn',
+            'unjudged',
+            `manuscript.json 比 output/manuscript.docx 新（${shortTime(new Date(specStat.mtimeMs).toISOString())} > ${shortTime(new Date(docxStat.mtimeMs).toISOString())}）——改完稿必须重跑第 7 阶段，否则交付的是旧稿`,
+            { source: 'manuscript.json / output/manuscript.docx' },
+          ),
+        );
+      }
     }
 
     if (def.id === 'qa') {
@@ -626,8 +642,15 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
     }
 
     if (def.id === 'recheck') {
-      const state = recheckSummary(root, { project, runs });
-      // 一项复核产物都没有时，不能把「没有 open 问题」当成通过：那是还没开始
+      // 复核读的是用户手改过的产物（issues.jsonl / manuscript.json / coverage.json）：
+      // 里面留一个 null 就把异常抛到 snapshot 上，整个面板都打不开。降级成「判不了」。
+      let state = null;
+      let recheckError = '';
+      try {
+        state = recheckSummary(root, { project, runs });
+      } catch (error) {
+        recheckError = String(error && error.message ? error.message : error);
+      }
       const started = statOf(path.join(root, 'output/recheck/issues.jsonl')).exists
         || statOf(path.join(root, 'output/recheck/coverage.json')).exists
         || statOf(path.join(root, 'output/recheck/report.md')).exists;
@@ -637,6 +660,13 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
           gate('recheck-issues', '问题清单', 'error', 'unjudged', '还没开始复核：缺 output/recheck/issues.jsonl'),
           gate('recheck-coverage', '复核覆盖表', 'warn', 'unjudged', '还没开始复核：缺 output/recheck/coverage.json'),
           gate('recheck-report', '复核报告', 'warn', 'unjudged', '还没开始复核：缺 output/recheck/report.md'),
+        );
+      } else if (!state) {
+        gates.push(
+          gate('recheck-machine', '机器复算', 'error', 'unjudged', `复核数据读不出来：${recheckError}`),
+          gate('recheck-issues', '问题清单', 'error', 'unjudged', `复核数据读不出来：${recheckError}`),
+          gate('recheck-coverage', '复核覆盖表', 'warn', 'unjudged', `复核数据读不出来：${recheckError}`),
+          gate('recheck-report', '复核报告', 'warn', 'unjudged', '复核数据读不出来，没有可用报告'),
         );
       } else {
       const machineFails = state.checks.filter((item) => item.status === 'fail' && item.id !== 'R12');

@@ -1434,10 +1434,15 @@ export class Workbench {
     const root = active.path;
     const rel = 'manuscript.json';
     const specPath = path.join(root, rel);
-    if (fs.existsSync(specPath) && !overwrite) {
+    const existed = fs.existsSync(specPath);
+    // 0 块的空壳（`{}` / `{"style":{}}`）不是「别人写过的稿子」——它本来就跑不通，
+    // 拒绝重建只会让人先去点一次覆盖。只有真有块、且能解析的文件才要求 overwrite。
+    const existing = existed ? readManuscriptSpec(root) : { exists: false, blocks: 0, error: '' };
+    const keepExisting = existed && !existing.error && Number(existing.blocks) > 0;
+    if (keepExisting && !overwrite) {
       return {
         ok: false,
-        error: 'manuscript.json 已经存在（可能是你或 AI 改过的稿子）。确认要重排骨架，请显式 overwrite。',
+        error: 'manuscript.json 已经存在（里面已经有正文了）。确认要用图表清单重排骨架，请显式 overwrite。',
         file: rel,
       };
     }
@@ -1446,12 +1451,36 @@ export class Workbench {
     blocks.push({ type: 'heading', level: 1, text: `${CN_NUM[0]}、研究设计` });
     blocks.push({ type: 'para', text: MANUSCRIPT_PLACEHOLDER });
 
-    const figureRows = (readFigures(root).rows || []).filter(
-      (row) => row && row.png && String(row.status || 'ok') === 'ok',
-    );
+    const figureSource = readFigures(root);
+    // 清单里的 png 是「相对清单所在目录」的（auto_chart_pack 的 rel_path 就是这么写的），
+    // 所以前缀要跟着清单走，不能一律当成 output/chart_pack/
+    const figureBaseRel = figureSource.file
+      ? path.posix.dirname(String(figureSource.file).replace(/\\/g, '/'))
+      : 'output/chart_pack';
+    const figurePng = (raw) => {
+      const text = String(raw || '').replace(/\\/g, '/').trim();
+      if (!text) return '';
+      if (path.isAbsolute(text)) return text;
+      if (text.startsWith('output/') || text.startsWith('data/')) return text;
+      const rel = text.replace(/^\.?\//, '');
+      return figureBaseRel && figureBaseRel !== '.' ? `${figureBaseRel}/${rel}` : rel;
+    };
+    const allRows = (figureSource.rows || []).filter((row) => row && row.png);
+    // 画图失败的行（status=error*/skipped*）不会出现在骨架里；把它和「png 不存在」
+    // 分开数——两种原因要用户做的事完全不同（重跑第 5 阶段 vs 把图补齐）。
+    const badStatus = allRows.filter((row) => String(row.status || 'ok') !== 'ok');
+    const candidateRows = allRows.filter((row) => String(row.status || 'ok') === 'ok');
+    // png 缺了就别写进骨架：assemble_manuscript 遇到不存在的图会直接 SpecError，
+    // 骨架把一个坏引用塞进去，等于把「图没画出来」伪装成「文稿写不出来」。
+    const figureRows = candidateRows.filter((row) => row.pngExists !== false);
+    const skippedNoPng = candidateRows.length - figureRows.length;
+    const skippedFigures = skippedNoPng + badStatus.length;
+    const cleanSection = (name) => String(name || '').trim().replace(/^[A-Z][.、:]?\s+/, '').trim() || '其他图表';
     const groups = [];
     for (const row of figureRows) {
-      const name = String(row.section || '').trim() || '其他图表';
+      // 分组键也用规范化后的名字：清单里同时出现「A 数据质量」与「A. 数据质量」时
+      // 不该生成两节同样内容
+      const name = cleanSection(row.section);
       let group = groups.find((item) => item.name === name);
       if (!group) {
         group = { name, rows: [] };
@@ -1459,45 +1488,89 @@ export class Workbench {
       }
       group.rows.push(row);
     }
+    const cnLabel = (index) => (CN_NUM[index] ? CN_NUM[index] : String(index + 1));
+    const warnings = [];
+    if (!figureSource.file) {
+      warnings.push('还没找到图表清单（第 6 阶段的输出）——骨架里暂时没有图；先跑第 6 阶段，再点「重排骨架」。');
+    } else if (!figureRows.length) {
+      warnings.push('图表清单里没有可用的图（png 缺失或 status 不是 ok）——骨架里暂时没有图；先把第 6 阶段跑通再重排。');
+    }
     let headingIndex = 1;
     for (const group of groups) {
-      const label = CN_NUM[headingIndex] || String(headingIndex + 1);
-      blocks.push({ type: 'heading', level: 1, text: `${label}、${group.name.replace(/^[A-Z]\s*/, '')}` });
+      blocks.push({ type: 'heading', level: 1, text: `${cnLabel(headingIndex)}、${group.name}` });
       blocks.push({ type: 'para', text: MANUSCRIPT_PLACEHOLDER });
       headingIndex += 1;
       for (const row of group.rows) {
+        // 没有 caption 就用占位，不拿 question 顶替：brief 里说「caption 不许改」，
+        // 拿研究问题当图注会让人只能违规去改
+        const caption = String(row.caption || '').trim() || '（图题待写）';
         const block = {
           type: 'figure',
-          png: `output/chart_pack/${String(row.png).replace(/^\/+/, '')}`,
-          caption: String(row.caption || row.question || '').trim() || '（图题待写）',
+          png: figurePng(row.png),
+          caption,
         };
         const n = Number(row.n);
-        if (Number.isFinite(n) && n > 0) block.n = n;
+        // 清单题注通常已经带 N=…（auto_chart_pack 的 fill_caption_n 写进去的）；
+        // 这里再塞 n，组装出来就成了「（N=320）（N=320）」。
+        if (Number.isFinite(n) && n > 0 && !/\bN\s*[=＝]/i.test(caption)) block.n = n;
         blocks.push(block);
       }
     }
 
     const tables = MANUSCRIPT_TABLES.filter((item) => csvHasRows(path.join(root, item.csv)));
     if (tables.length) {
-      const label = CN_NUM[headingIndex] || String(headingIndex + 1);
-      blocks.push({ type: 'heading', level: 1, text: `${label}、模型与描述统计` });
+      blocks.push({ type: 'heading', level: 1, text: `${cnLabel(headingIndex)}、模型与描述统计` });
       blocks.push({ type: 'para', text: MANUSCRIPT_PLACEHOLDER });
       for (const item of tables) blocks.push({ type: 'table', csv: item.csv, caption: item.caption });
     }
 
-    fs.writeFileSync(specPath, `${JSON.stringify({ style: {}, page: {}, blocks }, null, 2)}\n`, 'utf8');
+    // 覆盖前先留一份备份：正文是这一阶段最贵的产物，误点一次不该没法回头
+    let backup = '';
+    if (existed) {
+      const now = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+      backup = `manuscript.json.bak-${stamp}`;
+      try {
+        fs.copyFileSync(specPath, path.join(root, backup));
+      } catch (error) {
+        return { ok: false, error: `备份现有 manuscript.json 失败，没有覆盖：${error.message}`, file: rel };
+      }
+    }
+
+    // 直接写在目标文件上：写到一半崩掉会留下半截 JSON，下次打开就成了「解析失败」
+    const tmp = `${specPath}.tmp-${process.pid}`;
+    try {
+      fs.writeFileSync(tmp, `${JSON.stringify({ style: {}, page: {}, blocks }, null, 2)}\n`, 'utf8');
+      fs.renameSync(tmp, specPath);
+    } catch (error) {
+      try {
+        fs.unlinkSync(tmp);
+      } catch {
+        /* 临时文件可能没建出来，忽略 */
+      }
+      return { ok: false, error: `写不进 manuscript.json：${error.message}`, file: rel };
+    }
     this.invalidateSummary();
     this.onChange({ kind: 'manuscript-scaffold', file: rel });
     const spec = readManuscriptSpec(root);
+    if (!groups.length && !tables.length) warnings.push('骨架里只有「研究设计」一节：没有图也没有可用的模型表，正文需要你自己补结构。');
     return {
       ok: true,
       file: rel,
-      overwritten: Boolean(overwrite),
+      warning: warnings.join(' '),
+      overwritten: keepExisting,
+      backup,
       figures: figureRows.length,
+      skippedFigures,
+      skippedNoPng,
+      skippedBadStatus: badStatus.length,
+      skippedBadExample: badStatus.length ? String(badStatus[0].id || badStatus[0].question || '') : '',
       tables: tables.length,
-      sections: groups.length,
+      sections: groups.length + (tables.length ? 1 : 0),
+      figureSections: groups.length,
       blocks: blocks.length,
-      placeholders: blocks.filter((block) => block.type === 'para').length,
+      placeholders: blocks.filter((block) => block.type === 'para' && block.text === MANUSCRIPT_PLACEHOLDER).length,
       spec,
       brief: this.manuscriptBrief(spec),
     };
@@ -1509,9 +1582,22 @@ export class Workbench {
     if (!active.ok) return { ok: false, error: active.error };
     const root = active.path;
     const state = spec || readManuscriptSpec(root);
-    const stateLine = state.exists
-      ? `${state.blocks} 块（图 ${state.figures} / 表 ${state.tables} / 待补段落 ${state.placeholders}）`
-      : '还没有 manuscript.json —— 先生成骨架';
+    let stateLine;
+    if (!state.exists) {
+      stateLine = '还没有 manuscript.json —— 先生成骨架';
+    } else if (state.error) {
+      stateLine = state.errorKind === 'structure'
+        ? `跑不了：${state.error} —— 先按上面的结构改好，再跑第 7 阶段`
+        : `解析失败：${state.error} —— 先把 JSON 改对，再跑第 7 阶段`;
+    } else {
+      stateLine = `${state.blocks} 块（图 ${state.figures} / 表 ${state.tables} / 待补段落 ${state.placeholders}）`;
+      if (state.invalidBlocks) {
+        stateLine += `；有 ${state.invalidBlocks} 块结构不对（type 不认识、table 缺 csv 或 csv 没有数据行），第 7 阶段会直接报错`;
+      }
+      if (state.figuresMissing) {
+        stateLine += `；有 ${state.figuresMissing} 个图块的 png 找不到（第 7 阶段会直接报 figure image not found）`;
+      }
+    }
     const text = [
       '【手稿正文】把第 7 阶段（文稿组装）的骨架写成正文',
       '',
@@ -1519,13 +1605,14 @@ export class Workbench {
       `manuscript.json：${stateLine}`,
       '',
       '怎么做：',
-      '1. 读 manuscript.json。figure 块的 png / caption / n 不要改——图注里的 N 是第 8 阶段核对的统计口径；只按论证需要调整顺序、补 note。',
+      '1. 读 manuscript.json。figure 块的 png / caption 不要改；N 已经写在题注里（或 n 字段里），不要重复加，也不要把题注里的 N 删掉——它是第 8 阶段核对的统计口径。补 note 可以。',
       '2. 把每个「待补」的 para 换成真正的段落（问题、数据、方法、发现、局限）。每个数字都要能在 output/models/*.csv 或 output/dataset/analysis.csv 里找到原值；找不到就补一张表，不要在正文里估一个数出来。',
       '3. 正文至少引用每个图号一次（图1、图2…），图号从 1 连续；要加表就写 {"type":"table","csv":"output/models/coef_m1_probation.csv","caption":"…"}，数字由脚本从 CSV 取，不要抄进正文。',
+      '   注意：正文里的「图N」按块序自动编号——你调换 figure 块的顺序，图号就跟着变，正文引用必须同步改，否则图与正文会错配。',
       '4. 只改 manuscript.json，写完自己 JSON.parse 一遍；不要动 output/ 下的产物，也不要改 data/ 里的资料。',
       '5. 写完跑 data_analysis_run_stage(stageId="manuscript")，再跑终检，按 qa 报告逐条修。',
       '',
-      '产物落点：output/manuscript.docx；闸门只认它和 manuscript.json。',
+      '产物落点：output/manuscript.docx；第 7 阶段的闸门只认这个 docx（manuscript.json 是它的输入，不是闸门证据）。',
     ].join('\n');
     return { ok: true, text, spec: state };
   }

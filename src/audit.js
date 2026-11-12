@@ -664,22 +664,71 @@ export function readManuscriptSpec(projectRoot) {
   if (!info.exists) return { rel, exists: false };
   let data = null;
   let error = '';
+  let errorKind = '';
   try {
-    data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    // 记事本/部分编辑器会写成 UTF-8 with BOM：JSON.parse 在 \uFEFF 上直接失败，
+    // 用户看到的是「manuscript 解析失败」，但文件本身是好的
+    data = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
   } catch (err) {
     error = String(err && err.message ? err.message : err).slice(0, 160);
+    errorKind = 'parse';
   }
-  const blocks = Array.isArray(data && data.blocks) ? data.blocks : [];
+  if (!error) {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      error = '顶层要是一个对象';
+      errorKind = 'structure';
+    } else if (!Array.isArray(data.blocks)) {
+      error = 'blocks 必须是数组';
+      errorKind = 'structure';
+    } else if (!data.blocks.length) {
+      error = 'blocks 是空的';
+      errorKind = 'structure';
+    }
+  }
+  const blocks = data && Array.isArray(data.blocks) ? data.blocks : [];
   const typeOf = (block) => String((block && block.type) || '');
-  const isPlaceholder = (block) => typeOf(block) === 'para' && /待补|待写|TODO/.test(String(block.text || ''));
+  // 占位段只认骨架自己写的那一行（「待补：…」或显式 placeholder:true），
+  // 正文里偶尔提到「待补充材料」不该被算成还没写
+  const isPlaceholder = (block) =>
+    typeOf(block) === 'para' && (block.placeholder === true || /^待补[:：]/.test(String(block.text || '').trim()));
+  const figureBlocks = blocks.filter((block) => typeOf(block) === 'figure');
+  // 图块的 png 找不到时 assemble_manuscript 会直接 SpecError——提前报出来，
+  // 别让用户以为是文稿内容的问题
+  const missingPng = figureBlocks.filter((block) => {
+    const png = String((block && block.png) || '').trim();
+    if (!png) return true;
+    const full = path.isAbsolute(png) ? png : path.join(projectRoot, png);
+    return !statOf(full).exists;
+  }).length;
+  // 结构不可跑的块：技能脚本会直接 SpecError，这里先数出来，
+  // 免得面板说「已就绪」、用户一跑就收到看不懂的错
+  const allowed = new Set(['title', 'authors', 'heading', 'para', 'note', 'table', 'figure', 'pagebreak']);
+  const invalidBlocks = blocks.filter((block) => {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) return true;
+    const kind = typeOf(block);
+    if (!allowed.has(kind)) return true;
+    if (kind !== 'table') return false;
+    const csv = String(block.csv || '').trim();
+    if (!csv) return true;
+    const full = path.isAbsolute(csv) ? csv : path.join(projectRoot, csv);
+    if (!statOf(full).exists) return true;
+    try {
+      return fs.readFileSync(full, 'utf8').replace(/^\uFEFF/, '').split(/\r?\n/).filter((line) => line.trim()).length < 2;
+    } catch {
+      return true;
+    }
+  }).length;
   return {
     rel,
     exists: true,
     bytes: info.size,
     mtimeMs: info.mtimeMs,
     error,
+    errorKind,
     blocks: blocks.length,
-    figures: blocks.filter((block) => typeOf(block) === 'figure').length,
+    figures: figureBlocks.length,
+    figuresMissing: missingPng,
+    invalidBlocks,
     tables: blocks.filter((block) => typeOf(block) === 'table').length,
     placeholders: blocks.filter(isPlaceholder).length,
   };

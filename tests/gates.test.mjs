@@ -331,6 +331,45 @@ check('只有 unjudged → review（不做成 done）', () => {
   assert.equal(stageById('qa').status, 'review');
 });
 
+check('manuscript.json 里有 null 块时，复核不把整个面板打挂', () => {
+  const root = makeProject({
+    'manuscript.json': JSON.stringify({ blocks: [null, { type: 'figure', png: 'figures/x.png' }] }),
+  });
+  const { stages, all } = judge(root);
+  assert.equal(stages.length, 9);
+  for (const g of all) assert.ok(ALLOWED.has(g.status), `闸门 ${g.id} 状态异常：${g.status}`);
+  assert.ok(stages.find((stage) => stage.id === 'recheck'), '复核阶段仍在');
+});
+
+check('改了 manuscript.json 没重跑第 7 阶段 → manuscript-fresh 判不了', () => {
+  const root = makeProject({
+    'output/manuscript.docx': 'docx-bytes',
+    'manuscript.json': JSON.stringify({ blocks: [{ type: 'para', text: '正文' }] }),
+  });
+  const docx = path.join(root, 'output/manuscript.docx');
+  const spec = path.join(root, 'manuscript.json');
+  const past = new Date(Date.now() - 60000);
+  fs.utimesSync(docx, past, past);
+  const { byId } = judge(root);
+  const fresh = byId('manuscript-fresh');
+  assert.ok(fresh, '应当出现 manuscript-fresh 闸门');
+  assert.equal(fresh.status, 'unjudged');
+  assert.match(fresh.detail, /重跑第 7 阶段/);
+});
+
+check('docx 比 manuscript.json 新时不报新鲜度问题', () => {
+  const root = makeProject({
+    'output/manuscript.docx': 'docx-bytes',
+    'manuscript.json': JSON.stringify({ blocks: [{ type: 'para', text: '正文' }] }),
+  });
+  const docx = path.join(root, 'output/manuscript.docx');
+  const past = new Date(Date.now() - 60000);
+  fs.utimesSync(path.join(root, 'manuscript.json'), past, past);
+  const { byId } = judge(root);
+  assert.equal(byId('manuscript-fresh'), undefined);
+  assert.equal(byId('manuscript-docx').status, 'pass', 'docx 在就算过');
+});
+
 // ── 收尾 ────────────────────────────────────────────────────────
 for (const root of tmpRoots) {
   try {

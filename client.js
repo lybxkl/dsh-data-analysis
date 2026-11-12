@@ -1310,7 +1310,7 @@
         '  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
         '.dsa-stage-name .dot{display:none;}',
         '.dsa-stage-meta{flex:0 0 auto;margin-top:0;padding:1px 7px;border-radius:999px;background:var(--dsa-line);',
-        '  color:var(--dsa-ink3);font-size:11px;font-weight:600;max-width:52%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+        '  color:var(--dsa-ink2);font-size:11px;font-weight:600;max-width:52%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
         '.dsa-stage.done .dsa-stage-meta{background:var(--dsa-oksoft);color:var(--dsa-ok);}',
         '.dsa-stage.blocked .dsa-stage-meta{background:var(--dsa-errsoft);color:var(--dsa-err);}',
         '.dsa-stage.review .dsa-stage-meta{background:var(--dsa-warnsoft);color:var(--dsa-warn);}',
@@ -1888,6 +1888,10 @@
         var manNoteState = useState('');
         var manNote = manNoteState[0];
         var setManNote = manNoteState[1];
+        // 覆盖已有 manuscript.json 是破坏性动作：先弹一条确认，不靠悬停提示
+        var manAskState = useState(false);
+        var manAsk = manAskState[0];
+        var setManAsk = manAskState[1];
 
         var measureRoot = useCallback(function () {
           var el = rootRef.current;
@@ -2150,54 +2154,75 @@
         /* ---------------- 手稿骨架 ---------------- */
 
         var doScaffold = useCallback(function (overwrite) {
+          // 请求发出时的项目：回来时已经切走就整条丢弃，别把 A 的结果写到 B 的卡片上
+          var startKey = activeIdRef.current;
           setManBusy('scaffold');
+          setManAsk(false);
           setManNote('');
           return request('POST', '/manuscript/scaffold', { overwrite: Boolean(overwrite) })
             .then(function (json) {
+              if (activeIdRef.current !== startKey) return json;
               if (!json || !json.ok) {
-                setManNote((json && json.error) || t('actionFail'));
+                setError((json && json.error) || t('actionFail'));
+                // 失败多半是快照过期（AI 刚写完 manuscript.json）：重取一次，
+                // 按钮才会从「生成骨架」变成「重排骨架」
+                void load(true);
                 return json;
               }
+              var skipped = '';
+              if (json.skippedNoPng) skipped += '；' + json.skippedNoPng + ' 张图缺 png（补齐后重排）';
+              if (json.skippedBadStatus) {
+                skipped += '；' + json.skippedBadStatus + ' 张图在清单里是失败状态' +
+                  (json.skippedBadExample ? '（如 ' + json.skippedBadExample + '）' : '') + '（先重跑第 6 阶段）';
+              }
               setManNote(
-                '已生成 ' + json.file + '：' + json.blocks + ' 块（图 ' + json.figures + ' / 表 ' + json.tables + ' / 待补 ' + json.placeholders + '）'
+                '已生成 ' + json.file + '：' + json.blocks + ' 块（图 ' + json.figures + ' / 表 ' + json.tables + ' / 待补 ' + json.placeholders + '）' +
+                  skipped +
+                  (json.backup ? '；原文件已备份到 ' + json.backup : '') +
+                  (json.warning ? '。注意：' + json.warning : '')
               );
               return load(true).then(function () {
                 return json;
               });
             })
             .catch(function (e) {
-              setManNote(String((e && e.message) || e));
+              if (activeIdRef.current === startKey) setError(String((e && e.message) || e));
               return { ok: false };
             })
             .then(function (json) {
-              setManBusy('');
+              if (activeIdRef.current === startKey) setManBusy('');
               return json;
             });
         }, [load]);
 
         var doBrief = useCallback(function () {
+          var startKey = activeIdRef.current;
           setManBusy('brief');
           setManNote('');
           return request('GET', '/manuscript/brief')
             .then(function (json) {
+              if (activeIdRef.current !== startKey) return json;
               if (!json || !json.ok) {
-                setManNote((json && json.error) || t('actionFail'));
+                setError((json && json.error) || t('actionFail'));
                 return json;
               }
               var dir = snap && snap.active && snap.active.path;
               var sid = snap && snap.active && snap.active.sessionId;
               return deliverText(json.text, dir, sid).then(function (result) {
+                if (activeIdRef.current !== startKey) return json;
                 if (result && result.state) setSnap(result.state);
-                setManNote((result && result.warning) || '已把改稿说明投进研究对话');
+                // 绑定失败是「没投出去」，不是成功提示：和投卡一样走红字
+                if (result && result.warning) setError(result.warning);
+                else setManNote('已把改稿说明投进研究对话');
                 return json;
               });
             })
             .catch(function (e) {
-              setManNote(String((e && e.message) || e));
+              if (activeIdRef.current === startKey) setError(String((e && e.message) || e));
               return { ok: false };
             })
             .then(function (json) {
-              setManBusy('');
+              if (activeIdRef.current === startKey) setManBusy('');
               return json;
             });
         }, [snap, deliverText]);
@@ -2212,6 +2237,8 @@
           if (activeIdRef.current !== activeId) {
             activeIdRef.current = activeId;
             setDialog(null);
+            // 手稿骨架的提示属于上一个项目，别把它带到新项目上
+            setManNote('');
           }
         }, [activeId]);
 
@@ -3333,6 +3360,10 @@
         for (var mgi = 0; mgi < openGates.length; mgi += 1) {
           if (gateFace(openGates[mgi], current.status).cls === 'manual') { manualOpen = openGates[mgi]; break; }
         }
+        // 第 7 阶段没有 manuscript.json 时「运行」必然报 spec not found：
+        // 这时别让它当实心主按钮（同屏只该有一个主动作——生成骨架）
+        var manSpec = snap && snap.artifacts ? snap.artifacts.manuscriptSpec : null;
+        var needSpec = current.id === 'manuscript' && (!manSpec || !manSpec.exists);
         var headerPrimary = stageRunning
           ? h(Btn, { variant: 'danger', disabled: busy, onClick: function () { doCancel(current); } }, '停止')
           : manualOpen
@@ -3350,9 +3381,9 @@
               ? h(
                   Btn,
                   {
-                    variant: 'primary',
+                    variant: needSpec ? undefined : 'primary',
                     disabled: busy,
-                    title: current.script,
+                    title: needSpec ? '先有 manuscript.json 才能跑：下面先点「生成手稿骨架」' : current.script,
                     onClick: function () { doRun(current); }
                   },
                   current.lastRun ? '重跑' : '运行'
@@ -3393,75 +3424,132 @@
         // 手稿骨架：第 7 阶段的输入文件脚本造不出来，给它一条明确的入口，别让人猜
         var manuscriptBlock = null;
         if (current && current.id === 'manuscript') {
-          var spec = (snap && snap.artifacts && snap.artifacts.manuscriptSpec) || { exists: false };
-          var specTitle = !spec.exists
-            ? '还没有 manuscript.json'
-            : spec.error
-              ? 'manuscript.json 解析失败'
-              : 'manuscript.json 已就绪';
-          var specParts = [];
-          if (spec.exists && !spec.error) {
-            specParts.push('块 ' + spec.blocks);
-            specParts.push('图 ' + spec.figures);
-            specParts.push('表 ' + spec.tables);
-            if (spec.placeholders) specParts.push('待补 ' + spec.placeholders + ' 段');
-          }
-          manuscriptBlock = h(
-            'div',
-            { className: 'dsa-section', style: { marginTop: '14px' } },
-            h('h3', null, '手稿骨架'),
-            h(
+          var spec = snap && snap.artifacts ? snap.artifacts.manuscriptSpec : null;
+          var specNum = function (value) {
+            var number = Number(value);
+            return Number.isFinite(number) ? String(number) : '0';
+          };
+          if (!spec) {
+            // client 插件能热更新、宿主不能：字段都没有时说明服务端还是旧版，别谎报「文件不存在」
+            manuscriptBlock = h(
               'div',
-              { className: 'dsa-card dsa-pad' },
+              { style: { marginTop: '14px' } },
+              h('div', { className: 'dsa-section' }, h('h3', null, '手稿骨架')),
               h(
                 'div',
-                { className: 'dsa-inline', style: { justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' } },
+                { className: 'dsa-card dsa-pad', style: { marginTop: '8px' } },
+                h('div', { className: 'dsa-hint' }, '宿主还没有提供手稿骨架的接口——重启 DSH 后再打开这里。')
+              )
+            );
+          } else {
+            var specTitle = !spec.exists
+              ? '还没有 manuscript.json'
+              : spec.error
+                ? 'manuscript.json 跑不了'
+                : spec.invalidBlocks
+                  ? '结构有问题：' + specNum(spec.invalidBlocks) + ' 块会让第 7 阶段直接报错'
+                  : spec.figuresMissing
+                    ? '已就绪，但缺 ' + specNum(spec.figuresMissing) + ' 张图（第 7 阶段会失败）'
+                    : 'manuscript.json 已就绪';
+            var specParts = [];
+            if (spec.exists && !spec.error) {
+              specParts.push('块 ' + specNum(spec.blocks));
+              specParts.push('图 ' + specNum(spec.figures));
+              specParts.push('表 ' + specNum(spec.tables));
+              if (spec.placeholders) specParts.push('待补 ' + specNum(spec.placeholders) + ' 段');
+              if (spec.invalidBlocks) specParts.push('结构不对 ' + specNum(spec.invalidBlocks) + ' 块');
+            }
+            var manDisabled = !!manBusy || !!busy || stageRunning;
+            manuscriptBlock = h(
+              'div',
+              { style: { marginTop: '14px' } },
+              h('div', { className: 'dsa-section' }, h('h3', null, '手稿骨架')),
+              h(
+                'div',
+                { className: 'dsa-card dsa-pad', style: { marginTop: '8px' } },
                 h(
                   'div',
-                  { style: { minWidth: '0' } },
-                  h('div', { style: { fontSize: '12.5px', fontWeight: 600 } }, specTitle),
+                  { className: 'dsa-inline', style: { justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' } },
                   h(
                     'div',
-                    { className: 'dsa-hint', style: { marginTop: '3px' } },
-                    specParts.length
-                      ? specParts.join(' · ')
-                      : '这一阶段吃项目根的 manuscript.json；工作台只按图表清单拼结构，正文留「待补」，不编数字。'
+                    { style: { minWidth: '0' } },
+                    h('div', { style: { fontSize: '12.5px', fontWeight: 600 } }, specTitle),
+                    h(
+                      'div',
+                      { className: 'dsa-hint', style: { marginTop: '3px' } },
+                      spec.exists && spec.error
+                        ? (spec.errorKind === 'structure' ? '跑不了：' : '解析失败：') + spec.error
+                        : specParts.length
+                          ? specParts.join(' · ')
+                          : '这一阶段吃项目根的 manuscript.json；工作台只按图表清单拼结构，正文留「待补」，不编数字。'
+                    )
+                  ),
+                  h(
+                    'div',
+                    { className: 'dsa-inline', style: { flex: '0 0 auto', gap: '8px' } },
+                    h(
+                      Btn,
+                      {
+                        variant: spec.exists ? 'default' : 'primary',
+                        disabled: manDisabled,
+                        title: stageRunning ? '先停掉正在跑的第 7 阶段' : spec.exists ? '按图表清单重排骨架（会覆盖现有正文）' : '按图表清单生成骨架',
+                        onClick: function () {
+                          if (spec.exists) {
+                            setManAsk(true);
+                            return;
+                          }
+                          doScaffold(false);
+                        }
+                      },
+                      manBusy === 'scaffold' ? '生成中…' : spec.exists ? '重排骨架' : '生成手稿骨架'
+                    ),
+                    spec.exists
+                      ? h(
+                          Btn,
+                          { variant: 'primary', disabled: manDisabled, title: '把改稿说明投进研究对话', onClick: doBrief },
+                          manBusy === 'brief' ? '投递中…' : '让 AI 写成正文'
+                        )
+                      : null
                   )
                 ),
-                h(
-                  'div',
-                  { className: 'dsa-inline', style: { flex: '0 0 auto', gap: '8px' } },
-                  h(
-                    Btn,
-                    {
-                      variant: spec.exists ? 'default' : 'primary',
-                      disabled: !!manBusy,
-                      title: spec.exists ? '按图表清单重排骨架（会冲掉现有正文）' : '按图表清单生成骨架',
-                      onClick: function () {
-                        doScaffold(spec.exists);
-                      }
-                    },
-                    manBusy === 'scaffold' ? '生成中…' : spec.exists ? '重排骨架' : '生成手稿骨架'
-                  ),
-                  spec.exists
-                    ? h(
+                spec.exists && manAsk
+                  ? h(
+                      'div',
+                      { className: 'dsa-ask', style: { marginTop: '9px' } },
+                      h(
+                        'span',
+                        { className: 'dsa-ask-t' },
+                        '重排会用图表清单重新拼一遍骨架，现有的 ' +
+                          (spec.placeholders ? specNum(spec.placeholders) + ' 段待补和已写正文' : '正文') +
+                          ' 都会被覆盖；原文件会先备份成 manuscript.json.bak-…。'
+                      ),
+                      h(
                         Btn,
-                        { variant: 'primary', disabled: !!manBusy, title: '把改稿说明投进研究对话', onClick: doBrief },
-                        manBusy === 'brief' ? '投递中…' : '让 AI 写成正文'
+                        { variant: 'danger', disabled: manDisabled, onClick: function () { doScaffold(true); } },
+                        '确认重排'
+                      ),
+                      h(Btn, { disabled: manDisabled, onClick: function () { setManAsk(false); } }, '取消')
+                    )
+                  : null,
+                spec.exists && spec.placeholders && !manAsk
+                  ? h(
+                      'div',
+                      { className: 'dsa-hint', style: { marginTop: '7px' } },
+                      '正文还没写：「待补」段落要按改稿说明补成真正段落，写进去的每个数字都要能追到 output/models/ 或 output/dataset/analysis.csv。'
+                    )
+                  : spec.exists && !spec.placeholders && !spec.error && !manAsk
+                    ? h(
+                        'div',
+                        { className: 'dsa-hint', style: { marginTop: '7px' } },
+                        '正文都写好了：改完 manuscript.json 必须重跑第 7 阶段（生成 output/manuscript.docx），否则交付的还是上一版成稿。'
                       )
-                    : null
-                )
-              ),
-              spec.exists && spec.placeholders
-                ? h(
-                    'div',
-                    { className: 'dsa-hint', style: { marginTop: '7px' } },
-                    '正文还没写：「待补」段落要按改稿说明补成真正段落，写进去的每个数字都要能追到 output/models/ 或 output/dataset/analysis.csv。'
-                  )
-                : null,
-              manNote ? h('div', { className: 'dsa-hint', style: { marginTop: '7px' } }, manNote) : null
-            )
-          );
+                    : null,
+                manNote
+                  ? h('div', { className: 'dsa-hint', role: 'status', 'aria-live': 'polite', style: { marginTop: '7px' } }, manNote)
+                  : null
+              )
+            );
+          }
         }
 
         var main = h(

@@ -289,7 +289,7 @@ function checkR10(projectRoot) {
   if (!statOf(docx).exists) return check('R10', 'unjudged', '还没有 manuscript.docx');
   const spec = readJson(path.join(projectRoot, 'manuscript.json'));
   if (!spec || !Array.isArray(spec.blocks)) return check('R10', 'unjudged', '缺 manuscript.json：无法比对图表块');
-  const wanted = spec.blocks.filter((block) => String(block.type) === 'figure').length;
+  const wanted = spec.blocks.filter((block) => block && String(block.type) === 'figure').length;
   const reports = readQaReports(projectRoot);
   const newest = reports.slice().sort((a, b) => (b.mtimeMs || 0) - (a.mtimeMs || 0))[0];
   const embedded = newest?.json?.checks?.docx?.inline_images;

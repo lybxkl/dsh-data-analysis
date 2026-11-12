@@ -164,6 +164,20 @@ for (const source of [client, read('src/prompt.js')]) {
 const ghostTools = [...referencedTools].filter((name) => !declaredTools.has(name)).sort();
 report('提到的工具都注册了', ghostTools.length === 0, ghostTools.length ? ghostTools.join('、') : `${declaredTools.size} 个工具`);
 
+// README 的工具清单也在这条线上：漏一个就是「有这个工具但文档里找不到」。
+// README 用短名（`status` 而不是 `data_analysis_status`），两种都认。
+const readme = read('README.md');
+const undocumentedTools = [...declaredTools]
+  .filter((name) => !readme.includes(name) && !readme.includes(name.replace('data_analysis_', '')))
+  .sort();
+report('注册的工具都在 README 里出现过', undocumentedTools.length === 0, undocumentedTools.length ? undocumentedTools.join('、') : `${declaredTools.size} 个`);
+const readmeToolCount = readme.match(/模型工具（(\d+)\s*个/);
+report(
+  'README 写的工具数是对的',
+  !readmeToolCount || Number(readmeToolCount[1]) === declaredTools.size,
+  readmeToolCount ? `README ${readmeToolCount[1]} / 实际 ${declaredTools.size}` : 'README 没写具体数字，跳过',
+);
+
 /* ---------------- 5. 面板读的快照字段 ---------------- */
 
 const snapshotKeys = new Set();
@@ -181,6 +195,19 @@ const knownSnapshotFields = new Set([
 ]);
 const unknownSnapFields = [...clientSnapReads].filter((key) => !knownSnapshotFields.has(key)).sort();
 report('面板只读快照里有的字段', unknownSnapFields.length === 0, unknownSnapFields.length ? unknownSnapFields.join('、') : `${clientSnapReads.size} 个字段`);
+
+// 二级字段（artifacts.X / materials.X）同样会静默降级：删掉服务端那个键，面板只会少一块，
+// 不报错。这里按「客户端读了、服务端必须产出」对一遍。
+const clientArtifactReads = new Set();
+for (const match of client.matchAll(/artifacts\.([A-Za-z0-9_]+)/g)) clientArtifactReads.add(match[1]);
+const ghostArtifacts = [...clientArtifactReads]
+  .filter((key) => !new RegExp('\\b' + key + '\\s*:').test(service))
+  .sort();
+report(
+  '面板读的 artifacts 二级字段，服务端都产出了',
+  ghostArtifacts.length === 0,
+  ghostArtifacts.length ? ghostArtifacts.join('、') : `${clientArtifactReads.size} 个字段`,
+);
 
 process.stdout.write('\n');
 if (failed) {

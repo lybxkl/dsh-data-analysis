@@ -22,6 +22,10 @@ const CLIENT = path.join(here, '..', 'client.js');
 let current = null;
 const instances = [];
 let dirty = false;
+// hook 状态按「组件位置 + hook 序号」存起来，跨多次 re-render 保真——
+// 否则点一下按钮 setState 之后，下一轮渲染又把状态重置回初值，交互根本测不出来
+let store = new Map();
+let cmpSeq = 0;
 
 function slot() {
   if (!current) throw new Error('hook called outside render');
@@ -29,6 +33,10 @@ function slot() {
   const index = inst.i;
   inst.i += 1;
   return { inst, index };
+}
+
+function hookKey(inst, index) {
+  return String(inst.key) + ':' + String(index);
 }
 
 const React = {
@@ -41,12 +49,15 @@ const React = {
   },
   useState(initial) {
     const { inst, index } = slot();
-    if (!(index in inst.slots)) inst.slots[index] = initial;
+    const key = hookKey(inst, index);
+    if (!store.has(key)) store.set(key, initial);
     const setter = (value) => {
-      inst.slots[index] = typeof value === 'function' ? value(inst.slots[index]) : value;
-      inst.changed = true;
+      const next = typeof value === 'function' ? value(store.get(key)) : value;
+      if (Object.is(next, store.get(key))) return;
+      store.set(key, next);
+      dirty = true;
     };
-    return [inst.slots[index], setter];
+    return [store.get(key), setter];
   },
   useEffect() {},
   useLayoutEffect() {},
@@ -60,8 +71,9 @@ const React = {
   },
   useRef(value) {
     const { inst, index } = slot();
-    if (!(index in inst.slots)) inst.slots[index] = { current: value };
-    return inst.slots[index];
+    const key = hookKey(inst, index);
+    if (!store.has(key)) store.set(key, { current: value });
+    return store.get(key);
   },
 };
 React.default = React;
@@ -78,7 +90,8 @@ function expand(node, depth = 0) {
   if (!isElement(node)) return { text: String(node) };
   const { type, props } = node;
   if (typeof type === 'function') {
-    const inst = { fn: type, slots: {}, i: 0, changed: false };
+    cmpSeq += 1;
+    const inst = { fn: type, key: cmpSeq, slots: {}, i: 0, changed: false };
     instances.push(inst);
     const prev = current;
     current = inst;
@@ -96,13 +109,45 @@ function expand(node, depth = 0) {
 
 function renderRoot(Component, props) {
   instances.length = 0;
+  store = new Map();
   for (let pass = 0; pass < 5; pass += 1) {
     dirty = false;
     current = null;
+    cmpSeq = 0;
     const tree = expand(React.createElement(Component, props));
     if (!dirty) return tree;
   }
+  cmpSeq = 0;
   return expand(React.createElement(Component, props));
+}
+
+/** 可交互的挂载：保留 hook 状态，能点按钮并等 re-render 收敛。 */
+function mountPanel(props = {}) {
+  instances.length = 0;
+  store = new Map();
+  const step = () => {
+    dirty = false;
+    current = null;
+    cmpSeq = 0;
+    return expand(React.createElement(PANEL, props));
+  };
+  let tree = step();
+  for (let pass = 0; pass < 6 && dirty; pass += 1) tree = step();
+  return {
+    tree: () => tree,
+    text: () => textOf(tree),
+    buttons: () => findAllByClass(tree, 'dsa-btn').map((item) => textOf(item).trim()).filter(Boolean),
+    click(label) {
+      const hit = findAllByClass(tree, 'dsa-btn').find((item) => textOf(item).trim() === label);
+      if (!hit) return false;
+      hit.props.onClick();
+      for (let pass = 0; pass < 6; pass += 1) {
+        tree = step();
+        if (!dirty) break;
+      }
+      return true;
+    },
+  };
 }
 
 function textOf(tree) {
@@ -148,6 +193,10 @@ const PATCHES = [
   ['var widthState = useState(\'wide\');', 'var widthState = useState(globalThis.__DSA__.width);'],
   ['var themeState = useState(\'light\');', 'var themeState = useState(globalThis.__DSA__.theme);'],
   ['var selectedState = useState(\'scope\');', 'var selectedState = useState(globalThis.__DSA__.selected);'],
+  // 手稿骨架的交互态：生成中 / 结果提示 / 重排确认条
+  ['var manBusyState = useState(\'\');', 'var manBusyState = useState(globalThis.__DSA__.manBusy || \'\');'],
+  ['var manNoteState = useState(\'\');', 'var manNoteState = useState(globalThis.__DSA__.manNote || \'\');'],
+  ['var manAskState = useState(false);', 'var manAskState = useState(Boolean(globalThis.__DSA__.manAsk));'],
   // 输入行零件读的是 /summary；这里没有服务端，直接把摘要种进它的 useState
   ['var stateTuple = useState(null);', 'var stateTuple = useState(globalThis.__DSA__.wb);'],
 ];
@@ -572,6 +621,134 @@ scenario(
   },
 );
 
+scenario(
+  '手稿骨架：宿主还是旧版，没有这个字段',
+  {
+    selected: 'manuscript',
+    snap: Object.assign({}, SNAP, {
+      stages: MANUSCRIPT_STAGES,
+      artifacts: Object.assign({}, SNAP.artifacts),
+    }),
+  },
+  (tree, text) => {
+    check(text.includes('宿主还没有提供手稿骨架的接口'), '如实说宿主版本旧');
+    check(!text.includes('生成手稿骨架'), '不谎报可以生成');
+    check(!text.includes('还没有 manuscript.json'), '不谎报文件不存在');
+  },
+);
+scenario(
+  '手稿骨架：计数字段缺失也不漏 undefined',
+  {
+    selected: 'manuscript',
+    snap: Object.assign({}, SNAP, {
+      stages: MANUSCRIPT_STAGES,
+      artifacts: Object.assign({}, SNAP.artifacts, { manuscriptSpec: { exists: true } }),
+    }),
+  },
+  (tree, text) => {
+    check(text.includes('块 0'), '缺计数按 0 显示');
+    check(!text.includes('undefined'), '没有 undefined 漏到界面上');
+  },
+);
+scenario(
+  '手稿骨架：重排要先确认',
+  {
+    selected: 'manuscript',
+    manAsk: true,
+    snap: Object.assign({}, SNAP, {
+      stages: MANUSCRIPT_STAGES,
+      artifacts: Object.assign({}, SNAP.artifacts, {
+        manuscriptSpec: { exists: true, blocks: 14, figures: 3, tables: 1, placeholders: 5 },
+      }),
+    }),
+  },
+  (tree, text) => {
+    check(text.includes('都会被覆盖'), '确认条说清会覆盖什么');
+    check(text.includes('确认重排') && text.includes('取消'), '确认条有确认与取消');
+    check(text.includes('manuscript.json.bak-'), '说明会先备份');
+    check(!text.includes('undefined'), '没有 undefined 漏到界面上');
+  },
+);
+
+scenario(
+  '手稿骨架：JSON 跑不了（结构不对）',
+  {
+    selected: 'manuscript',
+    snap: Object.assign({}, SNAP, {
+      stages: MANUSCRIPT_STAGES,
+      artifacts: Object.assign({}, SNAP.artifacts, {
+        manuscriptSpec: { exists: true, error: 'blocks 是空的', errorKind: 'structure', blocks: 0, figures: 0, tables: 0, placeholders: 0 },
+      }),
+    }),
+  },
+  (tree, text) => {
+    check(text.includes('manuscript.json 跑不了'), '标题说跑不了，不说已就绪');
+    check(text.includes('跑不了：blocks 是空的'), '把结构错误原样说出来');
+    check(!text.includes('已就绪'), '不谎报已就绪');
+  },
+);
+scenario(
+  '手稿骨架：图块缺 png',
+  {
+    selected: 'manuscript',
+    snap: Object.assign({}, SNAP, {
+      stages: MANUSCRIPT_STAGES,
+      artifacts: Object.assign({}, SNAP.artifacts, {
+        manuscriptSpec: { exists: true, blocks: 12, figures: 3, figuresMissing: 2, tables: 1, placeholders: 2 },
+      }),
+    }),
+  },
+  (tree, text) => {
+    check(text.includes('缺 2 张图'), '标题点名缺几张图');
+    check(text.includes('第 7 阶段会失败'), '说清后果');
+  },
+);
+
+/* 6b. 点「重排骨架」必须先弹确认条——不是直接覆盖 */
+{
+  process.stdout.write('\n手稿骨架：点重排先确认\n');
+  globalThis.__DSA__ = {
+    snap: Object.assign({}, SNAP, {
+      stages: MANUSCRIPT_STAGES,
+      artifacts: Object.assign({}, SNAP.artifacts, {
+        manuscriptSpec: { exists: true, blocks: 14, figures: 3, tables: 1, placeholders: 5 },
+      }),
+    }),
+    pre: SNAP.preflight,
+    loading: false,
+    dialog: null,
+    width: 'wide',
+    theme: 'light',
+    selected: 'manuscript',
+  };
+  const view = mountPanel({});
+  check(view.text().includes('重排骨架'), '有「重排骨架」按钮');
+  const clicked = view.click('重排骨架');
+  check(clicked, '按钮点得到');
+  const after = view.text();
+  check(/都会被覆盖/.test(after), '点后先出现确认条，没有直接覆盖');
+  check(/确认重排/.test(after), '确认条里有「确认重排」');
+  view.click('取消');
+  check(!/都会被覆盖/.test(view.text()), '点取消后确认条收起');
+
+  // 没有 manuscript.json 时，「运行」不该是实心主按钮：同屏只能有一个主动作（生成骨架）
+  globalThis.__DSA__ = Object.assign({}, globalThis.__DSA__, {
+    snap: Object.assign({}, SNAP, {
+      stages: MANUSCRIPT_STAGES,
+      artifacts: Object.assign({}, SNAP.artifacts, { manuscriptSpec: { exists: false } }),
+    }),
+  });
+  const blank = mountPanel({});
+  const runBtn = findAllByClass(blank.tree(), 'dsa-btn').find((item) => textOf(item).trim() === '运行');
+  check(Boolean(runBtn), '无 spec 时仍有「运行」按钮');
+  check(
+    Boolean(runBtn) && !String(runBtn.props.className).split(/\s+/).includes('primary'),
+    '无 spec 时「运行」不是实心主按钮',
+    runBtn ? String(runBtn.props.className) : '',
+  );
+  check(blank.text().includes('生成手稿骨架'), '主按钮是「生成手稿骨架」');
+}
+
 /* 8. 运行台 / 运行日志的边界：没有运行记录、没有日志 */scenario('没有运行记录', { snap: Object.assign({}, SNAP, { runs: [], activeRuns: {} }) }, (tree, text) => {
   check(hasClass(tree, 'dsa-side'), '右运行台仍在');
   check(!text.includes('undefined'), '没有 undefined 漏到界面上');
@@ -628,6 +805,7 @@ const RICH_SNAP = Object.assign({}, SNAP, {
 });
 
 const STATUSES = ['done', 'blocked', 'review', 'todo', 'running'];
+const FUZZ_STAGES = STAGES.concat([stage('manuscript', 5, '文稿组装', 'todo', [])]);
 let seed = 20261112;
 function rnd() {
   seed = (seed * 1103515245 + 12345) % 2147483648;
@@ -637,7 +815,7 @@ function rnd() {
 let fuzzCrashes = 0;
 let fuzzDirty = 0;
 for (let round = 0; round < 24; round += 1) {
-  const stages = STAGES.map((item) => {
+  const stages = FUZZ_STAGES.map((item) => {
     const status = STATUSES[Math.floor(rnd() * STATUSES.length)];
     return Object.assign({}, item, {
       status,
@@ -649,6 +827,10 @@ for (let round = 0; round < 24; round += 1) {
   const snap = Object.assign({}, RICH_SNAP, {
     stages,
     activeRuns: running ? { [stages[round % stages.length].id]: { id: 'run-x', stageId: stages[round % stages.length].id, status: 'running', startedAt: '2026-11-12T10:00:00Z' } } : {},
+    // 一半轮次给完整计数、一半只给 exists：缺字段时不许漏 undefined
+    artifacts: Object.assign({}, RICH_SNAP.artifacts, {
+      manuscriptSpec: round % 2 ? { exists: true, blocks: 14, figures: 3, tables: 1, placeholders: 2 } : { exists: true },
+    }),
   });
   globalThis.__DSA__ = {
     snap,
@@ -693,11 +875,14 @@ const WB_TAIL = REGISTERED.get('conversation.chat.turnTail');
 // 持久实例：React 的 state 挂在实例上，而 renderRoot 每次都会新建实例，
 // 这里自己管一个实例，渲染时只重置 hook 指针，setState 之后重渲染才看得到效果。
 function mountComponent(Component, props) {
-  const inst = { fn: Component, slots: {}, i: 0, changed: false };
+  const inst = { fn: Component, key: 'mounted', slots: {}, i: 0, changed: false };
+  // 每个场景一份干净的 hook 状态；mount 之内多次 render 要保留状态（busy 这类交互才测得出来）
+  store = new Map();
   const render = () => {
     inst.i = 0;
     inst.changed = false;
     instances.length = 0;
+    cmpSeq = 0;
     const prev = current;
     current = inst;
     let out;

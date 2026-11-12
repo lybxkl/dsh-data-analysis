@@ -372,7 +372,11 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
       handler: (body) => {
         // 破坏性：overwrite 会覆盖已有的 manuscript.json，字符串 'false' 不能被当成真
         const result = workbench.manuscriptScaffold({ overwrite: isTrue(body?.overwrite) });
-        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error, file: result.file } };
+        if (!result.ok) {
+          // 「文件已经存在、要不要覆盖」是资源状态冲突，不是请求格式错——外部调用方要能按状态码区分
+          const status = /已经存在/.test(String(result.error || '')) ? 409 : 400;
+          return { status, payload: { ok: false, error: result.error, file: result.file } };
+        }
         return result;
       },
     },

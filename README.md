@@ -114,7 +114,7 @@ pip3 install -r SPSS-Style-Charting-Skill/requirements.txt
 | 4 | 数据集 | 人工 | `output/dataset/analysis.csv` |
 | 5 | 统计分析 | `auto_stats.py` | `output/models/coef_*.csv`、`fit*.csv` |
 | 6 | 出版级图表 | `auto_chart_pack.py` | `output/chart_pack/chart_manifest.csv` |
-| 7 | 文稿组装 | `assemble_manuscript.py` | `manuscript.json` → `output/manuscript.docx` |
+| 7 | 文稿组装 | `assemble_manuscript.py` | `manuscript.json`（输入）→ `output/manuscript.docx`（闸门证据） |
 | 8 | 终检 | `qa_outputs.py` → `verify_numbers.py` | `output/qa/qa_report.json`、`output/verify/number_issues.csv` |
 | 9 | 复核与修订 | 机器复算 + 模型审计（无脚本） | `output/recheck/issues.jsonl`、`coverage.json`、`report.md` |
 
@@ -286,7 +286,9 @@ data_analysis_status
   点进去还是以闸门为准——`闸门未过` 跳过还没开工的阶段，所以它不会因为「还没跑」而虚高。
 - **手稿骨架卡**：只在第 7 阶段出现。没有 `manuscript.json` 时只有一个「生成手稿骨架」按钮；
   有了之后显示块数 / 图 / 表 / 还有几段「待补」，并多出「让 AI 写成正文」（把改稿说明投进研究对话）。
-  已有文件时按钮改成「重排骨架」——它会冲掉现有正文，所以别在有稿子时顺手点。
+  已有文件时按钮改成「重排骨架」——它会冲掉现有正文，所以点它先弹确认条（说清会覆盖什么、
+  原文件备份成 `manuscript.json.bak-…`）；第 7 阶段正在跑时按钮不可点。
+  图块缺 png 时标题会变成「已就绪，但缺 N 张图（第 7 阶段会失败）」。
 - **人工裁定**：只有标了「人工」的闸门有「现在拍板」按钮；弹窗先摆证据（闸门结论、来源、阶段、
   最近一次运行），再让你写理由并选「确认通过 / 打回重做」。阶段重跑后旧裁定自动失效
   （详情里会写明两次时间），需要对新产物重新确认。未开工阶段不出现拍板按钮。
@@ -382,10 +384,25 @@ data_analysis_status
   `data_analysis_manuscript`（面板第 7 阶段的「手稿骨架」卡也走同一套）——
   - `action=scaffold` 按 `chart_manifest.csv` 的 section 分组拼骨架：figure 块照抄 png / caption / n，
     模型表转 table 块，正文段落一律留「待补」。**骨架里不出现任何自己编的数字**；已有 `manuscript.json` 时不覆盖，重排要显式 `overwrite`。
-  - `action=brief` 给一段改稿说明：figure 的 png / caption / n 不许改（N 是第 8 阶段的核对口径）、
+    - 前置条件是第 6 阶段已经跑出图表清单；**没有清单时骨架仍然写得出来，但里面一张图都没有**，
+      返回值里的 `warning` 与卡片上的提示会说明「先跑第 6 阶段，再重排骨架」。
+    - png 路径按**清单所在目录**解析（`output/chart_pack/` 与 `output/figures/` 都对）。
+    - 题注里已经写了 `N=…` 的，不再追加 `n` —— 否则 Word 里会变成「（N=320）（N=320）」。
+    - `status` 不是 ok、或 png 文件不在的图会被跳过（分开记在 `skippedBadStatus` / `skippedNoPng`，
+      卡片会分别提示「先重跑第 6 阶段」与「把图补齐」）。
+    - 重排前把原文件备份成 `manuscript.json.bak-YYYYMMDD-HHMMSS`；备份失败就不覆盖。
+      0 块的空壳（`{}` / `{"style":{}}`）不算「写过的稿子」，可以直接重建。
+  - `action=brief` 给一段改稿说明：figure 的 png / caption 不许改（题注里的 N 是第 8 阶段的核对口径）、
     每个数字都要追到 `output/models/*.csv` 或 `output/dataset/analysis.csv`、图号从 1 连续、写完自己 parse。
-  - `action=status` 只看现状（块数 / 图 / 表 / 还有几段待补）。
-  面板里对应「生成手稿骨架 → 让 AI 写成正文」两个按钮，后者会把改稿说明投进研究对话。
+    文件解析不了、结构跑不通（`blocks` 不是数组 / 空、未知 type、table 缺 csv 或 csv 没有数据行）、
+    或图块缺 png 时，说明里会直接点出来。
+    - **改完 `manuscript.json` 必须重跑第 7 阶段**（`data_analysis_run_stage(stageId="manuscript")`）
+      生成 `output/manuscript.docx`，再跑第 8 阶段终检。闸门只认这个 docx；改了 JSON 不重跑，
+      `manuscript-fresh` 会判「判不了」并把阶段挂回 review，避免交付旧稿。
+    - 调换 figure 块的顺序会让图号跟着块序变，正文里的「图N」必须同步改，否则图文错配。
+  - `action=status` 只看现状（块数 / 图 / 表 / 还有几段待补；结构不对的块与缺 png 的图块单列）。
+  面板里对应「生成手稿骨架 → 让 AI 写成正文」两个按钮，后者会把改稿说明投进研究对话；
+  要重排会先弹确认条（说明会覆盖什么、备份叫什么），第 7 阶段正在跑时按钮不可点。
 
 ## 闸门的关键判定（来自源码，不来自文档叙述）
 
@@ -410,6 +427,8 @@ data_analysis_status
   阶段之后再跑过一次，旧裁定**自动失效**（退回待裁定并写明两次时间），必须对当前产物重新确认。
 - **取消**：取消是用户动作，运行记录记 `cancelled` 且退出码留空；不要把 Windows 上 taskkill 的 1 当成失败证据。
 - **未开工 ≠ 未过**：还没产物、没运行、也没裁定的阶段是「未开始」，不计入「未过」总数，也不画成 ✗。
+- **手稿与成稿同步**：`manuscript.json` 比 `output/manuscript.docx` 新（超过 1 秒）时，第 7 阶段多一条
+  `manuscript-fresh` 判「判不了」——闸门只查 docx 存在，没有这条就会拿旧 docx 报 done，属于静默交付旧稿。
 - **多步阶段**：终检是 `qa_outputs.py → verify_numbers.py` 两步；面板显示两步脚本名，参数在任务卡与运行日志里。
 
 ## 模型工具（18 个）

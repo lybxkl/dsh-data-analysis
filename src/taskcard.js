@@ -57,8 +57,10 @@ const MANUAL_BRIEF = {
     '构建脚本放 scripts/ 并在 project.json 里登记（可选），但产物必须是 output/dataset/analysis.csv——data/ 是语料根，宽表放进去会被下一次审计当成一份资料。',
   ],
   manuscript: [
-    '先写 manuscript.json（章节、表格、图、题注的 spec），再运行 assemble_manuscript.py。',
-    '正文里的每个数字都要能落到 output/models 或 output/tables 的单元格；图注必须带 N。',
+    '先调 data_analysis_manuscript action=scaffold 生成骨架（按图表清单的 section 分组，figure 块的 png/caption 照抄清单，正文留「待补」；png 缺失或 status 不是 ok 的图会被跳过）。',
+    '再按 action=brief 的改稿说明把「待补」写成正文，只改 manuscript.json；不要凭空手写一份 spec 绕过骨架。',
+    '正文里的每个数字都要能落到 output/models/*.csv 或 output/dataset/analysis.csv 的原值；图注里的 N 不要重复加。',
+    '改完必须重跑第 7 阶段（data_analysis_run_stage(stageId="manuscript")）生成 output/manuscript.docx——闸门只认这个 docx；再跑第 8 阶段终检。',
     '不要手改 docx 绕过统计结果；数字对不上就回到 stats/figures 修产物。',
   ],
   recheck: [
