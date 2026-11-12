@@ -813,6 +813,14 @@
         '.dsa-btn.danger{color:var(--dsa-err);border-color:color-mix(in srgb,var(--dsa-err) 40%,var(--dsa-line2));}',
         '.dsa-btn.ghost{border-color:transparent;background:transparent;color:var(--dsa-ink2);}',
         '.dsa-btn.ghost:hover{background:var(--dsa-hover);color:var(--dsa-ink);}',
+        // 设置常驻顶栏：图标+文字，窄屏只留齿轮（标题/无障碍名还在，不会变成无字按钮）
+        '.dsa-settings-btn{display:inline-flex;align-items:center;gap:5px;}',
+        '.dsa-settings-btn .dsa-ico{font-size:13px;line-height:1;}',
+        '.dsa-root[data-dsa-width="narrow"] .dsa-settings-btn .dsa-settings-label{display:none;}',
+        // 空状态三步动线：编号列表，弱化正文但让「第几步」一眼可数
+        '.dsa-steps{margin:12px 0 10px;padding-left:20px;color:var(--dsa-ink2);font-size:12.5px;line-height:1.85;}',
+        '.dsa-steps li::marker{color:var(--dsa-ink3);font-variant-numeric:tabular-nums;}',
+        '.dsa-steps b{color:var(--dsa-ink);font-weight:600;}',
         '.dsa-body{flex:1 1 auto;display:flex;min-height:0;}',
         '.dsa-rail{flex:0 0 296px;width:296px;border-right:1px solid var(--dsa-line);background:var(--dsa-band);',
         '  overflow-y:auto;padding:6px 0 16px;}',
@@ -2004,6 +2012,31 @@
             onChat: current ? function () { doAskAI(current); } : null,
             onReview: reviewNow
           }),
+          // 材料库是「给项目喂资料」的主入口，不该藏在项目菜单里：和设置一样常驻顶栏。
+          h(
+            Btn,
+            {
+              className: 'dsa-settings-btn',
+              variant: 'ghost',
+              title: '材料库：把项目外的资料目录挂进来，不复制',
+              onClick: function () { setDialog({ kind: 'materials' }); }
+            },
+            h('span', { className: 'dsa-ico', 'aria-hidden': 'true' }, '🗂'),
+            h('span', { className: 'dsa-settings-label' }, '材料')
+          ),
+          // 设置是「配置入口」，不是项目动作：常驻在顶栏右上角，别塞进「项目」菜单里让人翻。
+          // 窄屏只留图标（标题与无障碍名仍在），不给顶栏添负担。
+          h(
+            Btn,
+            {
+              className: 'dsa-settings-btn',
+              variant: 'ghost',
+              title: '设置：技能目录 · Python · 台账位置 · 模型',
+              onClick: function () { setDialog({ kind: 'settings' }); }
+            },
+            h('span', { className: 'dsa-ico', 'aria-hidden': 'true' }, '⚙'),
+            h('span', { className: 'dsa-settings-label' }, t('settings'))
+          ),
           h(
             'details',
             { className: 'dsa-menu' },
@@ -2012,9 +2045,7 @@
               'div',
               { className: 'dsa-menu-list' },
               h('button', { type: 'button', onClick: function () { setDialog({ kind: 'open' }); } }, t('open')),
-              h('button', { type: 'button', onClick: function () { setDialog({ kind: 'create' }); } }, t('create')),
-              h('button', { type: 'button', onClick: function () { setDialog({ kind: 'materials' }); } }, '材料库…'),
-              h('button', { type: 'button', onClick: function () { setDialog({ kind: 'settings' }); } }, t('settings'))
+              h('button', { type: 'button', onClick: function () { setDialog({ kind: 'create' }); } }, t('create'))
             )
           ),
           h(Btn, { className: 'dsa-drawer-toggle', variant: 'ghost', onClick: function () { setDrawer(!drawer); } }, t('drawer')),
@@ -2032,6 +2063,14 @@
               'div',
               { className: 'dsa-card dsa-pad', style: { maxWidth: '640px', marginTop: '24px' } },
               h('div', { className: 'dsa-empty' }, h('b', null, t('emptyTitle')), t('emptyHint')),
+              // 第一次打开的人不知道下一步该点哪个按钮：把动线按顺序摆出来，而不是让人猜
+              h(
+                'ol',
+                { className: 'dsa-steps' },
+                h('li', null, h('b', null, '先确认环境'), ' —— 技能包、Python、依赖；缺了让 AI 装，或点顶栏 ⚙ 手动指定'),
+                h('li', null, h('b', null, '再选一个项目目录'), ' —— 新建（空目录）或打开已有项目'),
+                h('li', null, h('b', null, '然后把资料挂进来'), ' —— 顶栏「材料」，资料留在原地，不复制')
+              ),
               h(
                 'div',
                 { className: 'dsa-hint', style: { margin: '0 0 14px' } },
