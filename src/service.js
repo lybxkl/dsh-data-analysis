@@ -1284,11 +1284,23 @@ export class Workbench {
         if (fs.existsSync(path.join(projectRoot, arg))) return arg;
         return fs.existsSync(path.join(projectRoot, 'data', 'analysis.csv')) ? 'data/analysis.csv' : arg;
       });
+      // 可选参数：项目根上确实有这个配置文件才带上（chart_config.json / model_spec.json）。
+      // 不传的后果很实在——统计不到模型、图表推断不出结局变量直接退出 2。
+      const extras = [];
+      if (scriptRel === stage.script) {
+        for (const opt of Array.isArray(stage.optionalArgs) ? stage.optionalArgs : []) {
+          if (!opt || !opt.flag || !opt.file) continue;
+          if (resolved.indexOf(opt.flag) >= 0) continue;
+          if (!fs.existsSync(path.join(projectRoot, opt.file))) continue;
+          extras.push(opt.flag, opt.file);
+        }
+      }
+      const argv = [scriptAbs, ...resolved, ...extras];
       steps.push({
         script: scriptRel,
         scriptAbs,
-        argv: [scriptAbs, ...resolved],
-        display: [python, scriptAbs, ...resolved].join(' '),
+        argv,
+        display: [python, ...argv].join(' '),
         continueOnError: item.continueOnError === true,
       });
     }
@@ -1333,6 +1345,13 @@ export class Workbench {
     const live = this.runner.activeFor(active.id);
     if (live[stageId]) {
       return { ok: false, error: `${stage.name} 已有运行在跑（${live[stageId].id}），先等它结束或取消` };
+    }
+    // 同一项目里别的阶段还在跑：两个脚本会同时往 output/ 里写，闸门读到的是半成品。
+    const busyStages = Object.keys(live).filter((id) => id !== stageId);
+    if (busyStages.length) {
+      const names = busyStages.map((id) => (STAGE_BY_ID.get(id) || {}).name || id);
+      const error = `${names.join('、')} 正在运行，等它结束再跑这一步（确需并行请显式 force）`;
+      if (!force) return { ok: false, error, blockers: [error] };
     }
 
     const command = this.commandFor(active.path, active.project, stage);

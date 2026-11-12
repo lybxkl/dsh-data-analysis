@@ -60,15 +60,40 @@ export class Runner {
     return [...LIVE.values()].map((live) => this.summary(live));
   }
 
+  /**
+   * 运行中对象的对外视图：只给白名单字段。
+   * 直接把 live 摊出去会把 child / stream / decoder 也塞进 API 响应，
+   * JSON.stringify 遇到 fs.WriteStream 会抛错——「看日志」在跑着的时候直接 500。
+   */
   summary(live) {
-    const { child, ...rest } = live;
-    return { ...rest, alive: Boolean(child) && child.exitCode === null };
+    return {
+      id: live.id,
+      stageId: live.stageId,
+      projectId: live.projectId,
+      projectRoot: live.projectRoot,
+      startedAt: live.startedAt,
+      logFile: live.logFile,
+      command: live.command,
+      logLines: live.logLines ? live.logLines.slice(-400) : [],
+      cancelRequested: Boolean(live.cancelRequested),
+      status: 'running',
+      endedAt: null,
+      exitCode: null,
+      signal: null,
+      alive: Boolean(live.child) && live.child.exitCode === null,
+    };
   }
 
   getRun(id) {
     const live = LIVE.get(id);
-    if (live) return this.summary(live);
-    return (this.store.get().runs || []).find((run) => run.id === id) || null;
+    if (live) {
+      // 运行中的记录还没结算：以台账里的那条（含 steps 状态）为底，补上「正在跑」的事实
+      const stored = (this.store.get().runs || []).find((run) => run.id === id) || {};
+      return { ...stored, ...this.summary(live), steps: stored.steps || [] };
+    }
+    const settled = (this.store.get().runs || []).find((run) => run.id === id);
+    // 结算后的记录也带上 alive=false：调用方只要读这一个字段就能判断「还在不在跑」
+    return settled ? { ...settled, alive: false } : null;
   }
 
   /** 某个项目某个阶段是否已有进程在跑。 */

@@ -413,8 +413,9 @@ data_analysis_status
 ## 测试
 
 ```bash
-npm test                          # 下面六套全跑，一条命令（e2e 单独跑，见最后一行）
+npm test                          # 下面七套全跑，一条命令（e2e 单独跑，见最后一行）
 node tests/materials.test.mjs     # 通道分类、挂载、迁移、识图全流程、来源账、移除项目（全在临时目录里造数据）
+node tests/runner.test.mjs        # 运行器视图与阶段命令：跑着的 run 有 status、可选 --config/--spec、并发阶段守卫
 node tests/gates.test.mjs         # 闸门三态：pass / fail / unjudged 的边界，用合成项目逐条打
 node tests/recheck.test.mjs       # 复核与补丁：baseHash、越界、目录联接穿透、备份命名、12 项复算口径
 node tests/consistency.test.mjs   # 静态对账：文案键 / CSS 类 / 接口路径 / 工具名 / 快照字段
@@ -530,7 +531,7 @@ dsh-data-analysis/
   src/routes.js       /data-analysis/api/* 面板通道
   src/prompt.js       注入系统提示的使用规则
   assets/render_pages.py  数页 / 渲染页图 / 图片转 PNG（PyMuPDF + Pillow）
-  tests/              7 套回归：materials / gates / recheck / consistency / client-smoke / visual / e2e-corpus
+  tests/              8 套回归：materials / runner / gates / recheck / consistency / client-smoke / visual / e2e-corpus
 ```
 
 ## 两个 Node 的坑（Windows）

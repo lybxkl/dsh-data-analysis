@@ -82,6 +82,12 @@ export const STAGE_DEFS = [
     purpose: '描述统计 + 回归 + 诊断，产出 coef_*.csv 与 model_meta.json',
     script: 'scripts/auto_stats.py',
     args: ['--data', 'output/dataset/analysis.csv', '--out', 'output/models'],
+    // 项目根上有配置文件时自动带上：不传 --config 统计脚本会瞎猜结局变量，
+    // 不传 --spec 则一张模型表都不产出（重跑一次就把已有模型洗掉）。
+    optionalArgs: [
+      { flag: '--config', file: 'chart_config.json' },
+      { flag: '--spec', file: 'model_spec.json' },
+    ],
     artifacts: ['output/models/model_meta.json'],
   },
   {
@@ -92,6 +98,8 @@ export const STAGE_DEFS = [
     purpose: '全景图表包与 chart_manifest.csv（dpi / px_width / N / 调色板）',
     script: 'scripts/auto_chart_pack.py',
     args: ['--data', 'output/dataset/analysis.csv', '--out', 'output/chart_pack'],
+    // 有 chart_config.json 就带上：不传的话脚本无法推断结局变量，直接退出 2。
+    optionalArgs: [{ flag: '--config', file: 'chart_config.json' }],
     artifacts: ['output/chart_pack/chart_manifest.csv'],
   },
   {
