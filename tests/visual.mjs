@@ -1070,6 +1070,22 @@ async function main() {
     console.log('');
   }
 
+  for (const { item, probe, hoverBg } of composerResults) {
+    console.log('输入行 ' + item.key);
+    if (probe.missing) {
+      line('结果', '没渲染出来');
+      console.log('');
+      continue;
+    }
+    line('按钮宽', Math.round(probe.pillW) + 'px（封顶 ' + probe.capW + 'px，输入行 ' + Math.round(probe.rowW) + 'px）');
+    line('边框', probe.borderStyle + ' ' + probe.borderWidth + ' · alpha ' + probe.borderAlpha.toFixed(2));
+    line('字号', probe.fontSize + 'px');
+    line('文字', probe.label);
+    line('省略', probe.clip ? probe.clip.scroll + ' / ' + probe.clip.client : '—');
+    line('悬停底', hoverBg || '—');
+    console.log('');
+  }
+
   if (problems.length) {
     console.log('✗ 有问题 ' + problems.length + ' 条：');
     for (const problem of problems) console.log('  - ' + problem);

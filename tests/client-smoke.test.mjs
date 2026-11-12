@@ -148,6 +148,8 @@ const PATCHES = [
   ['var widthState = useState(\'wide\');', 'var widthState = useState(globalThis.__DSA__.width);'],
   ['var themeState = useState(\'light\');', 'var themeState = useState(globalThis.__DSA__.theme);'],
   ['var selectedState = useState(\'scope\');', 'var selectedState = useState(globalThis.__DSA__.selected);'],
+  // 输入行零件读的是 /summary；这里没有服务端，直接把摘要种进它的 useState
+  ['var stateTuple = useState(null);', 'var stateTuple = useState(globalThis.__DSA__.wb);'],
 ];
 
 function loadPanel() {
@@ -199,7 +201,7 @@ function loadPanel() {
   });
   const panel = registered.get('main');
   if (!panel) throw new Error('没有注册 main 面板');
-  return { panel, slots: [...registered.keys()] };
+  return { panel, slots: [...registered.keys()], registered };
 }
 
 /* ---------------- 夹具 ---------------- */
@@ -350,9 +352,11 @@ function scenario(name, fixture, assert) {
 process.stdout.write('\nclient.js 冒烟测试\n');
 
 let PANEL = null;
+let REGISTERED = new Map();
 try {
   const loaded = loadPanel();
   PANEL = loaded.panel;
+  REGISTERED = loaded.registered;
   check(true, 'client.js 能加载并注册面板', loaded.slots.join('、'));
 } catch (error) {
   check(false, 'client.js 加载失败', String((error && error.message) || error));
@@ -632,6 +636,248 @@ for (let round = 0; round < 24; round += 1) {
 process.stdout.write('\n随机组合（24 轮：阶段状态 × 选中项 × 窄屏 × 暗色 × 制品数据）\n');
 check(fuzzCrashes === 0, '没有渲染崩溃', fuzzCrashes ? fuzzCrashes + ' 轮崩溃' : '');
 check(fuzzDirty === 0, '没有 undefined / NaN 漏到界面', fuzzDirty ? fuzzDirty + ' 轮' : '');
+
+/* ------------------------------------------------------------------ *
+ * 10. 输入行左侧的「下一步」：四种状态 + 一次起跑
+ *
+ * 这段 UI 长在宿主的输入行里，不在面板里，源码里也是纯前端状态机，所以不开浏览器就能验：
+ * 持久实例 + 假 fetch，断言「点下去只发一次 run」「结果写在按钮里」「会话对不上不掺和」。
+ * 真排版（宽度封顶、边框、省略号）在 tests/visual.mjs 里量，两边分工不同。
+ * ------------------------------------------------------------------ */
+
+const NEXT_STEP = REGISTERED.get('conversation.input.left');
+const WB_TAIL = REGISTERED.get('conversation.chat.turnTail');
+
+// 持久实例：React 的 state 挂在实例上，而 renderRoot 每次都会新建实例，
+// 这里自己管一个实例，渲染时只重置 hook 指针，setState 之后重渲染才看得到效果。
+function mountComponent(Component, props) {
+  const inst = { fn: Component, slots: {}, i: 0, changed: false };
+  const render = () => {
+    inst.i = 0;
+    inst.changed = false;
+    instances.length = 0;
+    const prev = current;
+    current = inst;
+    let out;
+    try {
+      out = Component(props);
+    } finally {
+      current = prev;
+    }
+    return expand(out);
+  };
+  return { inst, render };
+}
+
+function composerState(patch) {
+  return Object.assign(
+    {
+      ok: true,
+      active: { id: 'p1', name: '测试项目', path: 'C:/work/p1', sessionId: 's1' },
+      summary: { done: 3, review: 1 },
+      totals: { fail: 0 },
+      running: false,
+      next: { id: 'coding', index: 2, name: '编码与抽取', status: 'todo', script: 'x.py', args: [] },
+    },
+    patch,
+  );
+}
+
+function stubFetch(handler) {
+  const calls = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const method = (init && init.method) || 'GET';
+    const body = init && init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ url: String(url), method, body });
+    const out = (await handler(String(url), method, body)) || {};
+    const status = out.status || 200;
+    const payload = out.payload === undefined ? { ok: true } : out.payload;
+    return { ok: status >= 200 && status < 300, status, json: async () => payload };
+  };
+  return {
+    calls,
+    restore() {
+      globalThis.fetch = real;
+    },
+  };
+}
+
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+const runsTo = (calls) => calls.filter((item) => item.url.includes('/stage/run'));
+
+async function composerScenario(name, fixture, assert) {
+  process.stdout.write('\n' + name + '\n');
+  globalThis.__DSA__ = Object.assign(
+    {
+      snap: SNAP,
+      pre: SNAP.preflight,
+      loading: false,
+      dialog: null,
+      width: 'wide',
+      theme: 'light',
+      selected: 'scope',
+      wb: composerState(),
+      phase: 'idle',
+      flash: '',
+    },
+    fixture || {},
+  );
+  const component = (fixture && fixture.slot) || NEXT_STEP;
+  const props = (fixture && fixture.props) || { sessionId: 's1' };
+  if (!component) {
+    check(false, 'client.js 没有注册输入行零件（conversation.input.left）');
+    return;
+  }
+  const mounted = mountComponent(component, props);
+  let tree;
+  try {
+    tree = mounted.render();
+  } catch (error) {
+    check(false, '渲染崩溃', String((error && error.stack) || error).split('\n').slice(0, 2).join(' | '));
+    return;
+  }
+  try {
+    const out = assert(tree, textOf(tree), mounted);
+    if (out && typeof out.then === 'function') await out;
+  } catch (error) {
+    check(false, '断言抛错', String((error && error.message) || error));
+  }
+}
+
+await composerScenario('输入行：可运行的阶段', {}, (tree, text) => {
+  const btn = findByClass(tree, 'dsa-chat-btn');
+  check(Boolean(btn), '渲染出按钮');
+  check(text.includes('运行下一步'), '标签是「运行下一步」');
+  check(text.includes('编码与抽取'), '带阶段名');
+  check(hasClass(tree, 'dsa-cmp'), '外面有封顶容器 dsa-cmp');
+  check(tree && tree.props && tree.props.role === 'status', '整块带 role=status，读屏能读到状态变化');
+  check(!hasClass(tree, 'dsa-hint'), '不再有挂在旁边的提示句（老实现会越写越长）');
+  check(text.includes('▶'), '可运行时是 ▶，不是箭头指向面板');
+});
+
+await composerScenario('输入行：点一下只起跑一次', {}, async (tree, text, mounted) => {
+  const stub = stubFetch((url) =>
+    url.includes('/stage/run') ? { payload: { ok: true, run: { id: 'run-9' } } } : { payload: composerState() },
+  );
+  try {
+    findByClass(tree, 'dsa-chat-btn').props.onClick();
+    const mid = mounted.render();
+    const busy = findByClass(mid, 'dsa-chat-btn');
+    check(hasClass(mid, 'dsa-cmp-spin'), '点下去立刻转圈（不用等回包）');
+    check(textOf(busy).includes('启动中'), '按钮文字换成「启动中」');
+    check(busy.props.disabled === true, '启动中禁用，防连点');
+    check(busy.props['aria-busy'] === 'true', '带 aria-busy=true');
+
+    await flush();
+    await flush();
+    const after = mounted.render();
+    const btn = findByClass(after, 'dsa-chat-btn');
+    const wrap = findByClass(after, 'dsa-cmp');
+    check(String(wrap && wrap.props.className).includes('tone-ok'), '成功后按钮自己变成成功色');
+    check(textOf(btn).includes('已启动 编码与抽取'), '成功反馈写在按钮里：' + textOf(btn).trim());
+    check(!btn.props.disabled, '成功后恢复可点（点一下去工作台看日志）');
+
+    btn.props.onClick();
+    await flush();
+    check(runsTo(stub.calls).length === 1, '成功窗口内再点不会发第二次 run（实际 ' + runsTo(stub.calls).length + ' 次）');
+  } finally {
+    stub.restore();
+  }
+});
+
+await composerScenario('输入行：启动失败', {}, async (tree, text, mounted) => {
+  const stub = stubFetch((url) =>
+    url.includes('/stage/run')
+      ? { status: 409, payload: { ok: false, error: '资料审计还有 2 个 error 级未过' } }
+      : { payload: composerState() },
+  );
+  try {
+    findByClass(tree, 'dsa-chat-btn').props.onClick();
+    await flush();
+    await flush();
+    const after = mounted.render();
+    const afterText = textOf(after);
+    const btn = findByClass(after, 'dsa-chat-btn');
+    const wrap = findByClass(after, 'dsa-cmp');
+    check(String(wrap && wrap.props.className).includes('tone-err'), '失败转成错误色');
+    check(afterText.includes('启动失败'), '按钮里写「启动失败」');
+    check(afterText.includes('2 个 error 级未过'), '把服务端的原因带出来，不是只写失败');
+    check(String(btn.props.title).includes('2 个 error 级未过'), '悬停能看到完整原因');
+    check(!afterText.includes('运行下一步'), '失败时不再和「运行下一步」并存（老实现两种状态同时显示）');
+  } finally {
+    stub.restore();
+  }
+});
+
+await composerScenario(
+  '输入行：运行中',
+  { wb: composerState({ running: true, next: { id: 'coding', index: 2, name: '编码与抽取', status: 'running', script: 'x.py', args: [] } }) },
+  (tree, text) => {
+    check(text.includes('运行中'), '标签是「运行中」');
+    check(text.includes('编码与抽取'), '带阶段名');
+    check(hasClass(tree, 'dsa-cmp-dot'), '有呼吸点');
+    check(String((findByClass(tree, 'dsa-cmp') || {}).props.className || '').includes('tone-run'), '整体是运行色');
+  },
+);
+
+await composerScenario(
+  '输入行：运行中点一下只看日志',
+  { wb: composerState({ running: true, next: { id: 'coding', index: 2, name: '编码与抽取', status: 'running', script: 'x.py', args: [] } }) },
+  async (tree, text, mounted) => {
+    const stub = stubFetch(() => ({ payload: composerState() }));
+    try {
+      findByClass(tree, 'dsa-chat-btn').props.onClick();
+      await flush();
+      check(runsTo(stub.calls).length === 0, '运行中再点不会重复起跑');
+    } finally {
+      stub.restore();
+    }
+  },
+);
+
+await composerScenario(
+  '输入行：被拦住（待人工）',
+  { wb: composerState({ next: { id: 'coding', index: 2, name: '编码与抽取', status: 'blocked', script: 'x.py', args: [] } }) },
+  async (tree, text, mounted) => {
+    check(text.includes('待人工'), '标签是「待人工」');
+    check(text.includes('编码与抽取'), '仍然显示卡住的阶段，方便定位');
+    check(text.includes('→'), '用 → 表示去面板处理，不用 ▶ 假装能直接跑');
+    const stub = stubFetch(() => ({ payload: composerState() }));
+    try {
+      findByClass(tree, 'dsa-chat-btn').props.onClick();
+      await flush();
+      check(runsTo(stub.calls).length === 0, '被拦住时不发 run（服务端只会回 409）');
+    } finally {
+      stub.restore();
+    }
+  },
+);
+
+await composerScenario('输入行：九个阶段都完成了', { wb: composerState({ next: null }) }, (tree, text) => {
+  check(text.includes('所有阶段都已完成'), '显示完成文案');
+  check(!findByClass(tree, 'dsa-chat-btn'), '没有可点的按钮（不给假入口）');
+  check(hasClass(tree, 'dsa-cmp-text'), '只是纯文本，不带边框');
+});
+
+await composerScenario('输入行：别的会话的工作台不掺和', { props: { sessionId: 's2' } }, (tree) => {
+  check(tree === null || tree === undefined, '会话对不上就整块不渲染');
+});
+
+await composerScenario('输入行：没有脚本的待办阶段', { wb: composerState({ next: { id: 'coding', index: 2, name: '编码与抽取', status: 'todo', script: '', args: [] } }) }, (tree, text) => {
+  check(text.includes('待人工'), '没脚本时不给「运行下一步」，避免点了必然失败');
+});
+
+await composerScenario(
+  '对话尾部：状态条走自己的样式',
+  { slot: WB_TAIL, props: { sessionId: 's1', seq: 1 } },
+  (tree, text) => {
+    check(hasClass(tree, 'dsa-cmp-tail'), '尾部状态条带 dsa-cmp-tail（不再依赖面板里的令牌）');
+    check(text.includes('测试项目'), '显示当前项目');
+    check(text.includes('完成 3'), '显示完成数');
+    check(Boolean(findByClass(tree, 'dsa-chat-btn')), '带「打开工作台」按钮');
+  },
+);
 
 process.stdout.write('\n');
 if (failedCount) {
