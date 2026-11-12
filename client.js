@@ -1000,6 +1000,9 @@
         '.dsa-next.blocked{border-left-color:var(--dsa-err);}',
         '.dsa-next.review{border-left-color:var(--dsa-warn);}',
         '.dsa-next.run{border-left-color:var(--dsa-accent);}',
+        // tone 直接取 stage.status：running 也是合法取值，todo 走默认色，别让它们悄悄没样式
+        '.dsa-next.running{border-left-color:var(--dsa-accent);}',
+        '.dsa-next.todo{border-left-color:var(--dsa-ctl);}',
         '.dsa-next-label{font-size:11.5px;font-weight:600;color:var(--dsa-accent);flex:0 0 auto;}',
         '.dsa-next-body{flex:1 1 260px;min-width:0;}',
         '.dsa-next-line{font-size:14px;font-weight:600;line-height:1.4;}',
@@ -1024,6 +1027,8 @@
         '.dsa-menu-list button .dsa-hint{display:block;margin-top:2px;padding:0;}',
         // 抽屉遮罩：点哪里都能关，Esc 也行
         '.dsa-scrim{position:absolute;inset:44px 0 0 0;background:rgba(20,20,18,.22);z-index:29;}',
+        // 只给读屏用的播报区：视觉上不可见，但不能用 display:none（那样读屏也读不到）
+        '.dsa-sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0;}',
         '.dsa-agg{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 8px;}',
         '.dsa-kv{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--dsa-ink2);}',
         '.dsa-kv b{font-family:var(--dsa-mono);font-variant-numeric:tabular-nums;}',
@@ -1220,6 +1225,19 @@
       }
 
       function Modal(props) {
+        var boxRef = useRef(null);
+
+        // 打开就把焦点放进弹窗：键盘用户不应该还停在背后的阶段栏上
+        useEffect(function () {
+          var node = boxRef.current;
+          if (!node || typeof node.focus !== 'function') return;
+          try {
+            node.focus();
+          } catch (error) {
+            /* 焦点抢不到不影响操作 */
+          }
+        }, []);
+
         // Esc 关闭：遮罩挡住了背后整块面板，没有键盘出口时用户只能找鼠标
         useEffect(function () {
           function onKey(e) {
@@ -1233,23 +1251,69 @@
           };
         }, [props.onCancel, props.onMask]);
 
+        // Tab 不能跑出弹窗：aria-modal 只是声明，焦点还得自己圈住；关闭时把焦点还给原来的位置
+        useEffect(function () {
+          var box = boxRef.current;
+          var previous = null;
+          try {
+            previous = window.document ? window.document.activeElement : null;
+          } catch (error) {
+            previous = null;
+          }
+          function onKey(e) {
+            if (e.key !== 'Tab' || !box || typeof box.querySelector !== 'function') return;
+            var nodes = box.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+            var list = Array.prototype.filter.call(nodes, function (node) {
+              return !node.disabled && node.getAttribute && node.getAttribute('aria-hidden') !== 'true';
+            });
+            if (!list.length) return;
+            var first = list[0];
+            var last = list[list.length - 1];
+            var active = window.document ? window.document.activeElement : null;
+            if (!e.shiftKey && active === last) {
+              e.preventDefault();
+              first.focus();
+            } else if (e.shiftKey && (active === first || active === box)) {
+              e.preventDefault();
+              last.focus();
+            }
+          }
+          window.addEventListener('keydown', onKey);
+          return function () {
+            window.removeEventListener('keydown', onKey);
+            try {
+              if (previous && typeof previous.focus === 'function') previous.focus();
+            } catch (error) {
+              /* 焦点还不了不影响操作 */
+            }
+          };
+        }, []);
+
         return h(
           'div',
           { className: 'dsa-mask', onMouseDown: props.onMask || undefined },
           h(
             'div',
-            { className: 'dsa-modal', onMouseDown: function (e) { e.stopPropagation(); } },
+            {
+              className: 'dsa-modal',
+              ref: boxRef,
+              role: 'dialog',
+              'aria-modal': 'true',
+              'aria-label': props.title,
+              tabIndex: -1,
+              onMouseDown: function (e) { e.stopPropagation(); },
+            },
             h('h2', null, props.title),
             props.desc ? h('p', null, props.desc) : null,
             // 操作失败要显示在弹窗里：错误落在面板背后等于没报
-            props.error ? h('div', { className: 'dsa-error', style: { marginBottom: '10px' } }, props.error) : null,
+            props.error ? h('div', { className: 'dsa-error', role: 'alert', style: { marginBottom: '10px' } }, props.error) : null,
             props.children,
             h(
               'div',
               { className: 'dsa-modal-foot' },
               props.onCancel ? h(Btn, { variant: 'ghost', onClick: props.onCancel }, t('cancel')) : null,
               props.onConfirm
-                ? h(Btn, { variant: 'primary', disabled: props.busy, onClick: props.onConfirm }, props.busy ? t('saving') : props.confirmText || t('confirm'))
+                ? h(Btn, { variant: 'primary', disabled: props.busy || props.confirmDisabled, onClick: props.onConfirm }, props.busy ? t('saving') : props.confirmText || t('confirm'))
                 : null
             )
           )
@@ -1691,6 +1755,17 @@
 
         /* ---------------- 环境闸门 ---------------- */
 
+        // 项目一换，开着的弹窗（拍板 / 补丁 / 草稿）指向的就都是旧项目了：
+        // 直接关掉，别让它对着新项目把旧结论写进去。
+        var activeIdRef = useRef('');
+        var activeId = snap && snap.active ? snap.active.id : '';
+        useEffect(function () {
+          if (activeIdRef.current !== activeId) {
+            activeIdRef.current = activeId;
+            setDialog(null);
+          }
+        }, [activeId]);
+
         // 让 AI 装环境：开临时会话投递安装提示词，然后把界面切过去
         var doAiInstall = useCallback(function () {
           setEnvNote('');
@@ -1962,7 +2037,7 @@
                 { className: 'dsa-hint', style: { margin: '0 0 14px' } },
                 '你会得到：可审计的语料清单 · 分析宽表与统计表 · 600 dpi 图表包 · 成稿 docx · 机器质检报告。'
               ),
-              error ? h('div', { className: 'dsa-error', style: { margin: '0 0 12px' } }, error) : null,
+              error ? h('div', { className: 'dsa-error', role: 'alert', style: { margin: '0 0 12px' } }, error) : null,
               h(
                 'div',
                 { className: 'dsa-form' },
@@ -2781,7 +2856,7 @@
               })
             )
           ),
-          error ? h('div', { className: 'dsa-error', style: { margin: '10px 0' } }, error) : null,
+          error ? h('div', { className: 'dsa-error', role: 'alert', style: { margin: '10px 0' } }, error) : null,
           hasScript
             ? h(
                 'details',
@@ -2885,7 +2960,7 @@
                   '把这一步交给 AI'
                 )
               ),
-              chatError ? h('div', { className: 'dsa-error', style: { fontSize: '12px' } }, chatError) : null,
+              chatError ? h('div', { className: 'dsa-error', role: 'alert', style: { fontSize: '12px' } }, chatError) : null,
               chatError && projectSession
                 ? h(
                     'button',
@@ -2959,6 +3034,12 @@
           'div',
           { className: 'dsa-root', ref: attachRoot, 'data-dsa-width': width, 'data-dsa-theme': theme, 'data-drawer': drawer ? 'open' : 'closed' },
           header,
+          // 读屏用户看不到状态色块：把「当前阶段 + 运行状态 + 错误」放进一个礼貌播报区
+          h(
+            'div',
+            { className: 'dsa-sr-only', role: 'status', 'aria-live': 'polite' },
+            (current && current.name ? current.name + '：' : '') + (stageWord(runningStage || nextStage || current) || '') + (error ? '；' + error : '')
+          ),
           drawer && width !== 'wide'
             ? h('div', { className: 'dsa-scrim', onClick: function () { setDrawer(false); } })
             : null,
@@ -3044,6 +3125,8 @@
           }
           if (d.kind === 'materials') {
             return h(MaterialsDialog, {
+              // 平台来自快照，弹窗自己拉的那份还没回来时也能用对的措辞
+              platform: (snap && snap.materials && snap.materials.platform) || '',
               // 挂载/识图/转码都会影响闸门：处理完让面板重新取一次快照，别等下一轮轮询
               onChanged: function () { void load(true); },
               onCancel: function () { setDialog(null); }
@@ -3093,8 +3176,9 @@
             busy: props.busy,
             error: props.error,
             confirmText: t('create'),
+            confirmDisabled: !dir.trim(),
             onCancel: props.onCancel,
-            onConfirm: function () { props.onConfirm(dir.trim(), name.trim()); }
+            onConfirm: function () { props.onConfirm(cleanPath(dir), name.trim()); }
           },
           h(
             'div',
@@ -3127,8 +3211,9 @@
             busy: props.busy,
             error: props.error,
             confirmText: t('open'),
+            confirmDisabled: !dir.trim(),
             onCancel: props.onCancel,
-            onConfirm: function () { props.onConfirm(dir.trim()); }
+            onConfirm: function () { props.onConfirm(cleanPath(dir)); }
           },
           h(
             'div',
@@ -3536,6 +3621,35 @@
        * 材料库：用户的资料放在自己的目录里，工作台只记地址。
        * 挂到 data/ 下是目录联接（Windows）或镜像目录（macOS/Linux），一个字节都不复制；所以这里能删的只有挂载，删不掉原件。
        */
+      /**
+       * 用户粘进来的路径要收拾一下：资源管理器「复制路径」带引号，浏览器地址栏是 file:///，
+       * 手滑还会带尾随空格或反斜杠。不收拾就在 Windows 上建出一个名字带引号的目录。
+       */
+      function cleanPath(value) {
+        var text = String(value == null ? '' : value).trim();
+        if (!text) return '';
+        // 成对引号（中英文都有）
+        if (/^["'“”‘’].*["'“”‘’]$/.test(text)) text = text.slice(1, -1).trim();
+        if (/^file:\/\//i.test(text)) {
+          try {
+            text = decodeURI(text.replace(/^file:\/\/\/?/i, function (all) {
+              return all.endsWith(':///') ? '' : '/';
+            }));
+          } catch (error) {
+            /* 解不了就按原样 */
+          }
+        }
+        // Windows：/ 也能认；去掉尾随分隔符（盘符根保留）
+        if (/^[A-Za-z]:/.test(text)) text = text.replace(/\//g, '\\');
+        if (text.length > 1 && !/^[A-Za-z]:[\\/]$/.test(text)) text = text.replace(/[\\/]+$/, '');
+        return text;
+      }
+
+      /** 是不是 macOS / Linux 口径：快照里的平台先算数，弹窗自己拉的数据兜底 */      function macOSMode(data, platform) {
+        if (platform) return platform !== 'win32';
+        return Boolean(data && data.isWindows === false);
+      }
+
       function MaterialsDialog(props) {
         var dataState = useState(null);
         var data = dataState[0];
@@ -3632,7 +3746,7 @@
               variant: 'primary',
               disabled: busy || !addPath.trim(),
               onClick: function () {
-                void call('/materials/add', { path: addPath.trim(), label: addLabel.trim() }).then(function (json) {
+                void call('/materials/add', { path: cleanPath(addPath), label: addLabel.trim() }).then(function (json) {
                   if (json && json.ok) {
                     setAddPath('');
                     setAddLabel('');
@@ -3663,7 +3777,7 @@
                         scan ? scan.files + ' 份 · ' + scan.bytesText : '还没扫描'),
                       src.exists ? null : h('span', { className: 'dsa-tag err' }, '目录不在了')
                     ),
-                    h('div', { className: 'dsa-mono', style: { fontSize: '11px', color: 'var(--dsa-mut)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: src.path }, src.path)
+                    h('div', { className: 'dsa-mono', style: { fontSize: '11px', color: 'var(--dsa-ink3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: src.path }, src.path)
                   ),
                   h('div', { className: 'dsa-inline', style: { gap: '6px' } },
                     h(Btn, { variant: 'ghost', disabled: busy, onClick: function () { void call('/materials/scan', { id: src.id }); } }, '重新登记'),
@@ -3728,7 +3842,7 @@
                       h('b', { className: 'dsa-mono' }, 'data/' + mount.as),
                       mount.mode === 'mirror' ? h('span', { className: 'dsa-hint' }, '镜像（逐文件软链）') : null
                     ),
-                    h('div', { className: 'dsa-mono', style: { fontSize: '11px', color: 'var(--dsa-mut)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: mount.target },
+                    h('div', { className: 'dsa-mono', style: { fontSize: '11px', color: 'var(--dsa-ink3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: mount.target },
                       mount.target + '（' + (MOUNT_WORD[mount.status] || mount.status) + '）'),
                     mount.detail ? h('div', { className: 'dsa-hint' }, mount.detail) : null
                   ),
@@ -3856,7 +3970,9 @@
 
         return h(
           Modal,
-          { title: '材料库', onCancel: props.onCancel, desc: '材料留在你自己的目录里，工作台只记地址；挂到项目 data/ 下是目录联接（macOS/Linux 为镜像目录），不复制文件。' },
+          { title: '材料库', onCancel: props.onCancel, desc: macOSMode(data, props.platform)
+            ? '材料留在你自己的目录里，工作台只记地址；挂到项目 data/ 下是「镜像目录」（真实目录 + 逐文件软链），不复制文件。'
+            : '材料留在你自己的目录里，工作台只记地址；挂到项目 data/ 下是目录联接（macOS/Linux 为镜像目录），不复制文件。' },
           error ? h('div', { className: 'dsa-error', style: { marginBottom: '10px' } }, error) : null,
           note ? h('div', { className: 'dsa-hint', style: { marginBottom: '10px' } }, note) : null,
           h('div', { style: { maxHeight: '58vh', overflowY: 'auto', paddingRight: '2px' } },
@@ -3865,7 +3981,7 @@
             sourceRows,
             h('div', { className: 'dsa-rail-h', style: { padding: '12px 0 6px' } }, '当前项目 data/ 下的挂载'),
             h('div', { className: 'dsa-hint', style: { marginBottom: '4px' } },
-              data && data.isWindows === false
+              macOSMode(data, props.platform)
                 ? 'macOS/Linux 上没有目录联接，工作台建的是「镜像目录」：真实目录里逐个文件软链，源目录增删文件后点「修复」同步。'
                 : 'Windows 上建的是目录联接（junction）：data/ 下的目录直接指向材料目录，不占空间。'),
             mountRows || h('div', { className: 'dsa-empty' }, '还没有挂载任何材料目录'),
@@ -3882,6 +3998,15 @@
         var setNote = noteState[1];
         function decide(status) {
           props.onConfirm(status, note.trim());
+        }
+        // 弹窗开着的时候项目被切走/闸门没了：不崩，也不许对着别的项目拍板
+        if (!props.gate || !props.stage) {
+          return h(
+            Modal,
+            { title: t('adjudicateTitle'), desc: '', error: props.error, onCancel: props.onCancel },
+            h('p', null, '这条闸门已经不在当前项目里了（切了项目，或者产物被删）。关掉这个窗口，重新点一次「去拍板」。'),
+            h('div', { className: 'dsa-inline' }, h(Btn, { variant: 'ghost', onClick: props.onCancel }, t('close')))
+          );
         }
         return h(
           Modal,

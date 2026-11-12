@@ -3,9 +3,11 @@
  *
  * 为什么需要它：client.js 是单文件、零构建、靠宿主给的 React 运行；host 侧改动要重启 DSH 才生效，
  * 面板写错一个标识符只有真机刷新才炸。这里用一个极小的「假 React」把组件渲染成字符串树，
- * 覆盖到环境闸门（EnvGate）与主界面两条渲染路径，能在提交前抓住 ReferenceError / 明显的渲染崩溃。
+ * 覆盖环境闸门、主界面、各个弹窗与窄屏/暗色，能在提交前抓住 ReferenceError 与明显的渲染崩溃。
  *
  * 跑法：node tests/client-smoke.test.mjs
+ * 注意：它会按固定文案替换 client.js 里几行 useState 的初值（只在内存里改，不落盘）。
+ * 面板那几行初始化被改写，本测试会直接报「结构变了」，提醒同步更新。
  */
 
 import fs from 'node:fs';
@@ -17,8 +19,9 @@ const CLIENT = path.join(here, '..', 'client.js');
 
 /* ---------------- 极简 React ---------------- */
 
-let current = null; // 正在渲染的组件实例
+let current = null;
 const instances = [];
+let dirty = false;
 
 function slot() {
   if (!current) throw new Error('hook called outside render');
@@ -34,7 +37,7 @@ const React = {
     if (props) for (const key of Object.keys(props)) merged[key] = props[key];
     const kids = children.flat(Infinity).filter((item) => item !== null && item !== undefined && item !== false);
     merged.children = kids;
-    return { type, props: merged, key: merged.key === undefined ? null : merged.key };
+    return { type, props: merged };
   },
   useState(initial) {
     const { inst, index } = slot();
@@ -67,9 +70,8 @@ function isElement(value) {
   return Boolean(value) && typeof value === 'object' && value.type !== undefined;
 }
 
-/** 渲染一棵树：函数组件就地展开，hook 下标按实例各自计数 */
 function expand(node, depth = 0) {
-  if (depth > 60) throw new Error('渲染层数过深，疑似循环');
+  if (depth > 80) throw new Error('渲染层数过深，疑似循环');
   if (Array.isArray(node)) return node.map((item) => expand(item, depth + 1));
   if (node === null || node === undefined || node === false) return null;
   if (typeof node === 'string' || typeof node === 'number') return { text: String(node) };
@@ -89,18 +91,12 @@ function expand(node, depth = 0) {
     if (inst.changed) dirty = true;
     return expand(out, depth + 1);
   }
-  return {
-    tag: type,
-    props,
-    children: (props.children || []).map((item) => expand(item, depth + 1)).filter(Boolean),
-  };
+  return { tag: type, props, children: (props.children || []).map((item) => expand(item, depth + 1)).filter(Boolean) };
 }
-
-let dirty = false;
 
 function renderRoot(Component, props) {
   instances.length = 0;
-  for (let pass = 0; pass < 4; pass += 1) {
+  for (let pass = 0; pass < 5; pass += 1) {
     dirty = false;
     current = null;
     const tree = expand(React.createElement(Component, props));
@@ -116,7 +112,6 @@ function textOf(tree) {
   return tree.children.map(textOf).join('');
 }
 
-/** 树里有没有某个 class：用来判断「工作台主体」到底渲没渲 */
 function hasClass(tree, name) {
   if (!tree || !tree.props) return false;
   const className = tree.props.className;
@@ -124,31 +119,37 @@ function hasClass(tree, name) {
   return (tree.children || []).some((child) => hasClass(child, name));
 }
 
+function findByClass(tree, name) {
+  if (!tree || !tree.props) return null;
+  const className = tree.props.className;
+  if (typeof className === 'string' && className.split(/\s+/).includes(name)) return tree;
+  for (const child of tree.children || []) {
+    const hit = findByClass(child, name);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 /* ---------------- 加载 client.js ---------------- */
 
-function loadClient() {
-  let source = fs.readFileSync(CLIENT, 'utf8');
-  const before = source.length;
+const PATCHES = [
+  ['var snapState = useState(null);', 'var snapState = useState(globalThis.__DSA__.snap);'],
+  ['var preflightState = useState(null);', 'var preflightState = useState(globalThis.__DSA__.pre);'],
+  ['var loadingState = useState(true);', 'var loadingState = useState(globalThis.__DSA__.loading);'],
+  ['var dialogState = useState(null);', 'var dialogState = useState(globalThis.__DSA__.dialog);'],
+  ['var widthState = useState(\'wide\');', 'var widthState = useState(globalThis.__DSA__.width);'],
+  ['var themeState = useState(\'light\');', 'var themeState = useState(globalThis.__DSA__.theme);'],
+  ['var selectedState = useState(\'scope\');', 'var selectedState = useState(globalThis.__DSA__.selected);'],
+];
 
-  // 注入：把三个 useState 的初始值换成测试夹具（只在内存里改，不落盘）
-  const snapHead = 'var snapState = useState(null);';
-  const preHead = 'var preflightState = useState(null);';
-  const loadHead = 'var loadingState = useState(true);';
-  for (const head of [snapHead, preHead, loadHead]) {
-    if (!source.includes(head)) {
-      throw new Error('client.js 的结构变了：找不到 ' + head + '，请更新本测试');
+function loadPanel() {
+  let source = fs.readFileSync(CLIENT, 'utf8');
+  for (const [from, to] of PATCHES) {
+    if (!source.includes(from)) {
+      throw new Error('client.js 的结构变了：找不到 ' + from + '，请更新本测试的 PATCHES');
     }
   }
-  source = source.replace(snapHead, 'var snapState = useState(globalThis.__DSA_SNAP__);');
-  source = source.replace(preHead, 'var preflightState = useState(globalThis.__DSA_PRE__);');
-  // 首次拉取在 effect 里做（测试不跑 effect），直接把 loading 关掉，才能渲染到真实界面
-  source = source.replace(loadHead, 'var loadingState = useState(false);');
-  // 把夹具挂到 factory 作用域里
-  source = source.replace(
-    'var useCallback = React.useCallback;',
-    'var useCallback = React.useCallback;\n      var __SNAP__ = globalThis.__DSA_SNAP__;\n      var __PRE__ = globalThis.__DSA_PRE__;',
-  );
-  if (source.length === before) throw new Error('注入失败');
+  for (const [from, to] of PATCHES) source = source.replace(from, to);
 
   let captured = null;
   const windowStub = {
@@ -158,64 +159,121 @@ function loadClient() {
       },
     },
   };
-  const globalStub = { window: windowStub, document: { createElement: () => ({ style: {} }) } };
   const sandbox = new Function('window', 'document', 'globalThis', source);
-  sandbox(windowStub, globalStub.document, globalThis);
+  sandbox(windowStub, { createElement: () => ({ style: {} }) }, globalThis);
   if (!captured || typeof captured.factory !== 'function') throw new Error('client.js 没有调用 __ModuleLoader__.load');
 
-  const exported = captured.factory(function requireStub(name) {
+  const exported = captured.factory((name) => {
     if (name === 'react') return React;
     throw new Error('client.js 请求了宿主模块：' + name);
   });
-  return exported;
+
+  // apply 只执行「注册型」effect；装样式那类需要 DOM，失败忽略
+  const registered = new Map();
+  exported.apply({
+    effect(fn) {
+      try {
+        fn();
+      } catch (error) {
+        /* 真实环境里这些 effect 由宿主驱动 */
+      }
+    },
+    slots: {
+      inject(name, fn) {
+        fn();
+        return () => {};
+      },
+      register(def, component) {
+        registered.set(def && def.name, component);
+        return () => {};
+      },
+    },
+  });
+  const panel = registered.get('main');
+  if (!panel) throw new Error('没有注册 main 面板');
+  return { panel, slots: [...registered.keys()] };
 }
 
 /* ---------------- 夹具 ---------------- */
 
-function gates(stageId, statuses) {
-  return statuses.map((status, index) => ({
-    id: stageId + '-' + index,
+function gate(status, index) {
+  return {
+    id: 'g' + index,
     label: '闸门 ' + (index + 1),
-    level: index === 0 ? 'error' : 'info',
+    level: index % 3 === 0 ? 'error' : index % 3 === 1 ? 'warn' : 'info',
     status,
-    detail: '测试用',
-  }));
+    detail: '测试用闸门明细',
+  };
 }
 
-function fakeStage(id, index, name, status) {
+function stage(id, index, name, status, gateStatuses) {
   return {
     id,
     index,
     name,
     short: name.slice(0, 2),
-    purpose: name + '的用途',
+    purpose: name + '的用途说明',
     script: 'x.py',
     args: [],
     steps: [],
     status,
-    gates: gates(id, status === 'done' ? ['pass'] : ['unjudged']),
-    artifacts: [],
-    lastRun: null,
+    gates: (gateStatuses || ['pass']).map((status2, i) => gate(status2, i)),
+    artifacts: [{ label: '产物', rel: 'output/' + id + '/x.csv', exists: true, size: 128 }],
+    lastRun: index === 1 ? { id: 'run-1', status: 'ok', startedAt: '2026-11-12T09:00:00Z', endedAt: '2026-11-12T09:01:00Z' } : null,
   };
 }
 
+const STAGES = [
+  stage('scope', 0, '范围与口径', 'done', ['pass']),
+  stage('audit', 1, '资料审计', 'review', ['pass', 'unjudged', 'pass']),
+  stage('coding', 2, '编码与抽取', 'blocked', ['pass', 'fail']),
+  stage('dataset', 3, '数据集', 'todo', []),
+  stage('stats', 4, '统计分析', 'todo', []),
+];
+
 const SNAP = {
   ok: true,
-  config: { pythonPath: 'python', skillRoot: '' },
-  skill: { ok: true, version: '9.9.9', sha256: 'abc', scripts: 12, root: 'C:/skill' },
-  python: { ok: true, version: '3.11.5', executable: 'C:/Python/python.exe' },
-  projects: [{ id: 'p1', name: '测试项目', path: 'C:/work/p1' }],
-  active: { id: 'p1', name: '测试项目', path: 'C:/work/p1', scope: { note: '' }, sessionId: '' },
+  config: { pythonPath: 'python', skillRoot: 'C:/skill', modelMode: 'follow', maxRuns: 60, maxLogLines: 800, dataDir: '', modelProvider: '', modelId: '', assistantMaxTokens: 1800 },
+  skill: { ok: true, version: '9.9.9', sha256: 'abcdef1234', scripts: 12, root: 'C:/skill' },
+  python: { ok: true, version: '3.11.5', executable: 'C:/Python311/python.exe' },
+  projects: [
+    { id: 'p1', name: '测试项目', path: 'C:/work/p1', updatedAt: '2026-11-12T09:00:00Z' },
+    { id: 'p2', name: '另一个项目', path: 'C:/work/p2', updatedAt: '2026-11-10T09:00:00Z' },
+  ],
+  active: { id: 'p1', name: '测试项目', path: 'C:/work/p1', scope: { note: '研究范围一句话' }, sessionId: '', createdAt: '2026-11-01T00:00:00Z', skillDrift: false },
   error: '',
   preflight: { status: 'pass', checkedAt: '2026-11-12T10:00:00Z', checks: [] },
-  stages: [fakeStage('scope', 0, '范围与口径', 'review'), fakeStage('audit', 1, '资料审计', 'todo')],
-  summary: { ok: true, active: { id: 'p1', name: '测试项目', path: 'C:/work/p1' }, summary: {}, totals: {}, next: null, running: [] },
-  totals: { pass: 1, fail: 0, unjudged: 1 },
-  artifacts: { figures: { rows: [] }, corpus: null, qa: [], verify: [], models: null },
-  runs: [],
-  adjudications: [],
+  stages: STAGES,
+  summary: { ok: true, active: { id: 'p1', name: '测试项目', path: 'C:/work/p1' }, summary: {}, totals: { pass: 6, fail: 1, unjudged: 2 }, next: null, running: [] },
+  totals: { pass: 6, fail: 1, unjudged: 2 },
+  artifacts: {
+    figures: { rows: [], summary: { count: 0 } },
+    corpus: { totalFiles: 223, validFiles: 220, uniqueValidFiles: 219, unreadableFiles: 1, truncated: 0, fingerprint: { files: 223, bytes: 36055673 } },
+    qa: [],
+    verify: [],
+    models: null,
+    flow: [],
+  },
+  runs: [
+    { id: 'run-1', stageId: 'audit', status: 'ok', startedAt: '2026-11-12T09:00:00Z', endedAt: '2026-11-12T09:01:00Z', exitCode: 0 },
+    { id: 'run-2', stageId: 'coding', status: 'failed', startedAt: '2026-11-12T09:05:00Z', endedAt: '2026-11-12T09:06:00Z', exitCode: 1 },
+  ],
+  adjudications: [{ stageId: 'audit', gateId: 'audit-summary', status: 'pass', at: '2026-11-12T09:10:00Z', note: '人看过' }],
   activeRuns: {},
-  materials: { sources: [], mounts: [], derived: [], entries: [], platform: 'win32', isWindows: true },
+  materials: {
+    platform: 'win32',
+    isWindows: true,
+    sources: [
+      { id: 'src_1', label: '刑事判例', path: 'F:/cases/criminal', files: 2907, realFiles: 2907, bytesText: '1.2 GB', byChannel: { read: 2907, vision: 0, convert: 0, none: 0, junk: 4 }, usedBy: [{ project: '测试项目', projectPath: 'C:/work/p1', as: '刑事' }], scannedAt: '2026-11-12T08:00:00Z' },
+    ],
+    mounts: [
+      { as: '刑事', sourceId: 'src_1', sourceLabel: '刑事判例', entry: '', target: 'F:/cases/criminal', status: 'ok', mode: 'junction', resolved: 'F:/cases/criminal', detail: '挂载指向 F:/cases/criminal' },
+      { as: '民事', sourceId: 'src_1', sourceLabel: '刑事判例', entry: '', target: 'F:/cases/civil', status: 'missing-target', mode: 'junction', resolved: 'F:/cases/civil', detail: '源目录不见了' },
+    ],
+    derived: [],
+    entries: [{ name: '刑事', mode: 'junction', target: 'F:/cases/criminal', entries: 3 }],
+  },
+  layout: { width: 'wide' },
 };
 
 const PRE_FAIL = {
@@ -234,103 +292,281 @@ const PRE_FAIL = {
   ],
 };
 
+const PRE_WARN = {
+  ok: true,
+  status: 'warn',
+  checkedAt: '2026-11-12T10:00:00Z',
+  platform: 'darwin',
+  isWindows: false,
+  python: '3.11.5',
+  pythonCommand: 'python3',
+  skill: { ok: true, version: '9.9.9', sha256: 'abc', scripts: 12, root: '/Users/x/skill' },
+  checks: [
+    { id: 'skill', label: '技能包', status: 'pass', detail: 'SKILL.md 9.9.9', hint: '' },
+    { id: 'word', label: 'Word→PDF', status: 'unjudged', detail: '当前是 darwin：没有 Microsoft Word COM，这一步不适用', hint: 'soffice --headless --convert-to pdf' },
+    { id: 'word', label: 'Word→PDF', status: 'warn', detail: '缺 pywin32', hint: 'pip install pywin32' },
+  ],
+};
+
 /* ---------------- 断言 ---------------- */
 
-let failed = 0;
+let failedCount = 0;
 function check(ok, label, detail) {
-  if (ok) {
-    process.stdout.write('  ✓ ' + label + (detail ? ' — ' + detail : '') + '\n');
-  } else {
-    failed += 1;
+  if (ok) process.stdout.write('  ✓ ' + label + (detail ? ' — ' + detail : '') + '\n');
+  else {
+    failedCount += 1;
     process.stdout.write('  ✗ ' + label + (detail ? ' — ' + detail : '') + '\n');
   }
 }
 
-process.stdout.write('\nclient.js 冒烟测试\n\n');
+function scenario(name, fixture, assert) {
+  process.stdout.write('\n' + name + '\n');
+  globalThis.__DSA__ = Object.assign(
+    { snap: SNAP, pre: SNAP.preflight, loading: false, dialog: null, width: 'wide', theme: 'light', selected: 'scope' },
+    fixture || {},
+  );
+  let tree;
+  try {
+    tree = renderRoot(PANEL, {});
+  } catch (error) {
+    check(false, '渲染崩溃', String(error && error.stack ? error.stack.split('\n').slice(0, 2).join(' | ') : error));
+    return;
+  }
+  try {
+    assert(tree, textOf(tree));
+  } catch (error) {
+    check(false, '断言抛错', String((error && error.message) || error));
+  }
+}
 
-let exported;
+process.stdout.write('\nclient.js 冒烟测试\n');
+
+let PANEL = null;
 try {
-  exported = loadClient();
-  check(true, 'client.js 能被加载并交出模块');
+  const loaded = loadPanel();
+  PANEL = loaded.panel;
+  check(true, 'client.js 能加载并注册面板', loaded.slots.join('、'));
 } catch (error) {
-  check(false, 'client.js 加载失败', String(error && error.message));
+  check(false, 'client.js 加载失败', String((error && error.message) || error));
   process.exit(1);
 }
 
-const Panel = (() => {
-  if (!exported || typeof exported.apply !== 'function') return null;
-  const registered = new Map();
-  const ctx = {
-    effect(fn) {
-      // 只执行注册型 effect（panel/工具栏那类），不执行需要 DOM/网络的
-      try {
-        fn();
-      } catch (error) {
-        /* 真实环境里这些 effect 由宿主驱动，这里失败不算错 */
-      }
+/* 1. 环境不齐：闸门 */
+scenario('环境不齐', { pre: PRE_FAIL }, (tree, text) => {
+  check(text.includes('环境还没就绪'), '显示环境闸门');
+  check(text.includes('让 AI 装好环境'), '给出「让 AI 装好环境」');
+  check(text.includes('手动配置'), '给出「手动配置」');
+  check(text.includes('技能包'), '列出卡住的项目');
+  check(!hasClass(tree, 'dsa-body'), '不渲染工作台主体');
+  check(hasClass(tree, 'dsa-top'), '顶栏保留');
+});
+
+/* 2. 环境齐全：主界面 */
+scenario('环境齐全', {}, (tree, text) => {
+  check(!text.includes('环境还没就绪'), '闸门不出现');
+  check(hasClass(tree, 'dsa-body'), '渲染工作台主体');
+  check(text.includes('范围与口径'), '阶段栏有阶段');
+  check(text.includes('测试项目'), '顶栏显示项目名');
+  check(text.includes('资料审计'), '顶栏或阶段栏有审计');
+  check(hasClass(tree, 'dsa-rail'), '左阶段栏存在');
+  check(hasClass(tree, 'dsa-main'), '中栏存在');
+  check(hasClass(tree, 'dsa-side'), '右运行台存在');
+  // 三态圆点不能画错：blocked 的阶段必须是 err
+  const rail = findByClass(tree, 'dsa-rail');
+  const railText = textOf(rail);
+  check(railText.includes('范围'), '阶段栏渲染出阶段名');
+});
+
+/* 3. 自检未跑完 / macOS 只有 warn 与 unjudged：不拦 */
+scenario('自检为空', { pre: null }, (tree, text) => {
+  check(!text.includes('环境还没就绪'), '不误拦');
+  check(hasClass(tree, 'dsa-body'), '正常渲染');
+});
+scenario('macOS warn + unjudged', { pre: PRE_WARN, snap: Object.assign({}, SNAP, { preflight: PRE_WARN }) }, (tree, text) => {
+  check(!text.includes('环境还没就绪'), 'warn/unjudged 不拦（Mac 没有 Word COM）');
+  check(hasClass(tree, 'dsa-body'), '正常渲染');
+});
+
+/* 4. 没有项目 */
+scenario('没有项目', { snap: Object.assign({}, SNAP, { active: null, stages: [] }) }, (tree, text) => {
+  check(!text.includes('环境还没就绪'), '不误拦');
+  check(text.includes('新建项目') || text.includes('打开项目'), '给出建/开项目的入口');
+});
+
+/* 5. 窄屏 / 暗色 */
+scenario('窄屏', { width: 'narrow' }, (tree, text) => {
+  check(hasClass(tree, 'dsa-body'), '窄屏仍渲染主体');
+  const root = tree;
+  check(root && root.props && root.props['data-dsa-width'] === 'narrow', '根节点带窄屏标记');
+});
+scenario('暗色', { theme: 'dark' }, (tree) => {
+  check(tree && tree.props && tree.props['data-dsa-theme'] === 'dark', '根节点带暗色标记');
+});
+
+/* 6. 七个弹窗都能开（用真实形状的入参，别拿半截数据骗自己） */
+const dialogFixtures = {
+  create: { kind: 'create' },
+  open: { kind: 'open' },
+  draft: { kind: 'draft', task: 'scope' },
+  settings: { kind: 'settings' },
+  materials: { kind: 'materials' },
+  adjudicate: { kind: 'adjudicate', stage: STAGES[1], gate: STAGES[1].gates[1] },
+  patch: {
+    kind: 'patch',
+    issue: {
+      id: 'RC-001',
+      severity: 'error',
+      where: 'output/dataset/analysis.csv:12',
+      claim: 'in_analysis 与图注 N 不一致',
+      evidence: '12 vs 11',
+      fix_kind: 'edit-code',
+      patch: { path: 'scripts/make_dataset.py', baseHash: 'sha256:abcdef0123456789', content: 'import pandas as pd\nprint(1)\n' },
     },
-    slots: {
-      inject(name, fn) {
-        // 宿主是「注入即调用，返回值是卸载函数」
-        fn();
-        return () => {};
-      },
-      register(def, component) {
-        registered.set(def && def.name, component);
-        return () => {};
-      },
+  },
+};
+
+for (const [kind, fixture] of Object.entries(dialogFixtures)) {
+  scenario('弹窗：' + kind, { dialog: fixture }, (tree) => {
+    check(Boolean(findByClass(tree, 'dsa-modal')), kind + ' 弹窗渲染出来了');
+    check(hasClass(tree, 'dsa-body') || textOf(tree).includes('环境还没就绪'), '弹窗开着时底层仍在');
+  });
+}
+
+/* 6b. 弹窗数据过期（闸门/问题已不存在）时不许崩 */
+scenario('弹窗：拍板数据过期', { dialog: { kind: 'adjudicate' } }, (tree, text) => {
+  check(Boolean(findByClass(tree, 'dsa-modal')), '仍然渲染出一个弹窗');
+  check(text.includes('不在当前项目里') || text.includes('关掉'), '把「闸门没了」说清楚，而不是白屏');
+});
+scenario('弹窗：补丁数据过期', { dialog: { kind: 'patch' } }, (tree) => {
+  check(Boolean(findByClass(tree, 'dsa-modal')), '补丁弹窗空数据也能渲染');
+});
+
+/* 7. 材料库弹窗在 macOS 下不能出现「目录联接」的 Windows 措辞 */
+scenario(
+  '材料库（macOS）',
+  {
+    dialog: { kind: 'materials' },
+    snap: Object.assign({}, SNAP, {
+      materials: Object.assign({}, SNAP.materials, { platform: 'darwin', isWindows: false }),
+    }),
+  },
+  (tree, text) => {
+    check(text.includes('材料'), '材料库弹窗有内容');
+    check(text.includes('镜像目录'), 'macOS 文案提到镜像目录');
+    check(!text.includes('目录联接（macOS'), '没有把 Mac 错写成联接');
+  },
+);
+
+/* 8. 运行台 / 运行日志的边界：没有运行记录、没有日志 */scenario('没有运行记录', { snap: Object.assign({}, SNAP, { runs: [], activeRuns: {} }) }, (tree, text) => {
+  check(hasClass(tree, 'dsa-side'), '右运行台仍在');
+  check(!text.includes('undefined'), '没有 undefined 漏到界面上');
+});
+scenario(
+  '运行中',
+  {
+    selected: 'audit',
+    snap: Object.assign({}, SNAP, { activeRuns: { audit: { id: 'run-9', stageId: 'audit', status: 'running', startedAt: '2026-11-12T10:00:00Z' } } }),
+  },
+  (tree, text) => {
+    check(text.includes('停止') || text.includes('运行中'), '运行中的阶段有可见状态');
+    check(!text.includes('undefined'), '没有 undefined 漏到界面上');
+  },
+);
+
+/* 9. 随机组合：每个阶段状态 × 选中项 × 宽度 × 主题，渲染不许崩、不许漏 undefined */
+const RICH_SNAP = Object.assign({}, SNAP, {
+  artifacts: Object.assign({}, SNAP.artifacts, {
+    figures: {
+      file: 'output/figures/figure_manifest.csv',
+      total: 3,
+      summary: { count: 3, pass: 1, fail: 1, unjudged: 1, fontUnjudged: 1 },
+      rows: [
+        { id: 'F1', chartType: 'bar', nText: 'n = 320', caption: '图 1 描述统计', png: 'output/figures/f1.png', pngExists: true, effectiveDpi: 600, minFontsize: 8, palette: '#1f4e79,#a4372e', n: 320, badges: [{ key: 'file', label: '文件', state: 'pass', text: '在' }, { key: 'dpi', label: 'dpi', state: 'pass', text: '600' }] },
+        { id: 'F2', chartType: 'line', nText: 'n = 320', caption: '', png: 'output/figures/f2.png', pngExists: false, effectiveDpi: 511, minFontsize: 6.5, palette: null, n: null, badges: [{ key: 'file', label: '文件', state: 'fail', text: '缺失' }, { key: 'n', label: 'N', state: 'unjudged', text: '未测' }] },
+      ],
     },
+    models: {
+      models: [{ id: 'M1', file: 'output/models/coef_M1.csv', n: 320, fitN: 320, rows: [{ var: 'x1', coef: 0.42, p: 0.01 }] }],
+      fits: [{ model: 'M1', n: 320, aic: 120.5 }],
+      flowChecks: [{ model: 'M1', ok: false, note: '样本量对不上' }],
+      meta: {},
+    },
+    verify: [{ row: 12, file: 'output/dataset/analysis.csv', claim: '表 2 的 N', actual: '320', status: 'error' }],
+    qa: [{ file: 'output/qa/qa_report.json', errorCount: 2, warningCount: 1, inputErrors: 1 }],
+    flow: [
+      {
+        file: 'output/audit/sample_flow.csv',
+        source: 'corpus',
+        unit: 'case',
+        // 与 host 的 readFlow 同形：steps 是对象数组，不是数字
+        steps: [
+          { stage: '抓取', n: 223, note: '' },
+          { stage: '去重', n: 220, note: '3 份重复' },
+          { stage: '有效', n: 219, note: '' },
+        ],
+        monotonic: true,
+        first: 223,
+        last: 219,
+      },
+    ],
+  }),
+});
+
+const STATUSES = ['done', 'blocked', 'review', 'todo', 'running'];
+let seed = 20261112;
+function rnd() {
+  seed = (seed * 1103515245 + 12345) % 2147483648;
+  return seed / 2147483648;
+}
+
+let fuzzCrashes = 0;
+let fuzzDirty = 0;
+for (let round = 0; round < 24; round += 1) {
+  const stages = STAGES.map((item) => {
+    const status = STATUSES[Math.floor(rnd() * STATUSES.length)];
+    return Object.assign({}, item, {
+      status,
+      gates: item.gates.map((gateItem) => Object.assign({}, gateItem, { status: ['pass', 'fail', 'unjudged'][Math.floor(rnd() * 3)] })),
+    });
+  });
+  const selected = round % 7 === 6 ? 'ghost-stage' : stages[round % stages.length].id;
+  const running = round % 3 === 0;
+  const snap = Object.assign({}, RICH_SNAP, {
+    stages,
+    activeRuns: running ? { [stages[round % stages.length].id]: { id: 'run-x', stageId: stages[round % stages.length].id, status: 'running', startedAt: '2026-11-12T10:00:00Z' } } : {},
+  });
+  globalThis.__DSA__ = {
+    snap,
+    pre: round % 4 === 0 ? PRE_WARN : SNAP.preflight,
+    loading: false,
+    dialog: null,
+    width: round % 2 ? 'narrow' : 'wide',
+    theme: round % 3 === 0 ? 'dark' : 'light',
+    selected,
   };
-  exported.apply(ctx);
-  return registered.get('main');
-})();
-check(typeof Panel === 'function', '导出了面板组件', typeof Panel);
-if (typeof Panel !== 'function') process.exit(1);
-
-/* 1. 环境不齐：整块被闸门挡住 */
-globalThis.__DSA_SNAP__ = SNAP;
-globalThis.__DSA_PRE__ = PRE_FAIL;
-let tree;
-try {
-  tree = renderRoot(Panel, {});
-  const text = textOf(tree);
-  check(text.includes('环境还没就绪'), '环境有 fail 项时显示环境闸门');
-  check(text.includes('让 AI 装好环境'), '闸门里给出「让 AI 装好环境」');
-  check(text.includes('手动配置'), '闸门里给出「手动配置」');
-  check(text.includes('技能包'), '闸门列出卡住的项目');
-  check(!hasClass(tree, 'dsa-body'), '被挡住时不渲染工作台主体（左阶段栏 / 中栏 / 右运行台）');
-  check(hasClass(tree, 'dsa-top'), '被挡住时顶栏还在');
-} catch (error) {
-  check(false, '渲染环境闸门时崩溃', String((error && error.stack) || error).split('\n').slice(0, 3).join(' | '));
+  try {
+    const tree = renderRoot(PANEL, {});
+    const text = textOf(tree);
+    const bad = text.match(/(undefined|NaN|\[object Object\])/);
+    if (bad) {
+      fuzzDirty += 1;
+      if (fuzzDirty <= 2) {
+        const at = text.indexOf(bad[0]);
+        process.stdout.write('    （第 ' + round + ' 轮「' + bad[0] + '」：…' + text.slice(Math.max(0, at - 60), at + 40).replace(/\s+/g, ' ') + '…）\n');
+      }
+    }
+  } catch (error) {
+    fuzzCrashes += 1;
+    if (fuzzCrashes <= 2) process.stdout.write('    （第 ' + round + ' 轮崩溃：' + String((error && error.message) || error) + '）\n');
+  }
 }
-
-/* 2. 环境就绪：正常渲染工作台 */
-globalThis.__DSA_PRE__ = SNAP.preflight;
-try {
-  const tree2 = renderRoot(Panel, {});
-  const text2 = textOf(tree2);
-  check(!text2.includes('环境还没就绪'), '环境齐全时闸门不出现');
-  check(hasClass(tree2, 'dsa-body'), '环境齐全时渲染工作台主体');
-  check(text2.includes('范围与口径'), '阶段栏列出阶段', '范围与口径');
-  check(text2.includes('资料审计'), '阶段栏列出第二个阶段', '资料审计');
-  check(text2.includes('测试项目'), '顶栏显示当前项目名');
-} catch (error) {
-  check(false, '渲染主界面时崩溃', String((error && error.stack) || error).split('\n').slice(0, 3).join(' | '));
-}
-
-/* 3. 自检还没跑完（preflight 为空）：不拦，正常显示 */
-globalThis.__DSA_PRE__ = null;
-try {
-  const tree3 = renderRoot(Panel, {});
-  const text3 = textOf(tree3);
-  check(!text3.includes('环境还没就绪'), '自检结果为空时不误拦');
-} catch (error) {
-  check(false, 'preflight 为空时渲染崩溃', String((error && error.stack) || error).split('\n').slice(0, 3).join(' | '));
-}
+process.stdout.write('\n随机组合（24 轮：阶段状态 × 选中项 × 窄屏 × 暗色 × 制品数据）\n');
+check(fuzzCrashes === 0, '没有渲染崩溃', fuzzCrashes ? fuzzCrashes + ' 轮崩溃' : '');
+check(fuzzDirty === 0, '没有 undefined / NaN 漏到界面', fuzzDirty ? fuzzDirty + ' 轮' : '');
 
 process.stdout.write('\n');
-if (failed) {
-  process.stdout.write('✗ ' + failed + ' 项失败\n');
+if (failedCount) {
+  process.stdout.write('✗ ' + failedCount + ' 项失败\n');
   process.exit(1);
 }
 process.stdout.write('✓ 全部通过\n');

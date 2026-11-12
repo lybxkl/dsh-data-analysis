@@ -37,8 +37,6 @@ export const RECHECK_ITEMS = [
   { id: 'R12', label: '覆盖表完整', why: '12 项逐项写 checked / unchecked（附理由）' },
 ];
 
-const MANIFEST_CANDIDATES = ['output/chart_pack/chart_manifest.csv', 'output/figures/chart_manifest.csv'];
-
 function sha256(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
 }
@@ -129,12 +127,27 @@ function checkR2(projectRoot) {
   const values = new Set(analysis.rows.map((row) => String(row.in_analysis).trim()));
   const mixed = values.has('0') && values.has('1');
   if (!mixed) return check('R2', 'pass', '全部行都是纳入样本，不存在混合筛选');
-  const config = readJson(path.join(projectRoot, 'chart_config.json')) || {};
-  const filter = String(config.filter_query || config.filter || '');
-  if (filter.includes('in_analysis')) {
-    return check('R2', 'pass', `存在 in_analysis=0 的行，chart_config.filter_query 已引用 in_analysis（${filter}）`);
+  // 与 dataset-in-analysis 闸门同一口径：model_spec.json 或 chart_config.json 任一引用即可，
+  // 只认其中一个会在这两个文件分开放的时候假报 fail（而 recheck-machine 是 error 级，会卡住复核）。
+  const configNames = ['model_spec.json', 'chart_config.json'].filter((name) => statOf(path.join(projectRoot, name)).exists);
+  if (!configNames.length) {
+    return check('R2', 'unjudged', '存在 in_analysis=0 的行，但还没有 model_spec.json / chart_config.json：判不了统计与图表会不会吃回去');
   }
-  return check('R2', 'fail', '存在 in_analysis=0 的行，但 chart_config 没有 filter_query 引用它：统计与图表会把排除样本吃回去');
+  const hits = [];
+  for (const name of configNames) {
+    const text = (() => {
+      try {
+        return fs.readFileSync(path.join(projectRoot, name), 'utf8');
+      } catch {
+        return '';
+      }
+    })();
+    if (text.includes('in_analysis')) hits.push(name);
+  }
+  if (hits.length) {
+    return check('R2', 'pass', `存在 in_analysis=0 的行，${hits.join('、')} 已引用 in_analysis`);
+  }
+  return check('R2', 'fail', `存在 in_analysis=0 的行，但 ${configNames.join('、')} 都没有引用 in_analysis：统计与图表会把排除样本吃回去`);
 }
 
 function checkR3(projectRoot) {
@@ -145,7 +158,9 @@ function checkR3(projectRoot) {
   const fits = models.models.map((m) => ({ id: m.id, n: m.fitN ?? m.n }));
   const unknown = fits.filter((f) => !Number.isFinite(f.n));
   if (unknown.length) return check('R3', 'unjudged', `模型 ${unknown.map((f) => f.id).join('、')} 的 fit.n 读不到`);
-  const over = included === null ? [] : fits.filter((f) => f.n > included);
+  // 没有 in_analysis 就没有「纳入样本」这个分母：比较集合为空不等于比过了。
+  if (included === null) return check('R3', 'unjudged', 'analysis.csv 没有 in_analysis（或还没有 analysis.csv）：无法确定纳入样本数，N 比不了');
+  const over = fits.filter((f) => f.n > included);
   if (over.length) {
     return check('R3', 'fail', `模型 ${over.map((f) => `${f.id} N=${f.n}`).join('、')} 大于纳入样本 ${included}`);
   }
@@ -156,12 +171,11 @@ function checkR3(projectRoot) {
   return check('R3', dropped ? 'unjudged' : 'pass', detail);
 }
 
+/** 图表清单只认 readFigures 命中的那一份：自己另维护一份候选表，会出现「找到 A、读的是 B」。 */
 function figuresInfo(projectRoot) {
-  for (const rel of MANIFEST_CANDIDATES) {
-    const abs = path.join(projectRoot, rel);
-    if (statOf(abs).exists) return { rel, abs, rows: readFigures(projectRoot).rows };
-  }
-  return { rel: '', abs: '', rows: [] };
+  const figures = readFigures(projectRoot);
+  if (!figures?.file) return { rel: '', abs: '', rows: [] };
+  return { rel: figures.file, abs: path.join(projectRoot, figures.file), rows: figures.rows || [] };
 }
 
 function checkR4(projectRoot) {
@@ -186,6 +200,8 @@ function checkR5(projectRoot) {
   if (!figures.rows.length) return check('R5', 'unjudged', '没有图表清单');
   if (included === null) return check('R5', 'unjudged', 'analysis.csv 没有 in_analysis，无法确定应有 N');
   const sampleRows = figures.rows.filter((row) => ['sample', 'full', ''].includes(String(row.nScope || '').toLowerCase()));
+  // 一张样本级图都没有时，「没有超标的图」是空集合的真命题，但那不叫核对过。
+  if (!sampleRows.length) return check('R5', 'unjudged', `图表清单里没有样本级图（n_scope 都是 corpus）：无从核对图注 N，需人确认`);
   // 图注 N 可能小于纳入样本（该变量有缺失，图按完整案例画）——这是合法但需要人确认的；
   // 唯一能机器判死的是「图注 N 比纳入样本还大」，那说明图用的是另一版数据。
   const over = sampleRows.filter((row) => Number.isFinite(row.n) && row.n > included);
@@ -399,6 +415,22 @@ export function buildEvidence(projectRoot, { project, runs, checks, issues }) {
     .map((row) => `${row.severity} ${row.check} ${row.where}: ${row.detail}`).join('\n'), 3000);
   const coverage = readCoverage(projectRoot);
   if (Object.keys(coverage).length) push('现有覆盖表', JSON.stringify(coverage, null, 2), 2000);
+  // 补丁要带 baseHash 才能落盘；哈希必须由这里给出——不能让模型自己算（它没有工具，只能瞎猜）。
+  const hashTargets = [
+    'output/dataset/analysis.csv',
+    'data/analysis.csv',
+    'output/coding/coding_sheet.csv',
+    'output/coding/dataset.csv',
+    'model_spec.json',
+    'chart_config.json',
+    ...listPy(path.join(projectRoot, 'scripts')).map((name) => `scripts/${name}`),
+  ];
+  const hashLines = [];
+  for (const rel of hashTargets) {
+    const hash = fileHash(path.join(projectRoot, rel));
+    if (hash) hashLines.push(`${rel}\t${hash}`);
+  }
+  if (hashLines.length) push('可补丁文件的当前哈希（patch.baseHash 必须用这里的值）', hashLines.join('\n'), 4000);
   for (const name of listPy(path.join(projectRoot, 'scripts'))) {
     let text = '';
     try {
@@ -430,29 +462,80 @@ export function runChecks(projectRoot, { project, runs } = {}) {
   return checks;
 }
 
-/** 套用模型给的补丁：校验 baseHash → 备份 → 原子写。 */
+/**
+ * 取一个路径的真实位置（末级/中间级不存在时，用最近的存在的父目录做 realpath 再拼回去）。
+ * 只用字符串前缀判越界是不够的：材料库把外部目录以目录联接挂在 data/<alias>，
+ * 字符串上确实在项目内，写下去却落到用户的原始材料里。
+ */
+function resolveReal(target) {
+  const missing = [];
+  let current = path.resolve(target);
+  for (;;) {
+    try {
+      const real = fs.realpathSync(current);
+      return missing.length ? path.join(real, ...missing.reverse()) : real;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') return path.resolve(target);
+      const parent = path.dirname(current);
+      if (parent === current) return path.resolve(target);
+      missing.push(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
+/** 套用模型给的补丁：校验路径与 baseHash → 备份 → 原子写。 */
 export function applyPatch(projectRoot, issue) {
   const patch = issue?.patch;
   if (!patch || !patch.path || typeof patch.content !== 'string') {
     return { ok: false, error: '这条问题没有可套用的补丁（fix_kind 不是 edit-code/edit-text）' };
   }
   const abs = path.resolve(projectRoot, patch.path);
-  const root = path.resolve(projectRoot);
-  if (!abs.startsWith(root + path.sep)) return { ok: false, error: `补丁路径越界：${patch.path}` };
+  const rootReal = resolveReal(projectRoot);
+  const absReal = resolveReal(abs);
+  if (absReal !== rootReal && !absReal.startsWith(rootReal + path.sep)) {
+    return { ok: false, error: `补丁路径越界：${patch.path}（实际落在 ${absReal}，不在项目内）` };
+  }
+  const target = statOf(abs);
+  if (target.exists) {
+    let isFile = true;
+    try {
+      isFile = fs.statSync(abs).isFile();
+    } catch {
+      isFile = true;
+    }
+    if (!isFile) return { ok: false, error: `补丁目标是目录，不是文件：${patch.path}` };
+  }
   const before = fileHash(abs);
-  if (patch.baseHash && before && patch.baseHash !== before) {
-    return { ok: false, error: `补丁基线已变（文件在模型读它之后又改过），请重新生成补丁：${patch.path}` };
+  // 基线校验不能可跳过：baseHash 为空就等于「不管用户手改过什么，覆盖掉」。
+  if (target.exists) {
+    if (!patch.baseHash) {
+      return { ok: false, error: `补丁缺少 baseHash：请先用 data_analysis_recheck（action=evidence）取到 ${patch.path} 的哈希，再重新生成补丁` };
+    }
+    if (patch.baseHash !== before) {
+      return { ok: false, error: `补丁基线已变（文件在模型读它之后又改过），请重新生成补丁：${patch.path}` };
+    }
+  } else if (patch.baseHash && patch.baseHash !== before) {
+    return { ok: false, error: `补丁基线不成立（文件已经不存在）：${patch.path}` };
   }
   const dir = path.join(projectRoot, 'output/recheck/diffs');
   fs.mkdirSync(dir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const backup = path.join(dir, `${issue.id}-${stamp}.bak`);
-  if (statOf(abs).exists) fs.copyFileSync(abs, backup);
+  // issue.id 是模型给的字符串：不清洗就能用 ../../ 把备份写到项目外
+  const safeId = String(issue?.id || 'issue').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 48);
+  const backup = path.join(dir, `${safeId}-${stamp}.bak`);
+  if (target.exists) fs.copyFileSync(abs, backup);
   fs.mkdirSync(path.dirname(abs), { recursive: true });
   const tmp = `${abs}.tmp`;
   fs.writeFileSync(tmp, patch.content, 'utf8');
   fs.renameSync(tmp, abs);
-  return { ok: true, file: patch.path, backup: path.relative(projectRoot, backup), hash: fileHash(abs) };
+  return {
+    ok: true,
+    file: patch.path,
+    created: !target.exists,
+    backup: path.relative(projectRoot, backup),
+    hash: fileHash(abs),
+  };
 }
 
 export function recheckSummary(projectRoot, { project, runs } = {}) {

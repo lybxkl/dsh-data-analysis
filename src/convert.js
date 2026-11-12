@@ -100,10 +100,13 @@ export async function probeOffice({ force = false } = {}) {
   const script = `
 $out = @{ word = $false; excel = $false; ppt = $false; detail = '' }
 foreach ($name in @('Word.Application','Excel.Application','PowerPoint.Application')) {
+  $proc = @{ 'Word.Application' = 'WINWORD'; 'Excel.Application' = 'EXCEL'; 'PowerPoint.Application' = 'POWERPNT' }[$name]
+  # 用户已经开着这个程序时，New-Object 拿到的是用户那个实例：探测完不能 Quit，也不能藏起来
+  $existing = @(Get-Process $proc -ErrorAction SilentlyContinue).Count -gt 0
   try {
     $app = New-Object -ComObject $name
-    try { $app.Visible = $false } catch {}
-    try { $app.Quit() } catch {}
+    if (-not $existing) { try { $app.Visible = $false } catch {} }
+    if (-not $existing) { try { $app.Quit() } catch {} }
     try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($app) } catch {}
     switch ($name) {
       'Word.Application' { $out.word = $true }
@@ -163,6 +166,71 @@ function cleanPsMessage(run) {
   return '转换失败：Office 没有产出文件';
 }
 
+/**
+ * 转换脚本。关键点：Word/Excel/PowerPoint 的自动化服务器是**单实例**的——
+ * 用户已经开着 Word 时，`New-Object -ComObject Word.Application` 拿到的是用户那个实例，
+ * 顺手 `Quit(0)` 会把用户正在编辑的文档一起关掉（且不保存）。所以先看进程在不在，
+ * 已有实例时只操作自己的 Document，绝不 Quit、也不去改它的 Visible。
+ */
+function buildScript(engine, tmpIn, done) {
+  const head = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'`;
+  const tail = `
+} catch {
+  Write-Output ('ERR: ' + $_.Exception.Message)
+  exit 1
+}`;
+  if (engine === 'word') {
+    return `${head}
+$existing = @(Get-Process WINWORD -ErrorAction SilentlyContinue).Count -gt 0
+$app = $null
+try {
+  $app = New-Object -ComObject Word.Application
+  if (-not $existing) { $app.Visible = $false }
+  $app.DisplayAlerts = 0
+  $doc = $app.Documents.Open(${psQuote(tmpIn)}, $false, $false)
+  $doc.SaveAs2(${psQuote(done)}, 16)
+  $doc.Close(0)
+  Write-Output 'OK'
+${tail} finally {
+  # COM 的 Quit 在 PowerShell 里要 [ref]，直接写 Quit(0) 会抛 PSReference 错误且 Word 不会退出（临时目录被攥住）
+  if ($app -and -not $existing) { try { $app.Quit([ref]0) } catch { try { $app.Quit() } catch {} } }
+}
+`;
+  }
+  if (engine === 'excel') {
+    return `${head}
+$existing = @(Get-Process EXCEL -ErrorAction SilentlyContinue).Count -gt 0
+$app = $null
+try {
+  $app = New-Object -ComObject Excel.Application
+  if (-not $existing) { $app.Visible = $false }
+  $app.DisplayAlerts = $false
+  $wb = $app.Workbooks.Open(${psQuote(tmpIn)}, 0, $false)
+  $wb.SaveAs(${psQuote(done)}, 51)
+  $wb.Close($false)
+  Write-Output 'OK'
+${tail} finally {
+  if ($app -and -not $existing) { try { $app.Quit() } catch {} }
+}
+`;
+  }
+  return `${head}
+$existing = @(Get-Process POWERPNT -ErrorAction SilentlyContinue).Count -gt 0
+$app = $null
+try {
+  $app = New-Object -ComObject PowerPoint.Application
+  $pres = $app.Presentations.Open(${psQuote(tmpIn)}, $true, $false, $false)
+  $pres.SaveAs(${psQuote(done)}, 24)
+  $pres.Close()
+  Write-Output 'OK'
+${tail} finally {
+  if ($app -and -not $existing) { try { $app.Quit() } catch {} }
+}
+`;
+}
+
 /** 单个文件转换。kind 取 doc/xls/ppt。 */
 export async function convertOne({ sourceFile, outFile, kind }) {
   const engine = KIND_ENGINE[kind];
@@ -172,103 +240,77 @@ export async function convertOne({ sourceFile, outFile, kind }) {
   fs.mkdirSync(path.dirname(outFile), { recursive: true });
   // 先拷到临时目录再转：Word 会在文档旁边写 ~$ 锁文件，不能让它写进用户的材料目录
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'da-convert-'));
-  const tmpIn = path.join(tmpDir, path.basename(sourceFile));
+  const warnings = [];
   try {
-    fs.copyFileSync(sourceFile, tmpIn);
-  } catch (error) {
-    return { ok: false, error: `复制到临时目录失败：${error?.message || error}` };
-  }
+    const tmpIn = path.join(tmpDir, path.basename(sourceFile));
+    try {
+      fs.copyFileSync(sourceFile, tmpIn);
+    } catch (error) {
+      return { ok: false, error: `复制到临时目录失败：${error?.message || error}` };
+    }
 
-  const done = path.join(tmpDir, `out.${convertTargetExt(kind)}`);
-  const scripts = {
-    word: `
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-$app = $null
-try {
-  $app = New-Object -ComObject Word.Application
-  $app.Visible = $false
-  $app.DisplayAlerts = 0
-  $doc = $app.Documents.Open(${psQuote(tmpIn)}, $false, $false)
-  $doc.SaveAs2(${psQuote(done)}, 16)
-  $doc.Close(0)
-  Write-Output 'OK'
-} catch {
-  Write-Output ('ERR: ' + $_.Exception.Message)
-  exit 1
-} finally {
-  if ($app) { try { $app.Quit(0) } catch {} }
-}`,
-    excel: `
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-$app = $null
-try {
-  $app = New-Object -ComObject Excel.Application
-  $app.Visible = $false
-  $app.DisplayAlerts = $false
-  $wb = $app.Workbooks.Open(${psQuote(tmpIn)}, 0, $false)
-  $wb.SaveAs(${psQuote(done)}, 51)
-  $wb.Close($false)
-  Write-Output 'OK'
-} catch {
-  Write-Output ('ERR: ' + $_.Exception.Message)
-  exit 1
-} finally {
-  if ($app) { try { $app.Quit() } catch {} }
-}`,
-    ppt: `
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-$app = $null
-try {
-  $app = New-Object -ComObject PowerPoint.Application
-  $pres = $app.Presentations.Open(${psQuote(tmpIn)}, $true, $false, $false)
-  $pres.SaveAs(${psQuote(done)}, 24)
-  $pres.Close()
-  Write-Output 'OK'
-} catch {
-  Write-Output ('ERR: ' + $_.Exception.Message)
-  exit 1
-} finally {
-  if ($app) { try { $app.Quit() } catch {} }
-}`,
-  };
-
-  const run = await runPowerShell(scripts[engine], { timeoutMs: 180000 });
-  // 只看产物：Windows PowerShell 5.1 在脚本正常结束时也可能返回 1
-  // （COM 释放与进度流会让退出码变成 1），拿退出码判成功会误报失败。
-  let bytes = 0;
-  try {
-    bytes = fs.existsSync(done) ? fs.statSync(done).size : 0;
-  } catch {
-    bytes = 0;
-  }
-  if (!bytes) {
-    const message = cleanPsMessage(run);
-    await removeTree(tmpDir);
-    return { ok: false, error: message };
-  }
-  try {
-    fs.copyFileSync(done, outFile);
-  } catch (error) {
-    return { ok: false, error: `写出派生文件失败：${error?.message || error}` };
+    const done = path.join(tmpDir, `out.${convertTargetExt(kind)}`);
+    const script = buildScript(engine, tmpIn, done);
+    const run = await runPowerShell(script, { timeoutMs: 180000 });
+    if (run.timeout) {
+      return { ok: false, error: 'Office 转换超时（进程已结束）；这份文件可能太大或损坏' };
+    }
+    // 退不退出码不作判据（Windows PowerShell 5.1 正常结束也可能返回 1），但「产物是不是
+    // 一个完整的 OOXML」必须验：超时/被中断时 Word 可能已经写出一个几 KB 的残缺 docx。
+    const check = inspectOoxml(done);
+    if (!check.ok) {
+      const message = check.reason === 'missing' ? cleanPsMessage(run) : check.reason;
+      return { ok: false, error: message };
+    }
+    try {
+      fs.copyFileSync(done, outFile);
+    } catch (error) {
+      return { ok: false, error: `写出派生文件失败：${error?.message || error}` };
+    }
+    let written = check.bytes;
+    try {
+      written = fs.statSync(outFile).size;
+    } catch {
+      written = check.bytes;
+    }
+    return {
+      ok: true,
+      engine,
+      out: outFile,
+      bytes: written,
+      detail: 'Office 另存为',
+      warnings,
+    };
   } finally {
-    await removeTree(tmpDir);
+    const removal = await removeTree(tmpDir);
+    if (!removal.ok) warnings.push(`临时目录没删掉：${tmpDir}（${removal.error}）`);
   }
-  let written = bytes;
+}
+
+/** 产物是不是完整的 OOXML：zip 魔数 + 非空。只看「文件存在且非 0 字节」会把半截文件当成功。 */
+function inspectOoxml(file) {
+  let stat = null;
   try {
-    written = fs.statSync(outFile).size;
+    stat = fs.statSync(file);
   } catch {
-    written = bytes;
+    return { ok: false, reason: 'missing', bytes: 0 };
   }
-  return {
-    ok: true,
-    engine,
-    out: outFile,
-    bytes: written,
-    detail: 'Office 另存为',
-  };
+  if (!stat.isFile() || !stat.size) return { ok: false, reason: 'missing', bytes: 0 };
+  try {
+    const fd = fs.openSync(file, 'r');
+    try {
+      const head = Buffer.alloc(4);
+      fs.readSync(fd, head, 0, 4, 0);
+      if (head.toString('latin1') !== 'PK\u0003\u0004') {
+        return { ok: false, reason: 'Office 写出的文件不是 OOXML（可能被中断或另存为失败）', bytes: stat.size };
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (error) {
+    return { ok: false, reason: `读不了转换产物：${error?.message || error}`, bytes: stat.size };
+  }
+  return { ok: true, bytes: stat.size };
 }
 
 /* ------------------------------ 计划与执行 ------------------------------ */
@@ -409,6 +451,10 @@ export class Converter {
         budget -= 1;
         if (result.ok) state.done += 1;
         else state.failed += 1;
+        if (result.warnings?.length) {
+          // 临时目录没删掉这类问题不改变「这份转好了」，但必须留痕，否则 %TEMP% 会越积越多
+          for (const line of result.warnings) this.logger?.warn?.(`[data-analysis] 转码：${line}`);
+        }
         pending.push(this.row(item, result.ok
           ? { status: 'ok', derived_rel: derivedRel(item, suffix), bytes: result.bytes }
           : { status: 'error', error: result.error }));

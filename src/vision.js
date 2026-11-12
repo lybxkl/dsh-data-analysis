@@ -12,11 +12,12 @@ import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 
 import { readCsv } from './audit.js';
 import { DEFAULT_PYTHON } from './defaults.js';
-import { IS_WINDOWS, removeTree } from './platform.js';
+import { IS_WINDOWS, killChildTree, removeTree } from './platform.js';
 import {
   derivedFile,
   derivedMountName,
@@ -144,7 +145,7 @@ function renderHint(message) {
   return text;
 }
 
-function runPython(pythonPath, job, workDir) {
+function runPython(pythonPath, job, workDir, { timeoutMs = 600000, signal } = {}) {
   const command = String(pythonPath || '').trim() || (IS_WINDOWS ? 'python' : 'python3');
   return new Promise((resolve) => {
     const stem = `job-${Date.now()}-${jobSeq++}`;
@@ -162,10 +163,12 @@ function runPython(pythonPath, job, workDir) {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stderr = '';
+    let settled = false;
+    const decoder = new StringDecoder('utf8');
     child.stdout.on('data', () => {});
     child.stderr.on('data', (chunk) => {
-      stderr += chunk.toString('utf8');
-      if (stderr.length > 40000) stderr = stderr.slice(0, 40000);
+      stderr += decoder.write(chunk);
+      if (stderr.length > 40000) stderr = stderr.slice(-40000);
     });
     const cleanup = () => {
       for (const file of [jobFile, resultFile]) {
@@ -176,25 +179,50 @@ function runPython(pythonPath, job, workDir) {
         }
       }
     };
-    child.on('error', (error) => {
+    // 没有超时的子进程会把整个识图任务挂死：`state.running` 永远是 true，
+    // 之后每次点「开始」都被拒，只能重启插件。宁可报错也不能这样卡住。
+    const finish = (payload) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onAbort);
       cleanup();
+      resolve({ ...payload, stderr: stderr.trim() });
+    };
+    const onAbort = () => {
+      killChildTree(child);
+      finish({ ok: false, error: '识图已取消', items: [] });
+    };
+    const timer = setTimeout(() => {
+      killChildTree(child);
+      finish({ ok: false, error: `渲染超时（${Math.round(timeoutMs / 1000)} 秒）：文件可能太大或损坏，可以先单独试一页`, items: [] });
+    }, timeoutMs);
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+    child.on('error', (error) => {
       const code = error?.code;
       const hint = code === 'ENOENT'
         ? (IS_WINDOWS
           ? `找不到 Python 命令「${command}」：在设置里改成可执行的 python.exe`
           : `找不到 Python 命令「${command}」：macOS 上通常要写 python3`)
         : String(error?.message || error);
-      resolve({ ok: false, error: hint, items: [] });
+      finish({ ok: false, error: hint, items: [] });
     });
     child.on('close', () => {
+      if (settled) return;
+      stderr += decoder.end();
       let payload = null;
       try {
         payload = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
       } catch (error) {
         payload = { ok: false, error: `渲染脚本没有产出结果：${stderr.trim() || error?.message || error}`, items: [] };
       }
-      cleanup();
-      resolve({ ...payload, stderr: stderr.trim() });
+      finish(payload);
     });
   });
 }
@@ -326,6 +354,31 @@ export class Vision {
     return path.join(path.resolve(this.cacheDir), 'sources-cache', '.jobs');
   }
 
+  /** 进程崩溃/断电时 job-*.json 会留在 .jobs 里：跑之前顺手清掉一天前的（不影响正在用的）。 */
+  sweepJobs() {
+    const dir = this.workDir();
+    let names = [];
+    try {
+      names = fs.readdirSync(dir);
+    } catch {
+      return 0;
+    }
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    let removed = 0;
+    for (const name of names) {
+      if (!/^job-.*\.(json|result\.json)$/.test(name)) continue;
+      const abs = path.join(dir, name);
+      try {
+        if (fs.statSync(abs).mtimeMs >= cutoff) continue;
+        fs.unlinkSync(abs);
+        removed += 1;
+      } catch {
+        /* ignore */
+      }
+    }
+    return removed;
+  }
+
   status() {
     return this.state ? { ...this.state } : { running: false };
   }
@@ -341,14 +394,14 @@ export class Vision {
   }
 
   /** 先把总页数数出来（只读 PDF 页数，不调模型、不花钱）。 */
-  async countPages(plan) {
+  async countPages(plan, { signal } = {}) {
     const unknown = (plan.items || []).filter((item) => !item.pagesKnown);
     if (!unknown.length) return plan;
     const pythonPath = String(this.getConfig()?.pythonPath || DEFAULT_PYTHON);
     const payload = await runPython(pythonPath, {
       mode: 'count',
       items: unknown.map((item) => ({ id: item.relPath, path: item.abs })),
-    }, this.workDir());
+    }, this.workDir(), { timeoutMs: 120000, signal });
     const found = new Map((payload.items || []).map((item) => [item.id, item]));
     for (const item of plan.items) {
       if (item.pagesKnown) continue;
@@ -389,6 +442,7 @@ export class Vision {
     }
 
     const pythonPath = String(this.getConfig()?.pythonPath || DEFAULT_PYTHON);
+    this.sweepJobs();
     const work = this.workDir();
     const tmpRoot = path.join(work, 'pages');
     const state = {
@@ -447,14 +501,21 @@ export class Vision {
             mode: 'image',
             maxEdge: 2400,
             items: [{ id: item.relPath, path: item.abs, out: target }],
-          }, work);
+          }, work, { timeoutMs: 180000, signal });
           const hit = payload.items?.[0];
           if (!hit?.ok) {
             state.failedPages += 1;
+            if (this.controller.signal.aborted) {
+              state.cancelled = true;
+              pending.push(this.logRow(item, 1, { status: 'error', error: '已取消' }));
+              break;
+            }
             pending.push(this.logRow(item, 1, { status: 'error', error: renderHint(hit?.error || payload.error || '转码失败') }));
             continue;
           }
-          rendered = [{ page: 1, file: hit.file }];
+          rendered = Array.isArray(hit.images) && hit.images.length
+            ? hit.images.map((image) => ({ page: Number(image.page) || 1, file: image.file })).filter((image) => remainingPages.includes(image.page))
+            : [{ page: 1, file: hit.file }];
         } else {
           const outDir = path.join(tmpRoot, `${crypto.randomUUID()}`);
           fs.mkdirSync(outDir, { recursive: true });
@@ -464,10 +525,15 @@ export class Vision {
             maxEdge: 2400,
             outDir,
             items: [{ id: item.relPath, path: item.abs, pages: remainingPages.join(',') }],
-          }, work);
+          }, work, { timeoutMs: 600000, signal });
           const hit = payload.items?.[0];
           if (!hit?.ok) {
             state.failedPages += 1;
+            if (this.controller.signal.aborted) {
+              state.cancelled = true;
+              pending.push(this.logRow(item, remainingPages[0], { status: 'error', error: '已取消' }));
+              break;
+            }
             pending.push(this.logRow(item, remainingPages[0], { status: 'error', error: renderHint(hit?.error || payload.error || '渲染失败') }));
             continue;
           }

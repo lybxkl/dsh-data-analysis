@@ -153,22 +153,52 @@ def render_pdf(item, job):
         doc.close()
 
 
+def image_frames(path, limit=200):
+    """多帧图像（多页 TIFF、动态 GIF）有多少「页」。单帧返回 1。"""
+    if is_pdf(path):
+        return count_pdf(path)
+    from PIL import Image
+
+    with Image.open(path) as img:
+        return max(1, min(int(getattr(img, "n_frames", 1) or 1), limit))
+
+
 def image_to_png(item, job):
-    """把任意位图转成 PNG（模型只吃 PNG/JPEG/WebP/GIF，tif/bmp/heic 必须先转）。"""
+    """把任意位图转成 PNG（模型只吃 PNG/JPEG/WebP/GIF，tif/bmp/heic 必须先转）。
+
+    多帧图不能只转第一帧：那样 vision_log 里是一行 status=ok，剩下的页却从来没被识别，
+    属于「静默丢页」。这里逐帧输出，页号即帧号。
+    """
     from PIL import Image
 
     max_edge = int(job.get("maxEdge") or 2600)
     out = item.get("out") or ""
+    images = []
     with Image.open(item["path"]) as img:
-        if getattr(img, "n_frames", 1) > 1:
-            img.seek(0)  # GIF 取首帧
-        has_alpha = img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info)
-        img = img.convert("RGBA" if has_alpha else "RGB")
-        width, height = clamp_size(img.width, img.height, max_edge)
-        if (width, height) != (img.width, img.height):
-            img = img.resize((width, height), resample_filter())
-        img.save(out, format="PNG", optimize=True)
-        return {"file": out, "bytes": os.path.getsize(out), "width": width, "height": height, "pages": 1}
+        frames = max(1, min(int(getattr(img, "n_frames", 1) or 1), 200))
+        for index in range(frames):
+            if frames > 1:
+                try:
+                    img.seek(index)
+                except EOFError:
+                    break
+            target = out if frames == 1 else "%s.f%04d.png" % (out[:-4] if out.endswith(".png") else out, index + 1)
+            has_alpha = img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info)
+            frame = img.convert("RGBA" if has_alpha else "RGB")
+            width, height = clamp_size(frame.width, frame.height, max_edge)
+            if (width, height) != (frame.width, frame.height):
+                frame = frame.resize((width, height), resample_filter())
+            frame.save(target, format="PNG", optimize=True)
+            images.append({
+                "page": index + 1,
+                "file": target,
+                "bytes": os.path.getsize(target),
+                "width": width,
+                "height": height,
+            })
+    if not images:
+        raise RuntimeError("这张图没有可读的帧：%s" % item["path"])
+    return {"pages": len(images), "images": images}
 
 
 def run_job(job):
@@ -184,15 +214,16 @@ def run_job(job):
             if not path or not os.path.isfile(path):
                 raise RuntimeError("文件不存在：%s" % path)
             if mode == "count":
-                # 图片没有「页」的概念，直接 1 页；只有 PDF 才去问 PyMuPDF
-                entry.update({"ok": True, "pages": count_pdf(path) if is_pdf(path) else 1})
+                # 图片的「页」就是帧数：多页 TIFF / 动态 GIF 不能只算 1 页
+                entry.update({"ok": True, "pages": image_frames(path)})
             elif mode == "render":
                 info = render_pdf(item, job)
                 entry.update({"ok": True, "pages": info["pages"], "images": info["images"]})
             elif mode == "image":
                 info = image_to_png(item, job)
-                entry.update({"ok": True, "pages": 1, "file": info["file"], "bytes": info["bytes"],
-                              "width": info["width"], "height": info["height"]})
+                entry.update({"ok": True, "pages": info["pages"], "images": info["images"],
+                              "file": info["images"][0]["file"], "bytes": info["images"][0]["bytes"],
+                              "width": info["images"][0]["width"], "height": info["images"][0]["height"]})
             else:
                 raise RuntimeError("未知 mode：%s" % mode)
         except Exception as exc:  # noqa: BLE001 - 一条失败不能拖垮整批

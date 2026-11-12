@@ -24,7 +24,7 @@ import { fingerprint, resolveSkillRoot, resolveStageScript, listScripts } from '
 import { clearCorpusScan, scanArtifacts } from './audit.js';
 import { runPreflight } from './preflight.js';
 import { buildTaskCard } from './taskcard.js';
-import { applyPatch, buildEvidence, readIssues, recheckSummary, writeIssues } from './recheck.js';
+import { applyPatch, buildEvidence, fileHash, readIssues, recheckSummary, writeIssues } from './recheck.js';
 import {
   addSource as registerSource,
   derivedMountName,
@@ -244,6 +244,8 @@ export class Workbench {
       projects: projects.slice(0, 20),
       activeProjectId: id,
       activeProjectPath: projectRoot,
+      // 重新打开/新建项目就算「回到工作台」，清掉关闭状态
+      meta: { ...(state.meta || {}), detached: false },
     });
     return id;
   }
@@ -316,6 +318,8 @@ export class Workbench {
     const state = this.store.get();
     let root = state.activeProjectPath || '';
     if (!root) {
+      // 「关闭项目」要真的关掉：否则这里会回退到最近一个项目，界面上报了成功、实际还在原地跑。
+      if (state.meta?.detached) return { ok: false, detached: true, error: '还没有打开项目' };
       const last = (state.projects || [])[0];
       root = last ? last.path : '';
     }
@@ -347,7 +351,12 @@ export class Workbench {
   }
 
   closeProject() {
-    this.store.set({ activeProjectId: '', activeProjectPath: '' });
+    const state = this.store.get();
+    this.store.set({
+      activeProjectId: '',
+      activeProjectPath: '',
+      meta: { ...(state.meta || {}), detached: true },
+    });
     this.onChange({ kind: 'project', path: '' });
     return { ok: true };
   }
@@ -907,7 +916,8 @@ export class Workbench {
         python: config.pythonPath,
         projects,
         active: null,
-        error: active.error,
+        // 主动关掉项目不是错误：空状态页自己会说「还没有打开项目」，这里再飘一条红字只会打扰
+        error: active.detached ? '' : active.error,
         preflight: this.preflightSummary(),
         stages: [],
         summary: { done: 0, blocked: 0, review: 0, todo: 9, running: 0 },
@@ -1286,8 +1296,18 @@ export class Workbench {
     if (!active.ok) return { ok: false, error: active.error };
     const issues = readIssues(active.path);
     const at = issues.findIndex((item) => item.id === issue.id);
-    if (at >= 0) issues[at] = { ...issues[at], ...issue, updatedAt: new Date().toISOString() };
-    else issues.push(issue);
+    if (at >= 0) {
+      // 模型重录同一个 id 是常规动作；不能让它把人工裁定过的 fixed/wontfix/deferred 打回 open
+      issues[at] = {
+        ...issues[at],
+        ...issue,
+        status: issues[at].status || 'open',
+        note: issue.note || issues[at].note || '',
+        updatedAt: new Date().toISOString(),
+      };
+    } else {
+      issues.push(issue);
+    }
     writeIssues(active.path, issues);
     this.onChange({ kind: 'recheck-issue-record', id: issue.id });
     return { ok: true, issue: at >= 0 ? issues[at] : issue, total: issues.length };
@@ -1322,14 +1342,21 @@ export class Workbench {
     if (at < 0) return { ok: false, error: `没有这条问题：${id}` };
     const issue = issues[at];
     if (issue.status !== 'open') return { ok: false, error: `这条问题状态是 ${issue.status}，只有 open 的可以套用` };
+    // 已经套过一次、之后文件没再变过：重复套用只会再写一遍同样的内容
+    if (issue.appliedHash && issue.patch?.path && fileHash(path.resolve(active.path, issue.patch.path)) === issue.appliedHash) {
+      return { ok: false, error: '这条补丁已经套用过了（文件内容与套用后一致），不重复写' };
+    }
     const applied = applyPatch(active.path, issue);
     if (!applied.ok) return applied;
+    // 补丁落盘不等于问题解决：状态保持 open，等重跑 + 复算/人复核之后再改，
+    // 否则「补丁写坏了」也会让 recheck-issues 闸门立刻变绿。
     issues[at] = {
       ...issue,
-      status: 'fixed',
+      status: 'open',
       appliedAt: new Date().toISOString(),
       appliedHash: applied.hash,
       backup: applied.backup,
+      updatedAt: new Date().toISOString(),
     };
     writeIssues(active.path, issues);
     this.onChange({ kind: 'recheck-apply', id, file: applied.file });
@@ -1344,6 +1371,9 @@ export class Workbench {
   downstreamStages(file) {
     const rel = String(file).replace(/\\/g, '/');
     if (/^(data\/|scripts\/|output\/(coding|audit)\/)/.test(rel)) return ['coding', 'dataset', 'stats', 'figures', 'manuscript', 'qa'];
+    // output/dataset/analysis.csv 是规范宽表，stats / figures / qa 都拿它当 --data；
+    // 漏掉它会让「补丁改了宽表」被报成「不影响下游阶段，未触发重跑」。
+    if (/^output\/dataset\//.test(rel)) return ['stats', 'figures', 'manuscript', 'qa'];
     if (/^output\/(models|tables)\//.test(rel)) return ['stats', 'figures', 'manuscript', 'qa'];
     if (/^(model_spec\.json|chart_config\.json)$/.test(rel)) return ['stats', 'figures', 'manuscript', 'qa'];
     if (/^output\/chart_pack\//.test(rel)) return ['figures', 'manuscript', 'qa'];
@@ -1391,29 +1421,48 @@ export class Workbench {
     if (run.projectId && chain.projectId && run.projectId !== chain.projectId) return;
     const expected = chain.steps[chain.index];
     if (run.stageId !== expected) return;
-    if (run.status === 'ok') {
-      this.patchChain({ index: chain.index + 1 });
-    } else {
-      // 退出码非 0 不等于阶段失败：verify_numbers 找到问题就 exit 2，但那属于「待裁定」。
-      // 以阶段闸门为准——只有真的被 error 级闸门拦住，才终止重跑链。
-      const stageState = (this.snapshot().stages || []).find((stage) => stage.id === run.stageId);
-      if (!stageState || stageState.status === 'blocked') {
-        this.patchChain({
-          status: 'stopped',
-          error: `${expected} 运行${run.status === 'cancelled' ? '被取消' : '被闸门拦住'}（退出码 ${run.exitCode ?? '—'}）`,
-        });
-        return;
-      }
-      this.patchChain({
-        index: chain.index + 1,
-        note: `${expected} 退出码 ${run.exitCode ?? '—'}，但闸门只有待裁定项，继续`,
-      });
+    // 退出码不是判据，闸门才是：跑完 exit 0 但 error 级闸门 fail（例如没写 manifest）时，
+    // 阶段是 blocked，链必须停，不能因为「进程成功」就当这一步过了。
+    const stageState = (this.snapshot().stages || []).find((stage) => stage.id === run.stageId);
+    const stageStatus = stageState?.status || '';
+    if (!stageStatus || stageStatus === 'blocked' || run.status === 'cancelled') {
+      const why = run.status === 'cancelled'
+        ? '被取消'
+        : stageStatus === 'blocked' ? '被 error 级闸门拦住' : '阶段状态读不到';
+      this.patchChain({ status: 'stopped', error: `${expected} 运行${why}（退出码 ${run.exitCode ?? '—'}）` });
+      return;
     }
+    this.patchChain({
+      index: chain.index + 1,
+      note: run.status === 'ok' ? '' : `${expected} 退出码 ${run.exitCode ?? '—'}，但闸门没有拦住（${stageStatus}），继续`,
+    });
     const next = this.chainStatus();
     if (next && next.status === 'running') {
       // 让当前 finish 先落盘，再起下一步
       setTimeout(() => this.beginChainStep(), 0);
     }
+  }
+
+  /** 宿主重启后，重跑链的回调不会再回来：把留在 running 的链标成中断，否则以后都点不动「套用」。 */
+  recoverChains() {
+    const state = this.store.get();
+    const chains = { ...(state.recheckChains || {}) };
+    let changed = 0;
+    for (const [projectId, chain] of Object.entries(chains)) {
+      if (!chain || chain.status !== 'running') continue;
+      chains[projectId] = {
+        ...chain,
+        status: 'interrupted',
+        error: '宿主重启（或中途切了项目），这一轮重跑已经中断，可以重新点「套用」',
+        updatedAt: new Date().toISOString(),
+      };
+      changed += 1;
+    }
+    if (changed) {
+      this.store.set({ recheckChains: chains });
+      this.store.flushSoon();
+    }
+    return changed;
   }
 
   cancelChain() {

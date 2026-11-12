@@ -239,7 +239,8 @@ function pick(row, keys) {
 function parseNumber(value) {
   const text = String(value ?? '').replace(/,/g, '').trim();
   if (!text) return null;
-  const match = text.match(/-?[0-9]+(?:\.[0-9]+)?/);
+  // 科学计数法要认：统计软件导出的 N 可能是 1.2e+03，截成 1.2 会让「N 大于样本」永远判不成立
+  const match = text.match(/-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/);
   if (!match) return null;
   const n = Number(match[0]);
   return Number.isFinite(n) ? n : null;

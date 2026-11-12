@@ -369,15 +369,20 @@ PowerPoint `SaveAs(24)`。转换前先把文件复制到系统临时目录，免
 ## 测试
 
 ```bash
-npm test                         # = materials + client-smoke
-node tests/materials.test.mjs    # 通道分类、挂载、迁移、识图全流程、来源账（全在临时目录里造数据）
-node tests/client-smoke.test.mjs # 不开浏览器，用假 React 把面板渲染成树：环境闸门 / 主界面两条路径
-node tests/e2e-corpus.test.mjs   # 真实语料端到端（有材料包才跑；用 DSA_PROJECT / DSA_SOURCE 指定路径）
+npm test                          # 下面五套全跑，一条命令
+node tests/materials.test.mjs     # 通道分类、挂载、迁移、识图全流程、来源账（全在临时目录里造数据）
+node tests/gates.test.mjs         # 闸门三态：pass / fail / unjudged 的边界，用合成项目逐条打
+node tests/recheck.test.mjs       # 复核与补丁：baseHash、越界、目录联接穿透、备份命名、12 项复算口径
+node tests/consistency.test.mjs   # 静态对账：文案键 / CSS 类 / 接口路径 / 工具名 / 快照字段
+node tests/client-smoke.test.mjs  # 不开浏览器，用假 React 把面板渲染成树：环境闸门 / 主界面 / 弹窗 / 24 轮 fuzz
+node tests/e2e-corpus.test.mjs    # 真实语料端到端（有材料包才跑；用 DSA_PROJECT / DSA_SOURCE 指定路径）
 ```
 
 识图小节用假模型跑，不花 token；真实模型只在面板里手工试。
 `client-smoke` 会把 `client.js` 的两个 `useState` 初值替换成测试夹具再渲染，所以它同时是个结构探针：
 面板里那几行初始化被改写，测试会直接报「结构变了」，提醒同步更新。
+`consistency` 是这几套里唯一「不需要 fixture」的：它只读源码，客户端调了不存在的接口、用了没定义的文案键、
+写了没有样式的 class，都会当场报出来。
 
 ## 第 9 阶段：复核与修订（完整闭环）
 
@@ -391,10 +396,13 @@ node tests/e2e-corpus.test.mjs   # 真实语料端到端（有材料包才跑；
 3. **L3 模型审计**：`data_analysis_recheck`（status → evidence）给出受控证据包；模型用 `data_analysis_issue`
    逐条写 `output/recheck/issues.jsonl`（`severity / where / claim / evidence / fix_kind`），
    并在 `output/recheck/coverage.json` 交 12 项覆盖表（checked / unchecked + 理由）。**模型不改产物。**
-4. **L4 修复与二次验收**：问题的补丁（`patch.path` + `patch.baseHash` + `patch.content`）只是提案；
+4. **L4 修复与二次验收**：问题的补丁（`patch_path` + `patch_base_hash` + `patch_content`）只是提案；
    人在面板点「套用补丁并重跑」后才会落盘（备份到 `output/recheck/diffs/`），并按下游依赖**自动重跑**
-   （改 `data/`、`scripts/`、`output/coding` 就全链重跑；只改图就从 figures 起跑）。退出码非 0 但阶段闸门没有 error 级未过时，链会继续并在链状态里记一句说明（典型：`verify_numbers` 找到问题就 exit 2，但那是待裁定，不是脚本崩了）。重跑链的状态与进度
-   存在台账 `recheckChains` 里，面板可取消；每一步的闸门重新判定，旧裁定按「裁定早于运行结束」自动失效。
+   （改 `data/`、`scripts/`、`output/coding` 就全链重跑；只改图就从 figures 起跑）。
+   重跑链**以闸门为准，不看退出码**：阶段判定为 blocked（有 error 级未过）或运行被取消就停在原地，
+   退出码非 0 但闸门没有 error 级未过时（典型：`verify_numbers` 找到问题就 exit 2，那是待裁定）继续往下跑。
+   套用后问题**仍留在 open**，等你复核完再手动标 fixed——补丁写坏了不能让闸门自己变绿。
+   重跑链的状态与进度存在台账 `recheckChains` 里，面板可取消；每一步的闸门重新判定，旧裁定按「裁定早于运行结束」自动失效。
 
 复核阶段的四条闸门：`recheck-machine`（R1–R11 有 fail 即拦截）、`recheck-issues`（open error 即拦截）、
 `recheck-coverage`（缺项 fail、unchecked 判不了）、`recheck-report`（缺报告判不了）。

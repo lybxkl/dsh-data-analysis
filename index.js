@@ -124,6 +124,10 @@ export function apply(ctx, rawConfig = {}) {
   // 复核闭环：一次运行结束后，若是重跑链的当前步，由服务层推进下一步
   runner.onFinish = (run) => workbench.onRunFinished(run);
 
+  // 重跑链的回调不会跨进程回来：留在 running 的链会把「套用」永久挡住，这里统一标中断
+  const interrupted = workbench.recoverChains();
+  if (interrupted) logger?.warn?.(`[data-analysis] ${interrupted} 条重跑链已标记为中断`);
+
   // LLM 桥：用宿主自己的模型选择（agentDefaultModel）与 llm 服务起草文本。
   // 缺服务时只降级，不让插件挂掉——面板会显示「模型不可用」而不是白屏。
   const assistant = new Assistant({

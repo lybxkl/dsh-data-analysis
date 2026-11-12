@@ -6,11 +6,32 @@
  * 所以技能脚本的 `--root data` 一行都不用改。
  */
 
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 
 export const IS_WINDOWS = process.platform === 'win32';
+
+/** PowerShell 的输出走控制台代码页（简中 936），不显式设成 UTF-8，中文路径会变乱码。 */
+const PS_PRELUDE = '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8;\n';
+
+/** 超时后连子进程一起杀：只 kill powershell.exe，Word/Excel 的 COM 服务器会留在后台攥着文件句柄。 */
+export function killChildTree(child) {
+  try {
+    if (IS_WINDOWS && child.pid) {
+      execFileSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 5000 });
+      return;
+    }
+    child.kill('SIGKILL');
+  } catch {
+    try {
+      child.kill();
+    } catch {
+      /* ignore */
+    }
+  }
+}
 
 /**
  * 跑一段 PowerShell，返回 { ok, code, stdout, stderr }。不抛异常。
@@ -27,7 +48,7 @@ export function runPowerShell(script, { timeoutMs = 60000, cwd } = {}) {
     });
   }
   return new Promise((resolve) => {
-    const encoded = Buffer.from(script, 'utf16le').toString('base64');
+    const encoded = Buffer.from(PS_PRELUDE + script, 'utf16le').toString('base64');
     const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
       cwd,
       windowsHide: true,
@@ -36,24 +57,24 @@ export function runPowerShell(script, { timeoutMs = 60000, cwd } = {}) {
     let stdout = '';
     let stderr = '';
     let settled = false;
+    // 逐 chunk 解码会把一个中文字符从中间切开，留下半个字节的乱码。
+    const outDecoder = new StringDecoder('utf8');
+    const errDecoder = new StringDecoder('utf8');
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      try {
-        child.kill();
-      } catch {
-        /* ignore */
-      }
-      resolve({ ok: false, code: null, stdout, stderr: `${stderr}\n超时（${timeoutMs}ms）`.trim() });
+      killChildTree(child);
+      resolve({ ok: false, code: null, timeout: true, stdout, stderr: `${stderr}\n超时（${timeoutMs}ms）`.trim() });
     }, timeoutMs);
 
     child.stdout.on('data', (chunk) => {
-      stdout += chunk.toString('utf8');
-      if (stdout.length > 200000) stdout = stdout.slice(0, 200000);
+      stdout += outDecoder.write(chunk);
+      // 只留尾部：调用方关心的是最后几行（ConvertTo-Json 的结果、ERR: 那一行）
+      if (stdout.length > 200000) stdout = stdout.slice(-200000);
     });
     child.stderr.on('data', (chunk) => {
-      stderr += chunk.toString('utf8');
-      if (stderr.length > 200000) stderr = stderr.slice(0, 200000);
+      stderr += errDecoder.write(chunk);
+      if (stderr.length > 200000) stderr = stderr.slice(-200000);
     });
     child.on('error', (error) => {
       if (settled) return;
@@ -65,6 +86,8 @@ export function runPowerShell(script, { timeoutMs = 60000, cwd } = {}) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      stdout += outDecoder.end();
+      stderr += errDecoder.end();
       resolve({ ok: code === 0, code, stdout, stderr });
     });
   });
@@ -210,25 +233,44 @@ export function dirEntries(dir) {
  * 链接一律 unlink，绝不跟进去删目标。
  */
 function removeOnce(target) {
-  let stat;
-  try {
-    stat = fs.lstatSync(target);
-  } catch (error) {
-    if (error?.code === 'ENOENT') return;
-    throw error;
-  }
-  if (stat.isSymbolicLink() || !stat.isDirectory()) {
-    // 联接/软链只删链接本身：Windows 上 unlink 对联接可能报 EPERM，退回 rmdir
+  // 用显式栈而不是递归：Windows 长路径场景目录层级可能很深，递归会撞 RangeError，
+  // 而 removeTree 的重试对栈溢出没有帮助。逆序删除保证「先子后父」。
+  const collected = [];
+  const stack = [target];
+  while (stack.length) {
+    const current = stack.pop();
+    let stat;
     try {
-      fs.unlinkSync(target);
+      stat = fs.lstatSync(current);
     } catch (error) {
-      if (!stat.isSymbolicLink()) throw error;
-      fs.rmdirSync(target);
+      if (error?.code === 'ENOENT') continue;
+      throw error;
     }
-    return;
+    collected.push(current);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) continue;
+    for (const name of fs.readdirSync(current)) stack.push(path.join(current, name));
   }
-  for (const name of fs.readdirSync(target)) removeOnce(path.join(target, name));
-  fs.rmdirSync(target);
+  for (let i = collected.length - 1; i >= 0; i -= 1) {
+    const item = collected[i];
+    let stat;
+    try {
+      stat = fs.lstatSync(item);
+    } catch (error) {
+      if (error?.code === 'ENOENT') continue;
+      throw error;
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      // 联接/软链只删链接本身：Windows 上 unlink 对联接可能报 EPERM，退回 rmdir
+      try {
+        fs.unlinkSync(item);
+      } catch (error) {
+        if (!stat.isSymbolicLink()) throw error;
+        fs.rmdirSync(item);
+      }
+      continue;
+    }
+    fs.rmdirSync(item);
+  }
 }
 
 /**
@@ -279,7 +321,7 @@ export function readMountMarker(dir) {
  *
  * 代价是源目录增删文件后镜像会过期，要重跑 sync（面板上的「修复联接」）。
  */
-export function mirrorDir(source, dest, { maxFiles = 80000 } = {}) {
+export function mirrorDir(source, dest, { maxFiles = 80000, maxDepth = 16 } = {}) {
   const absSource = path.resolve(source);
   const absDest = path.resolve(dest);
   let stat = null;
@@ -294,21 +336,47 @@ export function mirrorDir(source, dest, { maxFiles = 80000 } = {}) {
   } catch (error) {
     return { ok: false, error: `建不了 ${absDest}：${error?.message || error}` };
   }
-
+  // 标记文件必须**先写**：中途被打断（取消、崩溃、磁盘满）时，留下的是一个有标记的
+  // 半成品目录，还能被 removeMirror 认出来删掉；反过来先建内容后写标记，打断后就是个
+  // 既删不掉也挂不上的真实目录，只能让用户自己进 data/ 手删。
+  const writeMarker = (extra = {}) => {
+    try {
+      fs.writeFileSync(
+        path.join(absDest, MOUNT_MARKER),
+        `${JSON.stringify({ kind: 'mirror', source: absSource, files, dirs, partial: true, at: new Date().toISOString(), ...extra }, null, 2)}\n`,
+        'utf8',
+      );
+    } catch {
+      /* 标记写不进去只影响后续识别，不影响读取；不为此失败 */
+    }
+  };
   let files = 0;
   let dirs = 0;
   let truncated = false;
   const failed = [];
   const seen = new Set();
-  const walk = (srcDir, dstDir) => {
+  writeMarker();
+
+  /** 链接是否还留在源目录里面：指向 $HOME/网络盘的链接会把整棵树灌进 data/。 */
+  const insideSource = (target) => {
+    const rel = path.relative(absSource, target);
+    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+  };
+
+  const walk = (srcDir, dstDir, depth) => {
+    if (depth > maxDepth) {
+      failed.push(`${path.basename(srcDir)}: 目录层级超过 ${maxDepth} 层，已跳过`);
+      return;
+    }
     // 源里如果有指向自己的链接，按真实路径去重，避免无限递归
+    let real = '';
     try {
-      const real = fs.realpathSync(srcDir);
-      if (seen.has(real)) return;
-      seen.add(real);
+      real = fs.realpathSync(srcDir);
     } catch {
       return;
     }
+    if (seen.has(real)) return;
+    seen.add(real);
     let entries;
     try {
       entries = fs.readdirSync(srcDir, { withFileTypes: true });
@@ -328,9 +396,14 @@ export function mirrorDir(source, dest, { maxFiles = 80000 } = {}) {
       let isFile = entry.isFile();
       if (entry.isSymbolicLink()) {
         try {
-          const stat = fs.statSync(from);
-          isDir = stat.isDirectory();
-          isFile = stat.isFile();
+          const st = fs.statSync(from);
+          isDir = st.isDirectory();
+          isFile = st.isFile();
+          // 指向源目录之外的目录链接不跟：那不是用户的材料，是它恰好链到了别处
+          if (isDir && !insideSource(fs.realpathSync(from))) {
+            failed.push(`${entry.name}: 链接指向源目录之外，已跳过`);
+            continue;
+          }
         } catch {
           continue; // 断链
         }
@@ -343,7 +416,7 @@ export function mirrorDir(source, dest, { maxFiles = 80000 } = {}) {
           failed.push(`${entry.name}: ${error?.message || error}`);
           continue;
         }
-        walk(from, to);
+        walk(from, to, depth + 1);
         continue;
       }
       if (!isFile) continue;
@@ -358,19 +431,10 @@ export function mirrorDir(source, dest, { maxFiles = 80000 } = {}) {
       }
     }
   };
-  walk(absSource, absDest);
+  walk(absSource, absDest, 0);
   // 源里删掉/改名的文件，镜像里对应的软链也该消失，否则 data/ 会一直多出已经不存在的条目
   const pruned = pruneMirror(absDest);
-
-  try {
-    fs.writeFileSync(
-      path.join(absDest, MOUNT_MARKER),
-      `${JSON.stringify({ kind: 'mirror', source: absSource, files, dirs, at: new Date().toISOString() }, null, 2)}\n`,
-      'utf8',
-    );
-  } catch {
-    /* 标记写不进去只影响后续识别，不影响读取；不为此失败 */
-  }
+  writeMarker({ partial: false });
   // 一条都没建成（Windows 没开发者模式、macOS 权限不足）时必须报失败：
   // 说「ok」却一个文件都没链过去，等于骗人去跑审计。
   const hardFail = files === 0 && failed.length > 0;
@@ -440,11 +504,13 @@ export function pruneMirror(dest) {
   return { ok: true, removed };
 }
 
-/** 删掉镜像目录。只删工作台自己建的（有标记文件），否则拒绝。 */
+/** 删掉镜像目录。只删工作台自己建的（有 kind=mirror 的标记文件），否则拒绝。 */
 export async function removeMirror(dest) {
   const abs = path.resolve(dest);
   if (isLink(abs)) return removeDirLink(abs);
   const marker = readMountMarker(abs);
-  if (!marker) return { ok: false, error: '这不是工作台建的镜像目录（没有标记文件），不删' };
+  // 只认得出标记还不够：sources.js 在校验时把 kind!=='mirror' 判成「不是工作台建的」，
+  // 删除时若放宽成「能解析就删」，目录里任何一个残留的 .dsh-mount.json 都能让用户目录被删掉。
+  if (!marker || marker.kind !== 'mirror') return { ok: false, error: '这不是工作台建的镜像目录（没有标记文件），不删' };
   return removeTree(abs);
 }

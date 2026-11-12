@@ -5,6 +5,8 @@
  * 避免「面板上通过、工具里失败」这种两边不一致。
  */
 
+import fs from 'node:fs';
+
 import { defineTool } from '@deepseek-ai/dsh-tools';
 
 const STATUS_LABEL = {
@@ -445,6 +447,9 @@ export function registerTools(ctx, workbench, helpers = {}) {
             : `已应用 ${result.file}（备份 ${result.backup}）${result.note ? `；${result.note}` : ''}`,
         };
       }
+      if (!['status', 'issues'].includes(action)) {
+        return { ok: false, text: `不认识的 action：${action}（status|evidence|issues|set|apply）` };
+      }
       const state = workbench.recheckState();
       if (!state.ok) return { ok: false, error: state.error, text: `复核状态不可用：${state.error}` };
       if (action === 'issues') {
@@ -476,8 +481,9 @@ export function registerTools(ctx, workbench, helpers = {}) {
     description:
       '向 output/recheck/issues.jsonl 追加（或更新）一条复核问题。模型审计时用：每条问题必须写清'
       + ' severity（error/warning/info）、where（文件:行 或 阶段）、claim（哪里不成立）、evidence（证据），'
-      + 'fix_kind（edit-text/edit-code/rerun/accept-risk/ask-user）；若要给补丁，patch.path 是项目内相对路径、'
-      + ' patch.baseHash 是改动前文件哈希（可用 data_analysis_recheck evidence 里给出的哈希）、patch.content 是整份新内容。'
+      + 'fix_kind（edit-text/edit-code/rerun/accept-risk/ask-user）；若要给补丁，用 patch_path（项目内相对路径）、'
+      + ' patch_base_hash（改动前文件的 sha256:...，必须取自 data_analysis_recheck 的 evidence 里「可补丁文件的当前哈希」）、'
+      + ' patch_content（改动后的整份新内容）——三个字段都要给，缺一个补丁就不会保存。'
       + '模型不直接改产物：补丁由人点「套用」后才会落盘并重跑下游。',
     parameters: {
       id: { type: 'string', required: true, description: '问题 id，如 RC-001' },
@@ -507,11 +513,16 @@ export function registerTools(ctx, workbench, helpers = {}) {
         status: 'open',
         createdAt: new Date().toISOString(),
       };
-      if (args.patch_path && args.patch_content) {
+      // 兼容两种写法：平铺的 patch_*，或一个 patch 对象（描述里提过 patch.path，模型会照着写）
+      const patchIn = args.patch && typeof args.patch === 'object' ? args.patch : {};
+      const patchPath = args.patch_path ?? patchIn.path;
+      const patchHash = args.patch_base_hash ?? patchIn.baseHash;
+      const patchContent = args.patch_content ?? patchIn.content;
+      if (patchPath && patchContent) {
         issue.patch = {
-          path: String(args.patch_path),
-          baseHash: String(args.patch_base_hash || ''),
-          content: String(args.patch_content),
+          path: String(patchPath),
+          baseHash: String(patchHash || ''),
+          content: String(patchContent),
         };
       }
       const state = workbench.recheckState();
@@ -542,6 +553,16 @@ export function registerTools(ctx, workbench, helpers = {}) {
       if (!result.ok) return { ok: false, error: result.error, text: `起草失败：${result.error}` };
       let saved = null;
       if (args.save) saved = assistant.save({ taskId: result.task, text: result.text });
+      // 写盘失败不能报成功：模型会据此告诉用户「已经写进 docs/ 了」
+      if (args.save && !saved?.ok) {
+        return {
+          ok: false,
+          error: saved?.error || '写入 docs/ 失败',
+          text: `起草完成，但没写进 docs/：${saved?.error || '未知原因'}`,
+          draft: result.text,
+          task: result.task,
+        };
+      }
       return {
         ok: true,
         text: result.text,
@@ -574,6 +595,14 @@ export function registerTools(ctx, workbench, helpers = {}) {
       .split(/[\n,，;；]+/)
       .map((item) => item.trim())
       .filter(Boolean);
+  }
+
+  /** 工具参数里的布尔偶尔是字符串（"false"）；Boolean('false') 是 true，破坏性开关不能这么转。 */
+  function isTrue(value) {
+    if (value === true) return true;
+    if (value === false || value === undefined || value === null) return false;
+    const text = String(value).trim().toLowerCase();
+    return text === 'true' || text === '1' || text === 'yes';
   }
 
   function materialsText(sources, mounts = [], derived = []) {
@@ -850,9 +879,19 @@ export function registerTools(ctx, workbench, helpers = {}) {
         sourceId: args?.sourceId,
         entries: splitList(args?.entries),
         as: args?.as || '',
-        apply: Boolean(args?.apply),
+        apply: isTrue(args?.apply),
       });
-      if (!result.ok) return { ok: false, error: result.error, text: `迁移未执行：${result.error}`, report: result.report };
+      if (!result.ok) {
+        // 不能替它下结论说「未执行」：apply 时副本可能已经删了、只是联接没建成，
+        // 两种相反后果都走这个分支，原样透传错误 + 报告让人自己看。
+        const removed = (result.report || []).some((item) => item.applied || item.removed);
+        return {
+          ok: false,
+          error: result.error,
+          text: `${removed ? '迁移中途失败（副本可能已删）' : '迁移未执行'}：${result.error}`,
+          report: result.report,
+        };
+      }
       const lines = [];
       for (const item of result.report || []) {
         const name = item.as || item.entry || '(根目录)';
@@ -886,6 +925,14 @@ export function registerTools(ctx, workbench, helpers = {}) {
       if (args.skillRoot !== undefined) patch.skillRoot = String(args.skillRoot);
       if (args.pythonPath !== undefined) patch.pythonPath = String(args.pythonPath);
       if (args.dataDir !== undefined) patch.dataDir = String(args.dataDir);
+      if (!Object.keys(patch).length) {
+        return { ok: false, text: '没有要改的配置项：请至少给 skillRoot / pythonPath / dataDir 之一' };
+      }
+      // skillRoot 写错会静默变成「skill 不可用」，先在这里挡一下（不存在就直说）
+      const root = String(patch.skillRoot || '').trim();
+      if (root && !fs.existsSync(root)) {
+        return { ok: false, text: `skillRoot 不存在：${root}。请给出 SPSS-Style-Charting-Skill 的仓库根或 empirical-research-pipeline 包目录` };
+      }
       const result = await workbench.updateConfig(patch);
       const snap = workbench.snapshot();
       return {

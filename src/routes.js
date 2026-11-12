@@ -51,6 +51,14 @@ function originMatches(originHeader, allowed) {
   }
 }
 
+/** JSON 里的布尔偶尔会被写成字符串；`Boolean('false')` 是 true，破坏性开关不能这么转。 */
+function isTrue(value) {
+  if (value === true) return true;
+  if (value === false || value === undefined || value === null) return false;
+  const text = String(value).trim().toLowerCase();
+  return text === 'true' || text === '1' || text === 'yes';
+}
+
 function readBody(req, limit = MAX_BODY) {
   return new Promise((resolve, reject) => {
     let size = 0;
@@ -169,7 +177,7 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
       path: `${basePath}/api/stage/run`,
       method: 'POST',
       handler: (body) => {
-        const result = workbench.runStage(String(body?.stageId || ''), { force: Boolean(body?.force) });
+        const result = workbench.runStage(String(body?.stageId || ''), { force: isTrue(body?.force) });
         if (!result.ok) return { status: 409, payload: { ok: false, error: result.error, blockers: result.blockers || [] } };
         return { ok: true, run: result.run, command: result.command, state: workbench.snapshot() };
       },
@@ -339,7 +347,7 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
       path: `${basePath}/api/materials/remove`,
       method: 'POST',
       handler: (body) => {
-        const result = workbench.removeSource(String(body?.id || ''), { force: Boolean(body?.force) });
+        const result = workbench.removeSource(String(body?.id || ''), { force: isTrue(body?.force) });
         if (!result.ok) return { status: 409, payload: { ok: false, error: result.error, usedBy: result.usedBy || [] } };
         return { ok: true, sources: result.sources, state: workbench.snapshot() };
       },
@@ -381,7 +389,7 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
         const entries = Array.isArray(body?.entries)
           ? body.entries
           : String(body?.entries || '').split(/[\n,，;；]+/).map((item) => item.trim()).filter(Boolean);
-        const result = await workbench.migrateSource({ sourceId: String(body?.sourceId || ''), entries, as: body?.as || '', apply: Boolean(body?.apply) });
+        const result = await workbench.migrateSource({ sourceId: String(body?.sourceId || ''), entries, as: body?.as || '', apply: isTrue(body?.apply) });
         if (!result.ok) return { status: 409, payload: { ok: false, error: result.error, report: result.report || [] } };
         return { ok: true, ...result, state: workbench.snapshot() };
       },
@@ -389,7 +397,7 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
     {
       path: `${basePath}/api/materials/vision`,
       method: 'GET',
-      handler: () => ({ ok: true, ...workbench.visionStatus(), plan: workbench.visionPlan() }),
+      handler: () => { const status = workbench.visionStatus(); const plan = workbench.visionPlan(); return { ok: plan.ok !== false, ...status, plan, ...(plan.ok === false ? { error: plan.error } : {}) }; },
     },
     {
       path: `${basePath}/api/materials/vision/run`,
@@ -398,7 +406,7 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
         const result = await workbench.startVision({
           limit: Number(body?.limit) || 40,
           pages: String(body?.pages || ''),
-          wait: Boolean(body?.wait),
+          wait: isTrue(body?.wait),
         });
         if (!result.ok) return { status: 409, payload: { ok: false, error: result.error, plan: result.plan || null } };
         return result;
@@ -420,7 +428,7 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
         const relPaths = Array.isArray(body?.relPaths)
           ? body.relPaths
           : String(body?.relPaths || '').split(/[\n,，;；]+/).map((item) => item.trim()).filter(Boolean);
-        const result = workbench.verifyVision({ relPaths, all: Boolean(body?.all) });
+        const result = workbench.verifyVision({ relPaths, all: isTrue(body?.all) });
         if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
         return { ok: true, ...result, state: workbench.snapshot() };
       },
@@ -428,13 +436,13 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
     {
       path: `${basePath}/api/materials/convert`,
       method: 'GET',
-      handler: () => ({ ok: true, ...workbench.convertStatus(), plan: workbench.convertPlan() }),
+      handler: () => { const status = workbench.convertStatus(); const plan = workbench.convertPlan(); return { ok: plan.ok !== false, ...status, plan, ...(plan.ok === false ? { error: plan.error } : {}) }; },
     },
     {
       path: `${basePath}/api/materials/convert/run`,
       method: 'POST',
       handler: async (body) => {
-        const result = await workbench.startConvert({ limit: Number(body?.limit) || 20, wait: Boolean(body?.wait) });
+        const result = await workbench.startConvert({ limit: Number(body?.limit) || 20, wait: isTrue(body?.wait) });
         if (!result.ok) return { status: 409, payload: { ok: false, error: result.error, office: result.office || null } };
         return result;
       },
@@ -449,10 +457,11 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
       },
     },
     {
+      // 面板的「查本机 Office」走 POST（和其他动作一致）；这里同时接受查询参数 refresh=1。
       path: `${basePath}/api/materials/office`,
-      method: 'GET',
-      handler: async (_body, query) => {
-        const info = await workbench.officeProbe({ force: query?.refresh === '1' });
+      method: 'POST',
+      handler: async (body, query) => {
+        const info = await workbench.officeProbe({ force: isTrue(body?.refresh) || query?.refresh === '1' });
         return { ok: info.ok, office: info };
       },
     },
@@ -484,7 +493,13 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
       handler: async (req, res) => {
         try {
           const hostHeader = headerValue(req, 'host');
-          if (!hostIsLoopback(hostHeader)) return send(res, 403, { ok: false, error: '仅允许本机访问' });
+          const remote = String(req.socket?.remoteAddress || '');
+          const remoteLoopback = /^(::1|::ffff:127\.|127\.)/.test(remote) || remote === '';
+          // 缺少 Host 时不能直接放行（那是 fail-open）：有 Host 就按 Host 判，没有 Host 就必须
+          // 来自 loopback 套接字，两道门不能同时失效。
+          if (hostHeader ? !hostIsLoopback(hostHeader) : !remoteLoopback) {
+            return send(res, 403, { ok: false, error: '仅允许本机访问' });
+          }
           if (!originMatches(headerValue(req, 'origin'), allowedOrigins(selfOrigin, hostHeader))) {
             return send(res, 403, { ok: false, error: '跨源请求被拒绝' });
           }
@@ -509,8 +524,11 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
           return send(res, 200, result);
         } catch (error) {
           const message = String(error?.message || error);
-          const status = Number(error?.status) || 400;
-          if (status !== 400) logger?.warn?.(`[data-analysis] 路由处理失败：${message}`);
+          // 只有 readBody 会带 status（400/413）；其余都是内部异常，必须按 500 报并且留日志，
+          // 否则前端看到「400 参数错」、宿主日志里一行没有。
+          const status = Number(error?.status) || 500;
+          if (status >= 500) logger?.error?.(`[data-analysis] 路由处理失败：${message}`, error?.stack || '');
+          else logger?.warn?.(`[data-analysis] 路由请求被拒：${message}`);
           return send(res, status, { ok: false, error: message });
         }
       },
