@@ -192,6 +192,10 @@ pip3 install -r SPSS-Style-Charting-Skill/requirements.txt
   `运行本阶段` 只负责启动——**退出码 0 不等于阶段完成**，完成与否看中间那排闸门。
 - **弹窗**：设置、打开项目、新建项目、移除项目（二次确认）、AI 起草、人工裁定、材料库、复核、补丁预览。
   全部自绘，Esc 关闭，打开时焦点进弹窗、Tab 圈在里面、关掉回到原来的位置。
+- **选文件夹**：凡是让你填目录的地方（新建项目、打开项目、设置里的技能包目录、材料库登记材料源），
+  路径框右边都有「选择…」，点它弹的是**系统原生文件夹选择框**，选完把绝对路径填回去——不用去资源管理器复制路径。
+  桌面端走宿主的选择器桥，Web 端走宿主的 `directoryPicker/pick`（在 DSH 所在那台机器上弹框）；
+  两条路都不可用时，字段下面会直接写明原因，不会静默失败。
 
 四种宽度各有形态：>1240 三栏（KPI 5 列）；≤1240 右栏收成抽屉、左栏 248px、KPI 3 列；
 ≤900 左栏也收起（改用顶栏的阶段下拉）、KPI 2 列。中栏永远只有一个实心主按钮（运行 / 去拍板 / AI 接手），
@@ -202,11 +206,12 @@ pip3 install -r SPSS-Style-Charting-Skill/requirements.txt
 ### 1. 建项目
 
 `项目 ▾ → 新建项目`（或工具 `data_analysis_create_project`）——**只能指向空目录**。
+路径框右边的「选择…」直接弹系统文件夹选择框，选完自动填好（也可以手动粘贴）。
 工作台建好 `data/ docs/ output/ scripts/ runs/` 与 `project.json`，并设为当前项目。
 
 ### 2. 把材料挂进来（不复制）
 
-`材 → 登记材料目录`，填资料所在目录的绝对路径（例如 `F:\案例打包pdf\刑事pdf`）。
+`材 → 登记材料目录`，填资料所在目录的绝对路径（例如 `F:\案例打包pdf\刑事pdf`），或点「选择…」直接选。
 回执按四类报数：直读 / 识图 / 待转换 / 不支持（相加等于目录里的文件总数）。然后在下面挂到 `data/`：
 
 - 挂整包：子目录留空，挂载名自己起（例如「刑事」）
@@ -405,7 +410,7 @@ node tests/materials.test.mjs     # 通道分类、挂载、迁移、识图全�
 node tests/gates.test.mjs         # 闸门三态：pass / fail / unjudged 的边界，用合成项目逐条打
 node tests/recheck.test.mjs       # 复核与补丁：baseHash、越界、目录联接穿透、备份命名、12 项复算口径
 node tests/consistency.test.mjs   # 静态对账：文案键 / CSS 类 / 接口路径 / 工具名 / 快照字段
-node tests/client-smoke.test.mjs  # 不开浏览器，用假 React 把面板渲染成树：环境闸门 / 主界面 / 八个弹窗 / 24 轮 fuzz
+node tests/client-smoke.test.mjs  # 不开浏览器，用假 React 把面板渲染成树：环境闸门 / 主界面 / 八个弹窗 / 选文件夹入口 / 24 轮 fuzz
 node tests/visual.mjs             # 视觉回归：渲成真 HTML + 真 CSS，用无头 Chrome 量尺寸与对比度
 node tests/e2e-corpus.test.mjs    # 真实语料端到端（有材料包才跑；用 DSA_PROJECT / DSA_SOURCE 指定路径）
 ```

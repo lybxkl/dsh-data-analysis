@@ -472,6 +472,21 @@ scenario('弹窗：移除项目要二次确认', { dialog: dialogFixtures.forget
   check(confirms.length === 1, '按钮文案就叫「移除」，不用「确认」混淆');
 });
 
+/* 6a-2. 新建/打开项目：路径旁边要有「选择…」，不能逼用户去资源管理器复制路径 */
+for (const [kind, label] of [
+  ['create', '新建项目'],
+  ['open', '打开项目'],
+]) {
+  scenario('弹窗：' + label + '能选文件夹', { dialog: { kind } }, (tree, text) => {
+    check(Boolean(findByClass(tree, 'dsa-input-row')), label + '的路径字段是「输入框 + 选择」一行');
+    const picks = findAllByClass(tree, 'dsa-btn').filter((node) =>
+      (node.children || []).some((child) => child && child.text === '选择…'),
+    );
+    check(picks.length === 1, '有一个「选择…」按钮');
+    check(text.includes('项目目录') || text.includes('材料目录'), '路径字段的标签还在');
+  });
+}
+
 /* 6b. 弹窗数据过期（闸门/问题已不存在）时不许崩 */
 scenario('弹窗：拍板数据过期', { dialog: { kind: 'adjudicate' } }, (tree, text) => {
   check(Boolean(findByClass(tree, 'dsa-modal')), '仍然渲染出一个弹窗');

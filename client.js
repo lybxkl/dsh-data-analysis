@@ -49,6 +49,10 @@
         emptyHint: '工作台不写论文，它负责跑技能包、把每一步的产物和闸门摆出来。新建项目后把 PDF / Word / Excel 放进 data/，从第 1 步往下走。',
         dirLabel: '项目目录',
         dirPh: '如 F:\\研究\\2026-数字政府',
+        pick: '选择…',
+        picking: '选择中…',
+        pickTitle: '在弹出的系统窗口里选一个文件夹',
+        pickUnsupported: '这个环境没有提供文件夹选择器（例如远程浏览器或精简安装），请手动粘贴路径。',
         nameLabel: '项目名（可空）',
         namePh: '默认取目录名',
         createHint: '目录必须是空的；会创建 data / docs / output / scripts / runs 与 project.json。',
@@ -329,9 +333,18 @@
 
       function svc(name) {
         var ctx = runtime.ctx;
-        if (!ctx || typeof ctx.get !== 'function') return null;
+        if (!ctx) return null;
         try {
-          return ctx.get(name) || null;
+          if (typeof ctx.get === 'function') {
+            var hit = ctx.get(name);
+            if (hit) return hit;
+          }
+        } catch (e) {
+          /* fall through */
+        }
+        // 少数宿主形态里 client context 不暴露 get，直接按名字取一次
+        try {
+          return ctx[name] || null;
         } catch (e) {
           return null;
         }
@@ -408,6 +421,19 @@
       function openWorkbenchPanel() {
         var layout = svc('layout');
         if (layout && typeof layout.selectPanel === 'function') layout.selectPanel('data-analysis');
+      }
+
+      /* 系统原生的「选文件夹」：桌面端有 preload 桥就直接用，Web 端走宿主的
+         directoryPicker/pick（在 DSH 所在那台机器上弹框）。两路都拿不到就报错，
+         由调用处写在字段下面——不静默失败，也不造一个假的路径。 */
+      function pickDirectoryPath() {
+        var bridge = typeof globalThis !== 'undefined' ? globalThis.__DSH_DIRECTORY_PICKER__ : null;
+        if (bridge && typeof bridge.pick === 'function') return Promise.resolve(bridge.pick());
+        var uiWorkspace = svc('uiWorkspace');
+        if (uiWorkspace && typeof uiWorkspace.pickDirectory === 'function') {
+          return Promise.resolve(uiWorkspace.pickDirectory());
+        }
+        return Promise.reject(new Error(t('pickUnsupported')));
       }
 
       /* ------------------------------------------------------------------ *
@@ -1211,6 +1237,11 @@
         // ---- 弹窗与输入：跟着圆角走，输入框加柔光圈
         '.dsa-modal{border-radius:14px;box-shadow:0 18px 50px rgba(16,24,40,.22);}',
         '.dsa-input,.dsa-btn,.dsa-chat-btn,.dsa-menu-list button,.dsa-flow-step{border-radius:var(--dsa-r2);}',
+        // 路径输入 + 「选择…」：输入框吃掉剩余宽度，按钮不被挤扁；按钮与输入框同高（32px）
+        '.dsa-input-row{display:flex;align-items:center;gap:8px;}',
+        '.dsa-input-row .dsa-input{flex:1 1 auto;min-width:0;width:auto;}',
+        '.dsa-input-row .dsa-btn{flex:0 0 auto;height:32px;}',
+        '.dsa-field-note{color:var(--dsa-ink3);font-size:11px;line-height:1.5;}',
 
         // ---- 断点：顶栏变高了，抽屉与遮罩的起点要跟着改
         '.dsa-root[data-dsa-width="compact"] .dsa-rail{flex-basis:248px;width:248px;}',
@@ -3542,6 +3573,47 @@
        * 弹窗实现
        * ------------------------------------------------------------------ */
 
+      /* 路径输入 + 「选择…」：点按钮弹系统原生的文件夹选择框，选完把绝对路径填回输入框。
+         选择器不可用时把原因写在字段下面，绝不静默失败，也不假装已经选好。 */
+      function DirField(props) {
+        var busyState = useState(false);
+        var busy = busyState[0];
+        var setBusy = busyState[1];
+        var noteState = useState('');
+        var note = noteState[0];
+        var setNote = noteState[1];
+        var choose = function () {
+          if (busy) return;
+          setBusy(true);
+          setNote('');
+          pickDirectoryPath().then(function (picked) {
+            setBusy(false);
+            if (picked) props.onChange(cleanPath(picked));
+          }, function (err) {
+            setBusy(false);
+            setNote((err && err.message) || String(err));
+          });
+        };
+        return h(
+          'div',
+          { className: 'dsa-field', style: props.style },
+          h('label', null, props.label),
+          h(
+            'div',
+            { className: 'dsa-input-row' },
+            h('input', {
+              className: 'dsa-input',
+              value: props.value,
+              placeholder: props.placeholder,
+              disabled: props.disabled,
+              onChange: function (e) { setNote(''); props.onChange(e.target.value); }
+            }),
+            h(Btn, { onClick: choose, disabled: busy || props.disabled, title: t('pickTitle') }, busy ? t('picking') : t('pick'))
+          ),
+          note ? h('div', { className: 'dsa-field-note' }, note) : null
+        );
+      }
+
       function CreateDialog(props) {
         var dirState = useState('');
         var dir = dirState[0];
@@ -3564,12 +3636,12 @@
           h(
             'div',
             { className: 'dsa-form' },
-            h(
-              'div',
-              { className: 'dsa-field' },
-              h('label', null, t('dirLabel')),
-              h('input', { className: 'dsa-input', value: dir, placeholder: t('dirPh'), onChange: function (e) { setDir(e.target.value); } })
-            ),
+            h(DirField, {
+              label: t('dirLabel'),
+              value: dir,
+              placeholder: t('dirPh'),
+              onChange: setDir
+            }),
             h(
               'div',
               { className: 'dsa-field' },
@@ -3599,12 +3671,12 @@
           h(
             'div',
             { className: 'dsa-form' },
-            h(
-              'div',
-              { className: 'dsa-field' },
-              h('label', null, t('dirLabel')),
-              h('input', { className: 'dsa-input', value: dir, placeholder: t('dirPh'), onChange: function (e) { setDir(e.target.value); } })
-            ),
+            h(DirField, {
+              label: t('dirLabel'),
+              value: dir,
+              placeholder: t('dirPh'),
+              onChange: setDir
+            }),
             props.recent && props.recent.length
               ? h(
                   'div',
@@ -3935,12 +4007,12 @@
           h(
             'div',
             { className: 'dsa-form' },
-            h(
-              'div',
-              { className: 'dsa-field' },
-              h('label', null, t('skillRoot')),
-              h('input', { className: 'dsa-input', value: root, placeholder: 'F:\\...\\SPSS-Style-Charting-Skill', onChange: function (e) { setRoot(e.target.value); } })
-            ),
+            h(DirField, {
+              label: t('skillRoot'),
+              value: root,
+              placeholder: 'F:\\...\\SPSS-Style-Charting-Skill',
+              onChange: setRoot
+            }),
             h(
               'div',
               { className: 'dsa-field' },
@@ -4160,15 +4232,14 @@
           'div',
           { className: 'dsa-card', style: { padding: '10px 12px', marginBottom: '10px' } },
           h('div', { className: 'dsa-row', style: { gap: '8px', alignItems: 'flex-end', flexWrap: 'wrap' } },
-            h('div', { className: 'dsa-field', style: { flex: '3 1 320px', margin: 0 } },
-              h('label', null, '材料目录（绝对路径）'),
-              h('input', {
-                className: 'dsa-input',
-                value: addPath,
-                placeholder: 'F:\\资料\\刑事判决书',
-                onChange: function (e) { setAddPath(e.target.value); }
-              })
-            ),
+            h(DirField, {
+              label: '材料目录（绝对路径）',
+              value: addPath,
+              placeholder: 'F:\\资料\\刑事判决书',
+              style: { flex: '3 1 320px', margin: 0 },
+              disabled: busy,
+              onChange: setAddPath
+            }),
             h('div', { className: 'dsa-field', style: { flex: '1 1 120px', margin: 0 } },
               h('label', null, '名称（可选）'),
               h('input', {
