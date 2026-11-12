@@ -775,17 +775,26 @@
 
       var CSS = [
         // 变量挂在面板根上，不写 :root —— 别把宿主全局的 --dsa-* 污染了
+        // 方向 C（卡片仪表盘）：白卡片浮在浅灰底上，圆角 + 极轻阴影，状态用「软色底 + 文字」而不是只靠色点
         '.dsa-root{',
-        '  --dsa-bg:#fbfaf7;--dsa-band:#f6f3ec;--dsa-panel:#fff;--dsa-ink:#191917;--dsa-ink2:#5b5a54;--dsa-ink3:#706d64;',
-        '  --dsa-line:#e5e3db;--dsa-line2:#d2cfc5;--dsa-accent:#1e4e79;--dsa-ok:#2d6b4c;--dsa-warn:#8a5a17;',
-        '  --dsa-err:#a4372e;--dsa-ctl:#928d82;--dsa-hover:#f0ede4;--dsa-sel:#f0ede4;',
+        '  --dsa-bg:#f4f5f7;--dsa-band:#f7f8fa;--dsa-panel:#fff;--dsa-card:#fff;--dsa-card2:#fafbfc;',
+        '  --dsa-ink:#12141a;--dsa-ink2:#5a6070;--dsa-ink3:#666c7b;',
+        '  --dsa-line:#e6e8ec;--dsa-line2:#d5d8e0;',
+        '  --dsa-accent:#1e40af;--dsa-accent2:#3b6fe0;--dsa-soft:#eef2fd;',
+        '  --dsa-ok:#0f7a4a;--dsa-oksoft:#e7f6ee;--dsa-warn:#9a6400;--dsa-warnsoft:#fdf4e3;',
+        '  --dsa-err:#b42c22;--dsa-errsoft:#fdecea;--dsa-ctl:#7d8492;--dsa-hover:#eceef2;--dsa-sel:#fff;',
+        '  --dsa-r:12px;--dsa-r2:8px;--dsa-shadow:0 1px 3px rgba(16,24,40,.05);--dsa-shadow2:0 2px 6px rgba(16,24,40,.07);',
         '  --dsa-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;',
         '  --dsa-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;',
         '}',
         '[data-dsa-theme="dark"]{',
-        '  --dsa-bg:#151513;--dsa-band:#171713;--dsa-panel:#1c1c19;--dsa-ink:#ecebe4;--dsa-ink2:#b9b6ab;--dsa-ink3:#8f8c82;',
-        '  --dsa-line:#2d2c28;--dsa-line2:#3a3934;--dsa-accent:#7ea8ce;--dsa-ok:#6faa86;--dsa-warn:#c99a52;',
-        '  --dsa-err:#d98a80;--dsa-ctl:#a09a8e;--dsa-hover:#232320;--dsa-sel:#232320;',
+        '  --dsa-bg:#0f1116;--dsa-band:#14171d;--dsa-panel:#171a21;--dsa-card:#171a21;--dsa-card2:#1b1f27;',
+        '  --dsa-ink:#e9ecf2;--dsa-ink2:#aab2c1;--dsa-ink3:#8b93a4;',
+        '  --dsa-line:#252a34;--dsa-line2:#333a47;',
+        '  --dsa-accent:#7aa2f7;--dsa-accent2:#9dbcf9;--dsa-soft:#1a2233;',
+        '  --dsa-ok:#5cc08f;--dsa-oksoft:#12261d;--dsa-warn:#d9a94e;--dsa-warnsoft:#2a2113;',
+        '  --dsa-err:#e08a82;--dsa-errsoft:#2b1513;--dsa-ctl:#6f7787;--dsa-hover:#1d212a;--dsa-sel:#1d212a;',
+        '  --dsa-shadow:0 1px 3px rgba(0,0,0,.45);--dsa-shadow2:0 2px 8px rgba(0,0,0,.55);',
         '}',
         '.dsa-root{position:relative;display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden;background:var(--dsa-bg);color:var(--dsa-ink);',
         '  font-family:var(--dsa-sans);font-size:13.5px;line-height:1.55;-webkit-font-smoothing:antialiased;}',
@@ -838,7 +847,6 @@
         '.dsa-proj.sel .dsa-proj-name{font-weight:600;}',
         '.dsa-proj-path{display:block;margin-top:1px;font-size:10.5px;color:var(--dsa-ink3);overflow:hidden;',
         '  text-overflow:ellipsis;white-space:nowrap;}',
-        '.dsa-proj-more{padding:3px 8px 0;}',
         '.dsa-link{border:0;background:transparent;color:var(--dsa-ink2);font:inherit;font-size:11.5px;',
         '  cursor:pointer;padding:2px 0;}',
         '.dsa-link:hover{color:var(--dsa-accent);}',
@@ -1068,7 +1076,150 @@
         '.dsa-issue-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}',
         '.dsa-patch-pre{max-height:220px;overflow:auto;margin:6px 0 0;padding:8px 10px;border:1px solid var(--dsa-line);',
         '  background:var(--dsa-bg);border-radius:2px;font-family:var(--dsa-mono);font-size:11px;white-space:pre-wrap;word-break:break-word;}',
-        '.dsa-inline-tight{display:inline-flex;gap:4px;align-items:center;flex-wrap:wrap;}'
+        '.dsa-inline-tight{display:inline-flex;gap:4px;align-items:center;flex-wrap:wrap;}',
+
+        /* ================================================================== *
+         * 方向 C：卡片仪表盘
+         *
+         * 这一层放在数组最后，只覆盖「形状与密度」，一个功能类名都没改——
+         * 所以行为完全沿用上面的规则，改的只是看起来的样子。
+         * 三条硬口径：① 状态永远有文字，不只靠颜色 ② 数字等宽对齐
+         *            ③ 项目多时列表自己滚，不把下面的阶段挤走
+         * ================================================================== */
+
+        // ---- 顶栏：58px、圆角渐变标、pill 徽章、有填充的按钮
+        '.dsa-top{height:58px;flex:0 0 58px;gap:10px;padding:0 18px;}',
+        '.dsa-logo{flex:0 0 30px;width:30px;height:30px;border-radius:9px;',
+        '  background:linear-gradient(140deg,var(--dsa-accent2),var(--dsa-accent));display:flex;align-items:center;',
+        '  justify-content:center;color:#fff;font-size:14px;font-weight:700;',
+        '  box-shadow:0 2px 6px color-mix(in srgb,var(--dsa-accent) 30%,transparent);}',
+        '[data-dsa-theme="dark"] .dsa-logo{color:#0f1216;}',
+        '.dsa-brand{display:flex;align-items:center;gap:9px;min-width:0;}',
+        '.dsa-brand-tx{display:flex;flex-direction:column;min-width:0;line-height:1.32;}',
+        '.dsa-brand b{font-size:13.5px;font-weight:650;letter-spacing:-.01em;}',
+        '.dsa-brand-tx span{font-size:10.5px;color:var(--dsa-ink3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+        '.dsa-chip{height:28px;padding:0 12px;border-radius:999px;background:var(--dsa-card2);}',
+        '.dsa-btn{height:32px;padding:0 13px;border-radius:var(--dsa-r2);background:var(--dsa-panel);',
+        '  transition:background .16s,border-color .16s,box-shadow .16s,transform .06s;}',
+        '.dsa-btn:hover{background:var(--dsa-card2);border-color:var(--dsa-line2);}',
+        '.dsa-btn:active{transform:translateY(.5px);}',
+        '.dsa-btn.ghost{background:transparent;border-color:transparent;}',
+        '.dsa-btn.ghost:hover{background:var(--dsa-hover);}',
+        '.dsa-btn.primary{background:linear-gradient(180deg,var(--dsa-accent2),var(--dsa-accent));border-color:var(--dsa-accent);',
+        '  box-shadow:0 1px 2px rgba(16,24,40,.14),inset 0 1px 0 rgba(255,255,255,.16);}',
+        '.dsa-btn.primary:hover{background:linear-gradient(180deg,var(--dsa-accent2),var(--dsa-accent));',
+        '  filter:brightness(1.07);}',
+        '.dsa-stage-select,.dsa-menu>summary{height:32px;border-radius:var(--dsa-r2);font-size:12.5px;}',
+        '.dsa-menu-list{top:38px;border-radius:10px;box-shadow:var(--dsa-shadow2);}',
+
+        // ---- 左栏：分区 + 项目列表「自己滚」，阶段永远在下面看得见
+        '.dsa-rail{flex:0 0 276px;width:276px;display:flex;flex-direction:column;min-height:0;overflow:hidden;',
+        '  background:var(--dsa-bg);padding:12px 12px 0;border-right:1px solid var(--dsa-line);}',
+        '.dsa-rail-sec{flex:0 1 auto;min-height:0;max-height:46%;display:flex;flex-direction:column;',
+        '  padding-bottom:8px;margin-bottom:6px;border-bottom:1px solid var(--dsa-line);}',
+        '.dsa-rail-body{flex:1 1 auto;min-height:0;overflow-y:auto;padding:8px 0 24px;}',
+        '.dsa-rail-h{padding:0 6px 7px;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;',
+        '  font-weight:650;color:var(--dsa-ink3);}',
+        '.dsa-rail-h .dsa-count{margin-left:auto;font-family:var(--dsa-mono);font-size:10px;letter-spacing:0;',
+        '  text-transform:none;background:var(--dsa-line);color:var(--dsa-ink2);padding:1px 6px;border-radius:999px;font-weight:400;}',
+        '.dsa-proj-list{flex:0 1 auto;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:2px;padding:0 2px 0 0;}',
+        '.dsa-proj{padding:7px 8px;border:1px solid transparent;border-radius:var(--dsa-r2);',
+        '  transition:background .16s,border-color .16s,box-shadow .16s;}',
+        '.dsa-proj:hover{background:var(--dsa-hover);}',
+        '.dsa-proj.sel{background:var(--dsa-panel);border-color:var(--dsa-line);box-shadow:var(--dsa-shadow);}',
+        '.dsa-proj-h{display:flex;align-items:center;gap:7px;min-width:0;}',
+        '.dsa-proj-av{flex:0 0 20px;width:20px;height:20px;border-radius:6px;background:var(--dsa-soft);',
+        '  color:var(--dsa-accent);font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;}',
+        '.dsa-proj.sel .dsa-proj-av{background:linear-gradient(140deg,var(--dsa-accent2),var(--dsa-accent));color:#fff;}',
+        '[data-dsa-theme="dark"] .dsa-proj.sel .dsa-proj-av{color:#0f1216;}',
+        '.dsa-proj-name{font-size:12.5px;font-weight:550;}',
+        '.dsa-proj-path{margin:1px 0 0 27px;font-family:var(--dsa-mono);font-size:10px;color:var(--dsa-ink3);}',
+        '.dsa-proj-actions{gap:8px;padding:5px 4px 0;}',
+        '.dsa-link{padding:3px 5px;border-radius:6px;font-size:11.5px;}',
+        '.dsa-link:hover{background:var(--dsa-hover);}',
+
+        // ---- 阶段行：圆号 + 名称 + 右侧状态徽章（徽章是文字，色弱也读得出）
+        '.dsa-stage{padding:5px 8px;border:1px solid transparent;border-radius:var(--dsa-r2);align-items:center;',
+        '  gap:9px;margin-bottom:1px;transition:background .16s,border-color .16s,box-shadow .16s;}',
+        '.dsa-stage:hover{background:var(--dsa-hover);}',
+        '.dsa-stage.sel{background:var(--dsa-panel);border-color:var(--dsa-line);border-left-color:var(--dsa-line);',
+        '  box-shadow:var(--dsa-shadow);}',
+        '.dsa-idx{flex:0 0 18px;width:18px;height:18px;border-radius:50%;background:var(--dsa-line);',
+        '  border:1px solid transparent;color:var(--dsa-ink3);font-size:9.5px;font-weight:600;margin-top:0;}',
+        '.dsa-stage.done .dsa-idx{background:var(--dsa-oksoft);color:var(--dsa-ok);',
+        '  border-color:color-mix(in srgb,var(--dsa-ok) 30%,transparent);}',
+        '.dsa-stage.blocked .dsa-idx{background:var(--dsa-errsoft);color:var(--dsa-err);',
+        '  border-color:color-mix(in srgb,var(--dsa-err) 30%,transparent);}',
+        '.dsa-stage.review .dsa-idx{background:var(--dsa-warnsoft);color:var(--dsa-warn);',
+        '  border-color:color-mix(in srgb,var(--dsa-warn) 30%,transparent);}',
+        '.dsa-stage.running .dsa-idx{background:var(--dsa-soft);color:var(--dsa-accent);}',
+        '.dsa-stage-main{display:flex;align-items:center;gap:8px;}',
+        '.dsa-stage-name{flex:1 1 auto;min-width:0;display:block;font-size:12.5px;',
+        '  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+        '.dsa-stage-name .dot{display:none;}',
+        '.dsa-stage-meta{flex:0 0 auto;margin-top:0;padding:1px 7px;border-radius:999px;background:var(--dsa-line);',
+        '  color:var(--dsa-ink3);font-size:10px;font-weight:600;max-width:52%;}',
+        '.dsa-stage.done .dsa-stage-meta{background:var(--dsa-oksoft);color:var(--dsa-ok);}',
+        '.dsa-stage.blocked .dsa-stage-meta{background:var(--dsa-errsoft);color:var(--dsa-err);}',
+        '.dsa-stage.review .dsa-stage-meta{background:var(--dsa-warnsoft);color:var(--dsa-warn);}',
+        '.dsa-stage.running .dsa-stage-meta{background:var(--dsa-soft);color:var(--dsa-accent);}',
+        '.dsa-stage.todo{opacity:1;}',
+        '.dsa-stage.todo .dsa-stage-name{color:var(--dsa-ink3);font-weight:400;}',
+
+        // ---- 主区：hero 卡 + KPI 条 + 卡片化的段落
+        '.dsa-main{padding:16px 20px 60px;background:var(--dsa-bg);}',
+        '.dsa-hero{background:var(--dsa-panel);border:1px solid var(--dsa-line);border-radius:var(--dsa-r);',
+        '  padding:16px 18px;box-shadow:var(--dsa-shadow);margin:0 0 14px;}',
+        '.dsa-kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin:0 0 14px;}',
+        '.dsa-kpi{background:var(--dsa-panel);border:1px solid var(--dsa-line);border-radius:var(--dsa-r);',
+        '  padding:11px 13px;box-shadow:var(--dsa-shadow);min-width:0;}',
+        '.dsa-kpi .k{font-size:10.5px;color:var(--dsa-ink3);letter-spacing:.04em;font-weight:550;',
+        '  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+        '.dsa-kpi .v{font-family:var(--dsa-mono);font-size:21px;font-weight:600;letter-spacing:-.03em;margin-top:2px;',
+        '  font-variant-numeric:tabular-nums;line-height:1.2;white-space:nowrap;}',
+        '.dsa-kpi .v small{font-size:10.5px;color:var(--dsa-ink3);margin-left:2px;font-weight:400;letter-spacing:0;}',
+        '.dsa-kpi.hi{background:linear-gradient(180deg,color-mix(in srgb,var(--dsa-soft) 65%,var(--dsa-panel)),var(--dsa-panel));',
+        '  border-color:color-mix(in srgb,var(--dsa-accent) 22%,var(--dsa-line));}',
+        '.dsa-kpi.hi .v{color:var(--dsa-accent);}',
+        '.dsa-h1{font-size:20px;font-weight:680;letter-spacing:-.02em;}',
+        '.dsa-sub{margin:4px 0 0;}',
+        '.dsa-section{margin:20px 0 8px;}',
+        '.dsa-section h3{font-size:13px;font-weight:650;letter-spacing:-.005em;}',
+        '.dsa-card,.dsa-fold,.dsa-next{border-radius:var(--dsa-r);box-shadow:var(--dsa-shadow);}',
+        '.dsa-next{padding:13px 16px;margin:0 0 14px;}',
+        '.dsa-gate{padding:11px 15px;}',
+        '.dsa-gate .mark{font-size:14px;}',
+        '.dsa-code{border-radius:var(--dsa-r2);}',
+        '.dsa-tag{border-radius:999px;padding:0 7px;height:19px;line-height:18px;}',
+        '.dsa-badge{border-radius:999px;height:18px;line-height:17px;padding:0 7px;font-weight:550;}',
+
+        // ---- 右栏：运行记录卡片 + 终端风格的日志卡（日志固定深色，像 C 的 .log）
+        '.dsa-side{flex:0 0 330px;width:330px;background:var(--dsa-bg);padding-bottom:18px;}',
+        '.dsa-side-h{height:46px;background:transparent;}',
+        '.dsa-runs{flex:0 1 auto;max-height:34%;margin:12px 12px 0;overflow-y:auto;background:var(--dsa-panel);',
+        '  border:1px solid var(--dsa-line);border-radius:var(--dsa-r);box-shadow:var(--dsa-shadow);}',
+        '.dsa-run{padding:8px 12px;border-left:0;transition:background .16s;}',
+        '.dsa-run.sel{background:var(--dsa-soft);box-shadow:inset 3px 0 0 var(--dsa-accent);}',
+        '.dsa-run-h{margin:10px 12px 0;padding:9px 12px;border:1px solid var(--dsa-line);border-radius:var(--dsa-r);',
+        '  background:var(--dsa-panel);box-shadow:var(--dsa-shadow);}',
+        '.dsa-log{flex:1 1 auto;min-height:120px;margin:10px 12px 0;padding:11px 13px;border:1px solid #232a38;',
+        '  border-radius:var(--dsa-r);background:#141821;color:#c3c9d6;}',
+        '.dsa-log .ln-err{color:#e58d84;}',
+        '.dsa-log .ln-warn{color:#dfb267;}',
+        '.dsa-chat-card{margin:12px 12px 0;border-radius:var(--dsa-r);background:var(--dsa-panel);box-shadow:var(--dsa-shadow);}',
+
+        // ---- 弹窗与输入：跟着圆角走，输入框加柔光圈
+        '.dsa-modal{border-radius:14px;box-shadow:0 18px 50px rgba(16,24,40,.22);}',
+        '.dsa-input,.dsa-btn,.dsa-chat-btn,.dsa-menu-list button,.dsa-flow-step{border-radius:var(--dsa-r2);}',
+
+        // ---- 断点：顶栏变高了，抽屉与遮罩的起点要跟着改
+        '.dsa-root[data-dsa-width="compact"] .dsa-rail{flex-basis:248px;width:248px;}',
+        '.dsa-root[data-dsa-width="compact"] .dsa-kpis{grid-template-columns:repeat(3,1fr);}',
+        '.dsa-root[data-dsa-width="narrow"] .dsa-kpis{grid-template-columns:repeat(2,1fr);}',
+        '.dsa-root[data-dsa-width="compact"] .dsa-side,',
+        '.dsa-root[data-dsa-width="mid"] .dsa-side,',
+        '.dsa-root[data-dsa-width="narrow"] .dsa-side{top:58px;}',
+        '.dsa-scrim{top:58px;}'
       ].join('');
 
       function installStyles() {
@@ -1997,10 +2148,15 @@
           h(
             'div',
             { className: 'dsa-brand' },
-            h('b', null, t('title')),
-            snap && snap.active
-              ? h('span', { title: snap.active.path }, snap.active.name || snap.active.path)
-              : h('span', null, t('subtitle'))
+            h('div', { className: 'dsa-logo', 'aria-hidden': 'true' }, '研'),
+            h(
+              'div',
+              { className: 'dsa-brand-tx' },
+              h('b', null, t('title')),
+              snap && snap.active
+                ? h('span', { title: snap.active.path }, snap.active.name || snap.active.path)
+                : h('span', null, t('subtitle'))
+            )
           ),
           // 窄屏没有左侧阶段栏，用下拉补一个入口；宽屏由 CSS 隐藏
           stages.length
@@ -2167,11 +2323,14 @@
               '项目',
               h('span', { className: 'dsa-count' }, String(railProjects.length))
             ),
+            // 项目多了不能把下面的「资料 / 阶段」挤走：这个列表自己滚（CSS 里 min-height:0 + overflow-y:auto），
+            // 整个分区再限一个 max-height 兜底。原来只显示 6 个、剩下的藏进「还有 N 个…」，那是拿信息换空间。
             h(
               'div',
               { className: 'dsa-proj-list' },
-              railProjects.slice(0, 6).map(function (p) {
+              railProjects.map(function (p) {
                 var on = snap && snap.active && p.id === snap.active.id;
+                var label = p.name || p.path;
                 return h(
                   'button',
                   {
@@ -2185,22 +2344,16 @@
                       action('/project/open', { dir: p.path });
                     }
                   },
-                  h('span', { className: 'dsa-proj-name' }, p.name || p.path),
+                  h(
+                    'span',
+                    { className: 'dsa-proj-h' },
+                    h('span', { className: 'dsa-proj-av', 'aria-hidden': 'true' }, String(label).slice(0, 1)),
+                    h('span', { className: 'dsa-proj-name' }, label)
+                  ),
                   h('span', { className: 'dsa-proj-path' }, p.exists === false ? p.path + ' · 目录不见了' : p.path)
                 );
               })
             ),
-            railProjects.length > 6
-              ? h(
-                  'div',
-                  { className: 'dsa-proj-more' },
-                  h(
-                    'button',
-                    { type: 'button', className: 'dsa-link', onClick: function () { setDialog({ kind: 'open' }); } },
-                    '还有 ' + (railProjects.length - 6) + ' 个…'
-                  )
-                )
-              : null,
             h(
               'div',
               { className: 'dsa-proj-actions' },
@@ -2208,8 +2361,11 @@
               h('button', { type: 'button', className: 'dsa-link', onClick: function () { setDialog({ kind: 'open' }); } }, '打开…')
             )
           ),
-          // 「资料」是项目的输入，单列一区，免得和上面的项目区混成一片
-          h('div', { className: 'dsa-rail-h', style: { paddingTop: '8px' } }, '资料'),
+          // 资料 + 阶段放进同一个滚动容器：项目区占多高由它自己决定，这两块永远从同一处开始读
+          h(
+            'div',
+            { className: 'dsa-rail-body' },
+            h('div', { className: 'dsa-rail-h' }, '资料'),
           h(
             'button',
             {
@@ -2256,7 +2412,8 @@
                 h('div', { className: 'dsa-stage-meta' }, stageWord(stage))
               )
             );
-          })
+            })
+          )
         );
 
         /* ---------------- 闸门 ---------------- */
@@ -2895,12 +3052,43 @@
                   current.lastRun ? '重跑' : '运行'
                 )
               : null;
+        // KPI 条：五个数一眼看完「有多少料、走到哪、卡在哪」。数字等宽，和右栏日志同一套
+        var corpusInfo = (snap && snap.artifacts && snap.artifacts.corpus) || {};
+        var corpusTotal = Number(corpusInfo.validFiles || corpusInfo.totalFiles || 0) || 0;
+        var corpusBytes = Number((corpusInfo.fingerprint && corpusInfo.fingerprint.bytes) || 0) || 0;
+        var sizeNum = corpusBytes
+          ? corpusBytes >= 1048576
+            ? (corpusBytes / 1048576).toFixed(1)
+            : corpusBytes >= 1024
+              ? String(Math.round(corpusBytes / 1024))
+              : String(corpusBytes)
+          : '—';
+        var sizeUnit = corpusBytes ? (corpusBytes >= 1048576 ? 'MB' : corpusBytes >= 1024 ? 'KB' : 'B') : '';
+        var stageSummary = (snap && snap.summary) || {};
+        var gateTotals = (snap && snap.totals) || {};
+        var kpiOf = function (key, label, value, unit, hi) {
+          return h(
+            'div',
+            { key: key, className: 'dsa-kpi' + (hi ? ' hi' : '') },
+            h('div', { className: 'k' }, label),
+            h('div', { className: 'v' }, String(value), unit ? h('small', null, unit) : null)
+          );
+        };
+        var kpiStrip = h(
+          'div',
+          { className: 'dsa-kpis' },
+          kpiOf('corpus', '有效语料', corpusTotal || '—', corpusTotal ? '份' : '', true),
+          kpiOf('size', '总体积', sizeNum, sizeUnit, false),
+          kpiOf('done', '阶段完成', (stageSummary.done || 0) + '/' + (stages.length || 9), '', false),
+          kpiOf('review', '待裁定', stageSummary.review || 0, '项', false),
+          kpiOf('fail', '闸门未过', gateTotals.fail || 0, '项', false)
+        );
+
         var main = h(
           'div',
           { className: 'dsa-main' },
           h(PreflightBanner, { preflight: preflight, busy: busy, onRecheck: doRecheck }),
-          nextView,
-          h('div', { className: 'dsa-row', style: { justifyContent: 'space-between', alignItems: 'flex-start' } },
+          h('div', { className: 'dsa-row dsa-hero', style: { justifyContent: 'space-between', alignItems: 'flex-start' } },
             h(
               'div',
               { style: { minWidth: 0 } },
@@ -2944,6 +3132,8 @@
               })
             )
           ),
+          kpiStrip,
+          nextView,
           error ? h('div', { className: 'dsa-error', role: 'alert', style: { margin: '10px 0' } }, error) : null,
           hasScript
             ? h(
@@ -3004,7 +3194,9 @@
         };
         var side = h(
           'div',
-          { className: 'dsa-side' + (drawer ? '' : ' hide') },
+          // 宽屏右栏本来就该常驻：抽屉的开关按钮在宽屏是隐藏的，如果这里也按 drawer 关闭，
+          // 运行记录与日志就永远打不开了。窄屏才由 drawer 决定（那里有按钮，默认收起不挡内容）。
+          { className: 'dsa-side' + (drawer || width === 'wide' ? '' : ' hide') },
           h(
             'div',
             { className: 'dsa-side-h' },
@@ -3120,7 +3312,7 @@
 
         return h(
           'div',
-          { className: 'dsa-root', ref: attachRoot, 'data-dsa-width': width, 'data-dsa-theme': theme, 'data-drawer': drawer ? 'open' : 'closed' },
+          { className: 'dsa-root', ref: attachRoot, 'data-dsa-width': width, 'data-dsa-theme': theme, 'data-drawer': drawer || width === 'wide' ? 'open' : 'closed' },
           header,
           // 读屏用户看不到状态色块：把「当前阶段 + 运行状态 + 错误」放进一个礼貌播报区
           h(

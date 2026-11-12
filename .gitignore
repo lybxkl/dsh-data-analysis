@@ -11,6 +11,8 @@ build/
 .e2e/
 .tests/
 runs/
+# 视觉回归生成的 HTML 与截图（随时能重新跑出来，不进仓库）
+tests/out/
 
 # 系统文件
 .DS_Store

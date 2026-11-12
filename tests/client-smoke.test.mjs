@@ -252,7 +252,7 @@ const SNAP = {
   error: '',
   preflight: { status: 'pass', checkedAt: '2026-11-12T10:00:00Z', checks: [] },
   stages: STAGES,
-  summary: { ok: true, active: { id: 'p1', name: '测试项目', path: 'C:/work/p1' }, summary: {}, totals: { pass: 6, fail: 1, unjudged: 2 }, next: null, running: [] },
+  summary: { done: 2, blocked: 1, review: 1, todo: 1, running: 0 },
   totals: { pass: 6, fail: 1, unjudged: 2 },
   artifacts: {
     figures: { rows: [], summary: { count: 0 } },
@@ -391,6 +391,16 @@ scenario('环境齐全', {}, (tree, text) => {
   check(textOf(selRows[0]).includes('测试项目'), '当前项目是选中那个');
   check(railText.includes('另一个项目'), '其他项目也可见，能直接点着切');
   check(railText.includes('+ 新建') && railText.includes('打开…'), '项目区带新建/打开入口');
+  // 方向 C：hero 卡 + KPI 条 + 「资料/阶段」独立滚动容器（项目再多也不许把它们挤走）
+  check(hasClass(tree, 'dsa-hero'), '主区顶部有 hero 卡');
+  const kpis = findAllByClass(tree, 'dsa-kpi');
+  check(kpis.length === 5, 'KPI 条是 5 个数，实际 ' + kpis.length);
+  check(textOf(findByClass(tree, 'dsa-kpis')).includes('有效语料'), 'KPI 里有有效语料');
+  check(hasClass(tree, 'dsa-logo'), '顶栏有品牌标');
+  const railBody = findByClass(tree, 'dsa-rail-body');
+  check(Boolean(railBody), '资料与阶段放在独立滚动容器里');
+  check(findAllByClass(railBody, 'dsa-stage').length >= 6, '阶段都排在这个容器里');
+  check(!findByClass(tree, 'dsa-proj-more'), '不再用「还有 N 个…」把项目藏起来');
 });
 
 /* 3. 自检未跑完 / macOS 只有 warn 与 unjudged：不拦 */
