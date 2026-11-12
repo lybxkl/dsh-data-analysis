@@ -130,6 +130,14 @@ function findByClass(tree, name) {
   return null;
 }
 
+function findAllByClass(tree, name, out = []) {
+  if (!tree || !tree.props) return out;
+  const className = tree.props.className;
+  if (typeof className === 'string' && className.split(/\s+/).includes(name)) out.push(tree);
+  for (const child of tree.children || []) findAllByClass(child, name, out);
+  return out;
+}
+
 /* ---------------- 加载 client.js ---------------- */
 
 const PATCHES = [
@@ -375,6 +383,14 @@ scenario('环境齐全', {}, (tree, text) => {
   const rail = findByClass(tree, 'dsa-rail');
   const railText = textOf(rail);
   check(railText.includes('范围'), '阶段栏渲染出阶段名');
+  // 项目是比阶段更高一层的概念：左栏顶部要能看到项目列表，当前那个要标出来
+  const projRows = findAllByClass(tree, 'dsa-proj');
+  check(projRows.length === 2, '左栏顶部列出全部项目');
+  const selRows = findAllByClass(tree, 'dsa-proj').filter((row) => String(row.props.className).includes('sel'));
+  check(selRows.length === 1, '只有一个项目被标为当前');
+  check(textOf(selRows[0]).includes('测试项目'), '当前项目是选中那个');
+  check(railText.includes('另一个项目'), '其他项目也可见，能直接点着切');
+  check(railText.includes('+ 新建') && railText.includes('打开…'), '项目区带新建/打开入口');
 });
 
 /* 3. 自检未跑完 / macOS 只有 warn 与 unjudged：不拦 */

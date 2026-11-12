@@ -826,6 +826,23 @@
         '.dsa-rail{flex:0 0 296px;width:296px;border-right:1px solid var(--dsa-line);background:var(--dsa-band);',
         '  overflow-y:auto;padding:6px 0 16px;}',
         '.dsa-rail-h{padding:10px 14px 6px;color:var(--dsa-ink2);font-size:11.5px;font-weight:600;}',
+        // 左栏顶部的项目区：项目是「你在哪儿干活」，比阶段更高一层，所以给它独立的分区 + 卡片行
+        '.dsa-rail-sec{border-bottom:1px solid var(--dsa-line);padding-bottom:8px;margin-bottom:4px;}',
+        '.dsa-rail-h .dsa-count{margin-left:6px;color:var(--dsa-ctl);font-weight:400;}',
+        '.dsa-proj-list{padding:0 8px;}',
+        '.dsa-proj{display:block;width:100%;text-align:left;border:0;background:transparent;font:inherit;',
+        '  padding:5px 8px;border-radius:4px;cursor:pointer;color:inherit;}',
+        '.dsa-proj:hover{background:var(--dsa-hover);}',
+        '.dsa-proj.sel{background:var(--dsa-panel);box-shadow:inset 2px 0 0 var(--dsa-accent);}',
+        '.dsa-proj-name{display:block;font-size:12.5px;color:var(--dsa-ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+        '.dsa-proj.sel .dsa-proj-name{font-weight:600;}',
+        '.dsa-proj-path{display:block;margin-top:1px;font-size:10.5px;color:var(--dsa-ink3);overflow:hidden;',
+        '  text-overflow:ellipsis;white-space:nowrap;}',
+        '.dsa-proj-more{padding:3px 8px 0;}',
+        '.dsa-link{border:0;background:transparent;color:var(--dsa-ink2);font:inherit;font-size:11.5px;',
+        '  cursor:pointer;padding:2px 0;}',
+        '.dsa-link:hover{color:var(--dsa-accent);}',
+        '.dsa-proj-actions{display:flex;gap:12px;padding:4px 16px 0;}',
         '.dsa-stage{display:flex;gap:10px;align-items:flex-start;padding:9px 12px;cursor:pointer;border-left:3px solid transparent;',
         '  width:100%;border-top:0;border-right:0;border-bottom:0;background:transparent;text-align:left;color:inherit;font:inherit;}',
         '.dsa-stage:hover{background:var(--dsa-hover);}',
@@ -2136,9 +2153,63 @@
             ? matMounts.length + ' 条挂载 · ' + ((mat.sources || []).length) + ' 个材料源'
             : '未挂载材料（点开管理）';
 
+        var railProjects = (snap && snap.projects) || [];
         var rail = h(
           'div',
           { className: 'dsa-rail' },
+          // 项目区置顶：切换项目是这个面板最高频的「换舞台」动作，不该埋在菜单里
+          h(
+            'div',
+            { className: 'dsa-rail-sec' },
+            h(
+              'div',
+              { className: 'dsa-rail-h', style: { display: 'flex', alignItems: 'baseline' } },
+              '项目',
+              h('span', { className: 'dsa-count' }, String(railProjects.length))
+            ),
+            h(
+              'div',
+              { className: 'dsa-proj-list' },
+              railProjects.slice(0, 6).map(function (p) {
+                var on = snap && snap.active && p.id === snap.active.id;
+                return h(
+                  'button',
+                  {
+                    key: p.path,
+                    type: 'button',
+                    className: 'dsa-proj' + (on ? ' sel' : ''),
+                    title: p.path + (p.exists === false ? '（目录不见了）' : ''),
+                    'aria-current': on ? 'true' : undefined,
+                    onClick: function () {
+                      if (on) return;
+                      action('/project/open', { dir: p.path });
+                    }
+                  },
+                  h('span', { className: 'dsa-proj-name' }, p.name || p.path),
+                  h('span', { className: 'dsa-proj-path' }, p.exists === false ? p.path + ' · 目录不见了' : p.path)
+                );
+              })
+            ),
+            railProjects.length > 6
+              ? h(
+                  'div',
+                  { className: 'dsa-proj-more' },
+                  h(
+                    'button',
+                    { type: 'button', className: 'dsa-link', onClick: function () { setDialog({ kind: 'open' }); } },
+                    '还有 ' + (railProjects.length - 6) + ' 个…'
+                  )
+                )
+              : null,
+            h(
+              'div',
+              { className: 'dsa-proj-actions' },
+              h('button', { type: 'button', className: 'dsa-link', onClick: function () { setDialog({ kind: 'create' }); } }, '+ 新建'),
+              h('button', { type: 'button', className: 'dsa-link', onClick: function () { setDialog({ kind: 'open' }); } }, '打开…')
+            )
+          ),
+          // 「资料」是项目的输入，单列一区，免得和上面的项目区混成一片
+          h('div', { className: 'dsa-rail-h', style: { paddingTop: '8px' } }, '资料'),
           h(
             'button',
             {
@@ -2185,30 +2256,7 @@
                 h('div', { className: 'dsa-stage-meta' }, stageWord(stage))
               )
             );
-          }),
-          snap.projects && snap.projects.length > 1
-            ? h(
-                'div',
-                { style: { padding: '14px 14px 0' } },
-                h('div', { className: 'dsa-rail-h', style: { padding: '0 0 6px' } }, '其他项目'),
-                snap.projects
-                  .filter(function (p) { return p.id !== snap.active.id; })
-                  .slice(0, 5)
-                  .map(function (p) {
-                    return h(
-                      'div',
-                      {
-                        key: p.path,
-                        className: 'dsa-hint dsa-mono',
-                        style: { cursor: 'pointer', padding: '3px 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-                        title: p.path,
-                        onClick: function () { action('/project/open', { dir: p.path }); }
-                      },
-                      p.name
-                    );
-                  })
-              )
-            : null
+          })
         );
 
         /* ---------------- 闸门 ---------------- */
