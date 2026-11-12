@@ -655,7 +655,8 @@ export function registerTools(ctx, workbench, helpers = {}) {
       '管理材料库：把用户准备好的资料目录登记进来（全局一份，与项目解耦），再挂到项目 data/ 下（Windows 目录联接 / macOS·Linux 镜像目录，都不复制文件）。'
       + 'action=list 看清单与挂载状态；add 登记目录（path）；remove 删条目（先查引用）；'
       + 'mount 挂载（sourceId + 可选 entries 逗号分隔的子目录）；unmount 解挂（as）；repair 修断掉的联接。'
-      + '登记回执会把目录里的文件按「直读 / 识图 / 待转换 / 不支持」四类报数。',
+      + '登记回执会把目录里的文件按「直读 / 识图 / 待转换 / 不支持」四类报数；'
+      + '「待转换」只是说下游脚本读不了 doc/xls/ppt，转换本身交给会话或用户，工作台不代做。',
     parameters: {
       action: { type: 'string', required: true, description: 'list | add | remove | mount | unmount | repair' },
       path: { type: 'string', description: 'add：材料目录绝对路径' },
@@ -798,67 +799,6 @@ export function registerTools(ctx, workbench, helpers = {}) {
         return { ok: true, text: `已标记 ${result.changed ?? 0} 页为人工已核。`, result };
       }
       return { ok: false, text: `不认识的 action：${action}（plan|run|status|verify）` };
-    },
-  }));
-
-  register(defineTool({
-    name: 'data_analysis_convert',
-    description:
-      '旧版 Office（.doc/.xls/.ppt）转码：调用本机桌面 Office 另存为 docx/xlsx/pptx，产物挂回 data/ 后技能就能直读。'
-      + 'action=probe 查本机 Office 能不能用；plan 看待转换清单；run 开始转（默认后台）；status 看进度。'
-      + 'macOS 上没有这条通道，需要用户在 Office/WPS 里自己另存为新格式。',
-    parameters: {
-      action: { type: 'string', required: true, description: 'probe | plan | run | status' },
-      limit: { type: 'number', description: 'run：本次最多转几个文件，默认 20' },
-      wait: { type: 'boolean', description: 'run：同步等跑完（默认后台）' },
-    },
-    output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '转码任务已处理') },
-    async execute(args) {
-      const action = String(args?.action || 'plan');
-      if (action === 'probe') {
-        const info = await workbench.officeProbe({ force: true });
-        return {
-          ok: info.ok,
-          text: info.ok
-            ? `本机 Office 可用：${(info.apps || []).map((app) => app.name).join('、') || [info.word && 'Word', info.excel && 'Excel', info.ppt && 'PowerPoint'].filter(Boolean).join('、')}`
-            : [`旧版 Office 转码不可用：${info.error || info.detail || '未知原因'}`, info.hint || ''].filter(Boolean).join('\n'),
-          office: info,
-        };
-      }
-      if (action === 'plan') {
-        const plan = workbench.convertPlan();
-        if (!plan.ok) return { ok: false, error: plan.error, text: `无法生成转码清单：${plan.error}` };
-        const items = plan.items || [];
-        const lines = [`待转换：${items.length} 份`];
-        for (const item of items.slice(0, 10)) lines.push(`  · ${item.relPath} → ${item.targetExt}`);
-        if (items.length > 10) lines.push(`  …另有 ${items.length - 10} 份`);
-        if (!items.length) lines.push('没有 .doc/.xls/.ppt。');
-        return { ok: true, text: lines.join('\n'), items: items.slice(0, 200) };
-      }
-      if (action === 'run') {
-        const result = await workbench.startConvert({ limit: args?.limit ?? 20, wait: Boolean(args?.wait) });
-        if (!result.ok) return { ok: false, error: result.error, text: `转码没能开始：${result.error}` };
-        if (result.started) return { ok: true, started: true, text: `已开始（${result.plan.files} 份，本次上限 ${result.plan.limit} 份）。${result.note}`, plan: result.plan };
-        return {
-          ok: true,
-          text: `转码完成：${result.state?.done ?? 0} 份成功 / ${result.state?.failed ?? 0} 份失败。`,
-          result,
-        };
-      }
-      if (action === 'status') {
-        const status = workbench.convertStatus();
-        const summary = status.summary || null;
-        const lines = [status.running ? '转码：正在跑' : '转码：空闲'];
-        if (status.running && status.task) {
-          lines.push(`进度 ${status.task.done ?? 0}/${status.task.total ?? '?'} 份，正在处理 ${status.task.current || '—'}`);
-        }
-        if (summary) {
-          lines.push(`累计已转 ${summary.converted ?? 0} 份，失败 ${summary.failed ?? 0} 份`);
-          if (summary.lastError) lines.push(`最近一次失败：${summary.lastError}`);
-        }
-        return { ok: true, text: lines.join('\n'), status };
-      }
-      return { ok: false, text: `不认识的 action：${action}（probe|plan|run|status）` };
     },
   }));
 

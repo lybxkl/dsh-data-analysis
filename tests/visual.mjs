@@ -118,6 +118,10 @@ const PATCHES = [
   ["var widthState = useState('wide');", "var widthState = useState(globalThis.__DSA__.width);"],
   ["var themeState = useState('light');", "var themeState = useState(globalThis.__DSA__.theme);"],
   ["var selectedState = useState('scope');", "var selectedState = useState(globalThis.__DSA__.selected);"],
+  // 输入行的「下一步」：它的数据来自 /summary 轮询、状态来自点击本身，静态渲染要能种进去才量得到
+  ['var stateTuple = useState(null);', 'var stateTuple = useState(globalThis.__DSA__.wb);'],
+  ["var phaseTuple = useState('idle');", "var phaseTuple = useState(globalThis.__DSA__.phase || 'idle');"],
+  ["var flashTuple = useState('');", "var flashTuple = useState(globalThis.__DSA__.flash || '');"],
 ];
 
 function loadPanel() {
@@ -169,7 +173,7 @@ function loadPanel() {
   });
   const panel = registered.get('main');
   if (!panel) throw new Error('没有注册 main 面板');
-  return { panel, source };
+  return { panel, registered, source };
 }
 
 /** 直接从源码里取出 CSS 数组求值——不复制、不改写，量到的一定是面板真用的那份。 */
@@ -358,6 +362,7 @@ async function openPage({ port, url, width, height }) {
   await sleep(250);
 
   return {
+    send,
     async eval(expression) {
       const out = await send('Runtime.evaluate', {
         expression,
@@ -566,6 +571,115 @@ const PRE_OK = {
   ],
 };
 
+/* ============================ 原生对话里的零件 ============================ */
+
+// 「运行下一步」长在宿主的输入行里，不在面板里：那里没有 --dsa-* 令牌，横向只有几百像素。
+// 用一个假输入行（左簇 + 右簇）量它：按钮必须真画出边框（令牌一丢就退化成裸文字）、
+// 总宽封顶、长阶段名走省略号，而且不许把右边的控件挤走。这几件事只有真排版算得出来。
+const COMPOSER_WB = (patch) =>
+  Object.assign(
+    {
+      ok: true,
+      active: { id: 'p1', name: '测试项目', path: 'F:\\研究\\2026', sessionId: 's1' },
+      summary: { done: 3, review: 1 },
+      totals: { fail: 0 },
+      running: false,
+      next: { id: 'coding', index: 3, name: '编码与抽取', status: 'todo', script: 'scripts/03-code.py', args: [] },
+    },
+    patch,
+  );
+
+const COMPOSER_CASES = [
+  {
+    key: 'idle-long-name',
+    phase: 'idle',
+    flash: '',
+    expectClip: true,
+    wb: COMPOSER_WB({
+      next: {
+        id: 'stats',
+        index: 4,
+        name: '描述统计与回归（含稳健性与多重检验）',
+        status: 'todo',
+        script: 'scripts/04-stats.py',
+        args: [],
+      },
+    }),
+  },
+  {
+    key: 'running',
+    phase: 'idle',
+    flash: '',
+    wb: COMPOSER_WB({
+      running: true,
+      next: { id: 'coding', index: 3, name: '编码与抽取', status: 'running', script: 'scripts/03-code.py', args: [] },
+    }),
+  },
+  {
+    key: 'error-long-text',
+    phase: 'error',
+    flash: '启动失败 资料审计还有 2 个 error 级未过，先修产物再往下走',
+    expectClip: true,
+    wb: COMPOSER_WB({}),
+  },
+];
+
+function composerPage({ css, slotHtml }) {
+  return [
+    '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>composer</title><style>',
+    'html,body{margin:0}',
+    'body{padding:28px;background:#fff;color:#1d2129;font:13px system-ui,"Microsoft YaHei",sans-serif}',
+    '.host-row{display:flex;align-items:center;gap:10px;width:880px;box-sizing:border-box;padding:0 10px;',
+    '  height:52px;border:1px solid #e5e6eb;border-radius:12px;}',
+    '.host-left{display:flex;align-items:center;gap:10px;min-width:0;flex:0 1 auto;}',
+    '.host-spacer{flex:1 1 auto;}',
+    '.host-right{display:flex;align-items:center;gap:10px;flex:0 0 auto;}',
+    '.host-btn{white-space:nowrap;color:#4e5969;}',
+    '.host-fixed{width:96px;height:26px;line-height:26px;text-align:center;border:1px solid #c9cdd4;',
+    '  border-radius:8px;box-sizing:border-box;}',
+    css,
+    '</style></head><body><div class="host-row"><div class="host-left">',
+    '<span class="host-btn">＋</span><span class="host-btn">完全权限 ⌄</span><span class="host-btn">技能</span>',
+    slotHtml,
+    '</div><div class="host-spacer"></div><div class="host-right">',
+    '<span class="host-btn">专家 ⌄</span><span class="host-fixed">发送</span>',
+    '</div></div></body></html>',
+  ].join('');
+}
+
+const COMPOSER_PROBE = `(() => {
+  const alpha = (c) => {
+    const rgba = c.match(/rgba?\\(([^)]+)\\)/);
+    if (rgba) { const p = rgba[1].split(',').map(Number); return p.length === 4 ? p[3] : 1; }
+    const slash = c.match(/\\/\\s*([\\d.]+)\\s*\\)/);
+    return slash ? Number(slash[1]) : 1;
+  };
+  const row = document.querySelector('.host-row');
+  const wrap = document.querySelector('.dsa-cmp');
+  const btn = wrap && wrap.querySelector('.dsa-chat-btn');
+  if (!btn) return { missing: true, html: document.body.innerHTML.slice(0, 240) };
+  const cs = getComputedStyle(btn);
+  const clip = wrap.querySelector('.dsa-cmp-name, .dsa-cmp-flash');
+  const rect = btn.getBoundingClientRect();
+  return {
+    pillW: rect.width,
+    wrapW: wrap.getBoundingClientRect().width,
+    capW: parseFloat(getComputedStyle(wrap).maxWidth),
+    rowW: row.getBoundingClientRect().width,
+    rowScroll: row.scrollWidth,
+    rightW: document.querySelector('.host-fixed').getBoundingClientRect().width,
+    borderStyle: cs.borderTopStyle,
+    borderWidth: cs.borderTopWidth,
+    borderAlpha: alpha(cs.borderTopColor),
+    fontSize: parseFloat(cs.fontSize),
+    bg: cs.backgroundColor,
+    clip: clip ? { scroll: clip.scrollWidth, client: clip.clientWidth } : null,
+    label: btn.textContent.trim(),
+    cx: rect.left + rect.width / 2,
+    cy: rect.top + rect.height / 2,
+  };
+})()`;
+
 /* ============================ 量尺寸 ============================ */
 
 const PROBE = `(() => {
@@ -763,12 +877,13 @@ const VARIANTS = [
 ];
 
 async function main() {
-  const { panel, source } = loadPanel();
+  const { panel, registered, source } = loadPanel();
   const css = extractCss(source);
   if (!css.includes('--dsa-bg')) throw new Error('取到的 CSS 里没有设计令牌，提取逻辑失效了');
 
   fs.mkdirSync(OUT, { recursive: true });
   const results = [];
+  const composerResults = [];
 
   await withChrome(async ({ port }) => {
     for (const variant of VARIANTS) {
@@ -793,6 +908,48 @@ async function main() {
         const probe = await page.eval(PROBE);
         await page.screenshot(path.join(OUT, 'panel-' + variant.key + '.png'));
         results.push({ variant, probe });
+      } finally {
+        page.close();
+      }
+    }
+
+    /* 输入行里的「下一步」：拿真组件 + 真 CSS 渲进假输入行，量宽度与边框 */
+    const slot = registered.get('conversation.input.left');
+    if (!slot) throw new Error('client.js 没有注册 conversation.input.left');
+    for (const item of COMPOSER_CASES) {
+      globalThis.__DSA__ = {
+        snap: null,
+        pre: null,
+        loading: false,
+        dialog: null,
+        width: 'wide',
+        theme: 'light',
+        selected: 'scope',
+        wb: item.wb,
+        phase: item.phase,
+        flash: item.flash,
+      };
+      const slotHtml = serialize(renderRoot(slot, { sessionId: 's1' }));
+      const file = path.join(OUT, 'composer-' + item.key + '.html');
+      fs.writeFileSync(file, composerPage({ css, slotHtml }), 'utf8');
+      const page = await openPage({
+        port,
+        url: 'file:///' + file.replace(/\\/g, '/'),
+        width: 960,
+        height: 200,
+      });
+      try {
+        const probe = await page.eval(COMPOSER_PROBE);
+        let hoverBg = '';
+        if (!probe.missing) {
+          await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: probe.cx, y: probe.cy });
+          await sleep(220);
+          hoverBg = await page.eval(
+            "(() => { const b = document.querySelector('.dsa-cmp .dsa-chat-btn'); return b ? getComputedStyle(b).backgroundColor : ''; })()",
+          );
+        }
+        await page.screenshot(path.join(OUT, 'composer-' + item.key + '.png'));
+        composerResults.push({ item, probe, hoverBg });
       } finally {
         page.close();
       }
@@ -856,6 +1013,32 @@ async function main() {
       check(fold.radius === 0, tag + ' 卡里的折叠行还自带圆角：' + fold.cls + ' → ' + fold.radius);
     }
     check(probe.smallText.length === 0, tag + ' 有 ' + probe.smallText.length + ' 处小于 11px 的字：' + JSON.stringify(probe.smallText.slice(0, 3)));
+  }
+
+  /* ---------------- 输入行零件的断言 ---------------- */
+  for (const { item, probe, hoverBg } of composerResults) {
+    const tag = '输入行 ' + item.key;
+    if (probe.missing) {
+      check(false, tag + ' 没有渲出「下一步」按钮', String(probe.html || '').replace(/\s+/g, ' ').slice(0, 120));
+      continue;
+    }
+    check(probe.pillW <= 281, tag + ' 按钮没有封顶：' + Math.round(probe.pillW) + 'px');
+    check(probe.capW <= 281, tag + ' 封顶值不对：max-width=' + probe.capW);
+    check(probe.rowScroll <= probe.rowW + 1, tag + ' 把输入行撑出溢出：' + probe.rowScroll + ' > ' + Math.round(probe.rowW));
+    check(probe.rightW >= 95, tag + ' 右侧控件被挤窄：' + Math.round(probe.rightW) + 'px');
+    check(
+      probe.borderStyle === 'solid' && probe.borderWidth === '1px',
+      tag + ' 按钮没有可见边框：' + probe.borderStyle + ' ' + probe.borderWidth,
+    );
+    check(probe.borderAlpha > 0.05, tag + ' 边框是透明的（令牌丢了）：alpha=' + probe.borderAlpha);
+    check(probe.fontSize >= 12, tag + ' 字号小于 12px：' + probe.fontSize);
+    check(
+      Boolean(hoverBg) && !/rgba?\(\s*0,\s*0,\s*0,\s*0\s*\)/.test(hoverBg),
+      tag + ' 悬停没有可见反馈：' + hoverBg,
+    );
+    if (item.expectClip && probe.clip) {
+      check(probe.clip.scroll > probe.clip.client, tag + ' 长文本没走省略号：' + probe.clip.scroll + ' / ' + probe.clip.client);
+    }
   }
 
   /* ---------------- 报告 ---------------- */

@@ -512,6 +512,20 @@ scenario(
   },
 );
 
+/* 7b. 材料库：转码已交给会话，面板上不该再出现转码按钮；识图也不再是「一键跑」 */
+scenario(
+  '材料库（交给会话）',
+  { dialog: { kind: 'materials' }, snap: SNAP },
+  (tree, text) => {
+    check(text.includes('交给会话处理'), '有「交给会话处理」这块');
+    check(text.includes('让 AI 处理这些材料'), '有「让 AI 处理这些材料」按钮');
+    check(!text.includes('旧版 Office 转码'), '没有旧版 Office 转码块');
+    check(!text.includes('开始转码'), '没有「开始转码」按钮');
+    check(!text.includes('开始识别'), '识图不再有「开始识别」按钮（跑不跑由会话决定）');
+    check(!text.includes('undefined'), '没有 undefined 漏到界面上');
+  },
+);
+
 /* 8. 运行台 / 运行日志的边界：没有运行记录、没有日志 */scenario('没有运行记录', { snap: Object.assign({}, SNAP, { runs: [], activeRuns: {} }) }, (tree, text) => {
   check(hasClass(tree, 'dsa-side'), '右运行台仍在');
   check(!text.includes('undefined'), '没有 undefined 漏到界面上');

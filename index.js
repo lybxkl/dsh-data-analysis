@@ -21,7 +21,6 @@ import { Runner } from './src/runner.js';
 import { Workbench } from './src/service.js';
 import { Assistant, DRAFT_TASKS } from './src/assistant.js';
 import { Vision } from './src/vision.js';
-import { Converter } from './src/convert.js';
 import { registerTools } from './src/tools.js';
 import { registerRoutes } from './src/routes.js';
 import { registerPrompt } from './src/prompt.js';
@@ -139,20 +138,15 @@ export function apply(ctx, rawConfig = {}) {
     logger,
   });
 
-  // 材料库的两个执行器：扫描件识图（多模态模型）与旧版 Office 转码（桌面 Office）。
-  // 它们持有「当前任务」状态，必须是单例；缓存目录跟着台账走，改 dataDir 后自动换位置。
+  // 材料库的识图执行器：扫描件与图片才需要它，且只被工具显式调用（不做自动流水线）。
+  // 它持有「当前任务」状态，必须是单例；缓存目录跟着台账走，改 dataDir 后自动换位置。
   const vision = new Vision({
     getConfig,
     getCacheDir: () => workbench.cacheDir(),
     logger,
     assistant,
   });
-  const converter = new Converter({
-    getConfig,
-    getCacheDir: () => workbench.cacheDir(),
-    logger,
-  });
-  workbench.materials = { vision, converter };
+  workbench.materials = { vision };
 
   // updateConfig 走 store，这里把「内存配置」同步回 workbench 的读取源；
   // dataDir 变了要换成另一份台账，否则「改了目录但项目列表还是旧的」。

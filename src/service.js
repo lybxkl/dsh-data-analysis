@@ -55,7 +55,6 @@ import {
   markVerified as markVisionVerified,
   visionSummary,
 } from './vision.js';
-import { buildConvertPlan, convertSummary, probeOffice } from './convert.js';
 import { isLink, readMountMarker, removeTree } from './platform.js';
 
 const EMPTY_SKILL = { ok: false, reason: '未配置 skillRoot', root: '', packageDir: '', version: '', sha256: '', scripts: [] };
@@ -83,9 +82,8 @@ export class Workbench {
     this.skillCache = null;
     this.skillCacheKey = '';
     this.preflightState = { value: null, at: 0, promise: null };
-    // 材料库的三个外部依赖：识图执行器、桌面转换执行器、派生缓存目录
+    // 材料库的外部依赖：识图执行器（只被工具显式调用，不做自动流水线）+ 派生缓存目录
     this.materials = materials || null;
-    this.officeCache = null;
   }
 
   /* ------------------------------ 技能包 ------------------------------ */
@@ -536,6 +534,47 @@ export class Workbench {
     return this.mountsState(active.path);
   }
 
+  /**
+   * 交给会话处理材料时用的交办文案：挂载清单 + 只读约束 + 产物约定。
+   * 面板点「让 AI 处理这些材料」→ GET /materials/card → 投进研究对话；
+   * 怎么解析由会话决定，这里只把「不能做什么」说清楚。
+   */
+  materialsCard() {
+    const active = this.active();
+    if (!active.ok) return { ok: false, error: '还没有打开项目' };
+    const state = this.mountsStateSafe();
+    const mounts = state.mounts || [];
+    if (!mounts.length) return { ok: false, error: '这个项目还没有挂载任何材料目录' };
+    const byId = new Map(this.sources().map((item) => [item.id, item]));
+    const name = (active.project && active.project.name) || active.path;
+    const lines = [];
+    lines.push(`[材料读取] 项目「${name}」的资料已经挂到 data/ 下，全程只读。`);
+    lines.push('');
+    lines.push('挂载（都在项目 data/ 下，指向用户自己的目录，不复制文件）：');
+    for (const mount of mounts) {
+      const source = byId.get(mount.sourceId);
+      const files = Number(source && source.scan && source.scan.files);
+      const where = source ? `${source.path}${mount.entry ? ' / ' + mount.entry : ''}` : '（材料源已删除，这条挂载失效）';
+      lines.push(`- data/${mount.as} → ${where}${Number.isFinite(files) ? `（${files} 个文件）` : ''}`);
+    }
+    const derived = state.derived || [];
+    if (derived.length) {
+      lines.push('');
+      lines.push('已有的派生稿（此前的识图/转码产物，未人工核对的不算数）：');
+      for (const item of derived) lines.push(`- data/${item.mountName}（${item.files} 份）`);
+    }
+    lines.push('');
+    lines.push('约束：');
+    lines.push('1. 只读：不要修改、移动、删除用户原始资料目录里的任何文件；data/ 下这些目录就是指向源目录的挂载，往里写等于改原件。');
+    lines.push('2. 派生只走派生目录：需要转写时先跑 data_analysis_vision（action=plan 只数页不花 token，确认后再 action=run），产物会自动落到 data/<挂载名>__识别稿/ 并记账；不要手写到别处。');
+    lines.push('3. 不要自己把页图读进上下文：纯文本模型会把图片静默换成占位行，等于白跑一遍；识图交给工作台直连模型。');
+    lines.push('4. doc/xls/ppt 下游脚本读不了文本：转换由你或用户在 Office/WPS 里另存为 docx/xlsx/pptx 后重扫材料；工作台不代转。');
+    lines.push('5. 处理完重跑 audit：data/ 变了指纹就变，audit-freshness 会拦住后续阶段。');
+    lines.push('');
+    lines.push('先跑 data_analysis_status 看当前进度，再决定从哪个阶段继续。');
+    return { ok: true, text: lines.join('\n'), mounts: mounts.length, project: active.path };
+  }
+
   /** 重写留痕文件：provenance.csv / mounts.json / selection.csv。 */
   refreshMaterials(projectRoot) {
     const read = readProject(projectRoot);
@@ -759,12 +798,6 @@ export class Workbench {
     return vision.cancel();
   }
 
-  cancelConvert() {
-    const converter = this.materialServices().converter;
-    if (!converter?.cancel) return { ok: false, error: '转换执行器没有初始化' };
-    return converter.cancel();
-  }
-
   async afterVision(projectRoot) {
     const read = readProject(projectRoot);
     if (!read.ok) return;
@@ -780,65 +813,6 @@ export class Workbench {
     const result = markVisionVerified(active.path, { relPaths, all });
     if (result.ok) this.refreshMaterials(active.path);
     return result;
-  }
-
-  /* ------------------------ 旧版 Office 转码 ------------------------ */
-
-  convertPlan() {
-    const active = this.active();
-    if (!active.ok) return { ok: false, error: active.error };
-    const plan = buildConvertPlan({
-      projectRoot: active.path,
-      materials: readMaterials(active.project),
-      sources: listSources(this.store),
-      cacheDir: this.cacheDir(),
-    });
-    if (!plan.ok) return plan;
-    return { ...plan, projectRoot: active.path };
-  }
-
-  convertStatus() {
-    const active = this.active();
-    const converter = this.materialServices().converter;
-    return {
-      ok: true,
-      running: Boolean(converter?.status?.().running),
-      task: converter?.status?.() || { running: false },
-      summary: active.ok ? convertSummary(active.path) : null,
-      office: this.officeCache,
-    };
-  }
-
-  async officeProbe({ force = false } = {}) {
-    const info = await probeOffice({ force });
-    this.officeCache = info;
-    return info;
-  }
-
-  async startConvert({ limit = 20, wait = false } = {}) {
-    const converter = this.materialServices().converter;
-    if (!converter) return { ok: false, error: '转换执行器没有初始化' };
-    if (converter.status().running) return { ok: false, error: '已经有一个转换任务在跑' };
-    const planned = this.convertPlan();
-    if (!planned.ok) return planned;
-    if (!(planned.items || []).length) return { ok: false, error: '没有待转换的 doc/xls/ppt', plan: planned };
-    const office = await this.officeProbe();
-    if (!office.ok) return { ok: false, error: office.error, office };
-    const args = { projectRoot: planned.projectRoot, plan: planned, limit };
-    const brief = { files: (planned.items || []).length, limit };
-    if (wait) {
-      const result = await converter.run(args);
-      if (result.ok) await this.afterVision(planned.projectRoot);
-      return { ...result, plan: brief };
-    }
-    this.convertJob = converter
-      .run(args)
-      .then(async (result) => {
-        if (result.ok) await this.afterVision(planned.projectRoot);
-        return result;
-      })
-      .catch((error) => ({ ok: false, error: error?.message || String(error) }));
-    return { ok: true, started: true, plan: brief, note: '后台在跑，用 convert-status 看进度' };
   }
 
   /* --------------------------- 旧项目迁移 --------------------------- */
@@ -938,7 +912,7 @@ export class Workbench {
     // 面板要按平台说人话：Windows 是目录联接，macOS/Linux 是镜像目录（逐文件软链）
     const platform = { platform: process.platform, isWindows: process.platform === 'win32' };
     if (!active?.ok) {
-      return { sources, mounts: [], derived: [], entries: [], ...platform, vision: this.visionStatus(), convert: this.convertStatus() };
+      return { sources, mounts: [], derived: [], entries: [], ...platform, vision: this.visionStatus() };
     }
     const state = this.mountsState(active.path);
     return {
@@ -948,7 +922,6 @@ export class Workbench {
       entries: state.entries,
       ...platform,
       vision: this.visionStatus(),
-      convert: this.convertStatus(),
     };
   }
 

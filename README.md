@@ -226,8 +226,10 @@ pip3 install -r SPSS-Style-Charting-Skill/requirements.txt
 
 ### 4. 扫描件走识图
 
-审计表里 `status=image_only` 的行就是要识图的（没有文字层的扫描 PDF 与图片）。`材 → 识图`：
-先看「待识别页数」（只数页、零调用），再小批量试跑（`pages=1-5`），满意了再放开。
+审计表里 `status=image_only` 的行就是要识图的（没有文字层的扫描 PDF 与图片）。
+面板的 `材 → 扫描件识图` 只负责**看见进度**和**人点头**：要跑就点「让 AI 处理这些材料」把挂载清单交给会话，
+由会话调 `data_analysis_vision`；也可以直接跟 AI 说「把扫描件识别一下」。
+先 `action=plan` 看「待识别页数」（只数页、零调用），再小批量试跑（`pages=1-5`），满意了再放开。
 识别稿落在 `data/<挂载名>__识别稿/`，每页留 `页图 sha256 / 模型 / 提示词版本`。
 **逐页核对完再点「标记已核对」**——未核的稿子一旦被文稿或质检引用，`qa-vision` 只给「判不了」。
 
@@ -235,7 +237,8 @@ pip3 install -r SPSS-Style-Charting-Skill/requirements.txt
 
 每步都是「运行 → 看闸门 → 该修就修」。`✗` 点开看证据；`!` 是只能人拍板的那类（例如交付清单确认），
 弹窗里先摆证据再写理由；阶段重跑后旧裁定自动失效。
-`doc/xls/ppt` 这类旧格式先走转码（`材 → 转码`），`Image only` 之外的 PDF 直接读文本，不用识别。
+`doc/xls/ppt` 这类旧格式下游脚本读不出文本：工作台只把它们标成「待转换」，转换本身交给会话或你
+（Office/WPS 另存为 docx/xlsx/pptx 后重扫）。`Image only` 之外的 PDF 直接读文本，不用识别。
 
 ### 6. 终检与复核
 
@@ -310,7 +313,7 @@ data_analysis_status
 | --- | --- | --- |
 | 直读 | 技能能抽文本的 27 种：txt/md/csv/json/xml/yaml 等文本、pdf、docx/docm、odt、pptx/pptm、xlsx/xlsm、html/htm/xhtml | 挂上就能用 |
 | 识图 | png/jpg/jpeg/tif/tiff/bmp/webp/gif/heic，以及**没有文字层**的 pdf（审计判 `status=image_only`） | 多模态模型逐页转写（不搞 OCR） |
-| 待转换 | doc/xls/ppt | 桌面 Office 另存为 docx/xlsx/pptx |
+| 待转换 | doc/xls/ppt | 下游脚本读不了；转换交给会话或用户（Office/WPS 另存为 docx/xlsx/pptx 后重扫），工作台不代做 |
 | 不支持 | mhtml、压缩包、音视频、其他扩展、网址 | 告诉用户怎么换格式 |
 
 `.DS_Store`、`Thumbs.db`、`~$` 锁文件这类记为「系统文件」，来源账里单独标 `channel=junk`，不进四类统计。
@@ -327,11 +330,11 @@ data_analysis_status
 - **未核不是通过**：`human_verified=false` 的识别稿一旦被数字溯源/质检记录引用，`qa-vision` 只能是 unjudged；
   全部识别完但没核对，也是 unjudged。核对后用 action=verify 打勾。
 
-### 待转换（桌面 Office）
+### 待转换（交给会话或用户）
 
-`data_analysis_convert`（action=probe 先探测，action=run 真转）走 COM：Word `SaveAs2(16)`、Excel `SaveAs(51)`、
-PowerPoint `SaveAs(24)`。转换前先把文件复制到系统临时目录，免得 Office 在用户的材料目录里写 `~$` 锁文件。
-非 Windows 或没装 Office 时给 Mac/替代方案的指引，不假装能转。
+`doc/xls/ppt` 下游脚本抽不出文本，工作台只把它们标成「待转换」，不再内置转换器：
+在 Office/WPS 里另存为 docx/xlsx/pptx，放回原目录后点「重扫」即可（源目录里的旧格式文件不用删）。
+面板上的「让 AI 处理这些材料」会把挂载清单与这条约束一起交给会话，由它决定该怎么处理。
 
 ### 旧副本迁移
 
@@ -352,7 +355,7 @@ PowerPoint `SaveAs(24)`。转换前先把文件复制到系统临时目录，免
 | 源目录增删文件 | 立刻可见（就是同一个目录） | 镜像不会自动跟；点「修复」（`action=repair`）做增量补齐并清掉断链 |
 | Python 命令 | 默认 `python`，可在配置里填 `python.exe` 绝对路径 | 默认 `python3`，没有 `python` 也能跑 |
 | Word→PDF | COM + pywin32，`pass/warn` | `unjudged`（没有 Word COM），改用 `soffice --headless --convert-to pdf` |
-| doc/xls/ppt 转码 | 桌面 Office COM 另存为 OOXML | 不支持，请在 Office/WPS 里自己另存为；Linux 可用 soffice 批量转 |
+| doc/xls/ppt 转换 | 不内置；在 Office/WPS 里另存为后重扫 | 同左（Linux 可用 `soffice --convert-to docx` 批量转） |
 | 识图 | 支持 | 支持（PyMuPDF 渲染 + Pillow 转 PNG，逻辑一致） |
 
 两处容易踩的坑：
@@ -394,12 +397,12 @@ PowerPoint `SaveAs(24)`。转换前先把文件复制到系统临时目录，免
 - **未开工 ≠ 未过**：还没产物、没运行、也没裁定的阶段是「未开始」，不计入「未过」总数，也不画成 ✗。
 - **多步阶段**：终检是 `qa_outputs.py → verify_numbers.py` 两步；面板显示两步脚本名，参数在任务卡与运行日志里。
 
-## 模型工具（18 个）
+## 模型工具（17 个）
 
 `data_analysis_status`（状态与闸门）、`doctor`（环境自检）、`list_stages`、`figures`、`create_project`、`open_project`、
 `run_stage`、`run_log`、`cancel_stage`、`adjudicate`、`configure`、`draft`（起草文本）、`recheck`（复核）、`issue`（写问题）、
-`materials`（材料库：登记/挂载/摘下/修复）、`vision`（识图：计划/跑/核对）、`convert`（Legacy Office 转码）、
-`migrate`（旧副本换联接）。
+`materials`（材料库：登记/挂载/摘下/修复）、`vision`（识图：计划/跑/核对）、`migrate`（旧副本换联接）。
+没有「转码」工具：doc/xls/ppt 交给会话或用户去转，工作台只负责分类与记账。
 状态类工具只回摘要与闸门，不回整份产物快照（避免一次读进 60 张图的全部列）。
 
 ## 测试
@@ -509,12 +512,11 @@ dsh-data-analysis/
   src/audit.js        产物只读解析（CSV/JSON、三态徽章、ΔL*）
   src/gates.js        闸门判定、裁定失效、阶段状态
   src/runner.js       子进程运行（多步）、日志、取消、重启对账
-  src/service.js      面板/工具共用的服务层（含材料库、识图、转码、迁移）
+  src/service.js      面板/工具共用的服务层（含材料库、识图、迁移、交办文案）
   src/assistant.js    LLM 桥：受控上下文 + llm.stream + 看图（seeImage）
   src/platform.js     目录联接/镜像挂载、PowerShell 调用、自己走的递归删除
   src/sources.js      材料库、挂载表、来源账、派生路径、旧副本迁移
-  src/vision.js       扫描件逐页识别、留痕、人工核对
-  src/convert.js      桌面 Office 转码（doc/xls/ppt → OOXML）
+  src/vision.js       扫描件逐页识别、留痕、人工核对（只被工具显式调用）
   src/taskcard.js     阶段任务卡（投递到原生会话的那段文字）
   src/tools.js        data_analysis_* 模型工具
   src/routes.js       /data-analysis/api/* 面板通道

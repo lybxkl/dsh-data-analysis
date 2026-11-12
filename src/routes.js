@@ -341,8 +341,17 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
           isWindows: process.platform === 'win32',
           ...state,
           vision: workbench.visionStatus(),
-          convert: workbench.convertStatus(),
         };
+      },
+    },
+    {
+      path: `${basePath}/api/materials/card`,
+      method: 'GET',
+      handler: () => {
+        // 面板「让 AI 处理这些材料」拿这张卡再投进研究对话；解析由会话决定
+        const result = workbench.materialsCard();
+        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
+        return result;
       },
     },
     {
@@ -451,38 +460,6 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
         const result = workbench.verifyVision({ relPaths, all: isTrue(body?.all) });
         if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
         return { ok: true, ...result, state: workbench.snapshot() };
-      },
-    },
-    {
-      path: `${basePath}/api/materials/convert`,
-      method: 'GET',
-      handler: () => { const status = workbench.convertStatus(); const plan = workbench.convertPlan(); return { ok: plan.ok !== false, ...status, plan, ...(plan.ok === false ? { error: plan.error } : {}) }; },
-    },
-    {
-      path: `${basePath}/api/materials/convert/run`,
-      method: 'POST',
-      handler: async (body) => {
-        const result = await workbench.startConvert({ limit: Number(body?.limit) || 20, wait: isTrue(body?.wait) });
-        if (!result.ok) return { status: 409, payload: { ok: false, error: result.error, office: result.office || null } };
-        return result;
-      },
-    },
-    {
-      path: `${basePath}/api/materials/convert/cancel`,
-      method: 'POST',
-      handler: () => {
-        const result = workbench.cancelConvert();
-        if (!result.ok) return { status: 409, payload: result };
-        return result;
-      },
-    },
-    {
-      // 面板的「查本机 Office」走 POST（和其他动作一致）；这里同时接受查询参数 refresh=1。
-      path: `${basePath}/api/materials/office`,
-      method: 'POST',
-      handler: async (body, query) => {
-        const info = await workbench.officeProbe({ force: isTrue(body?.refresh) || query?.refresh === '1' });
-        return { ok: info.ok, office: info };
       },
     },
     {

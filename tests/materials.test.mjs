@@ -64,7 +64,7 @@ function makeBench(prefix, { assistant = null } = {}) {
   const cfg = () => ledger.config;
   const runner = new Runner({ getConfig: cfg, store, onChange: () => {} });
   const vision = new Vision({ getConfig: cfg, getCacheDir: () => wb.cacheDir(), logger: console, assistant });
-  const wb = new Workbench({ getConfig: cfg, store, runner, onChange: () => {}, materials: { vision, converter: null } });
+  const wb = new Workbench({ getConfig: cfg, store, runner, onChange: () => {}, materials: { vision } });
   runner.onFinish = (run) => wb.onRunFinished(run);
   return { root, proj, sourceRoot, ledger, store, wb, vision };
 }
@@ -141,6 +141,28 @@ section('二、挂载、重复挂载、摘下、修复');
   const unmounted = await bench.wb.unmountSource({ as: '安徽' });
   check('摘下只删联接', unmounted.ok === true && !fs.existsSync(path.join(bench.proj, 'data', '安徽')));
   check('源文件仍在', fs.existsSync(path.join(bench.sourceRoot, '安徽', 'x.pdf')));
+}
+
+/* ------------------------ 二之二、交给会话的交办文案 ------------------------ */
+section('二之二、materialsCard：挂载清单 + 只读约束（没有挂载就明确报错）');
+{
+  const bench = makeBench('dsa-t2b-');
+  const empty = bench.wb.materialsCard();
+  check('没有挂载时不硬造一张卡', empty.ok === false && /还没有挂载/.test(empty.error || ''), empty.error || '');
+
+  fs.mkdirSync(path.join(bench.sourceRoot, '卷'), { recursive: true });
+  fs.writeFileSync(path.join(bench.sourceRoot, '卷', 'a.pdf'), 'x');
+  const added = bench.wb.addSource({ path: bench.sourceRoot, label: '交办样本' });
+  await bench.wb.mountSource({ sourceId: added.source.id, entries: ['卷'] });
+
+  const card = bench.wb.materialsCard();
+  check('有挂载就能出卡', card.ok === true, card.error || '');
+  const text = String(card.text || '');
+  check('卡里点了挂载名与源路径', text.includes('data/卷') && text.includes(bench.sourceRoot.replace(/\\/g, '\\')), text.slice(0, 120));
+  check('卡里写明只读', text.includes('只读') && text.includes('不要修改'));
+  check('卡里指路 data_analysis_vision', text.includes('data_analysis_vision'));
+  check('卡里不再提转换工具', !text.includes('data_analysis_convert'));
+  check('卡里要求重跑审计', text.includes('重跑 audit'));
 }
 
 /* ------------------------------ 三、旧副本迁移 ------------------------------ */

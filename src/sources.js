@@ -44,7 +44,10 @@ export const EXT_GROUPS = {
   legacy: new Set(['doc', 'xls', 'ppt']),
 };
 
-/** 通道：read=直读、vision=识图、convert=桌面转换、none=不支持。 */
+/**
+ * 通道：read=直读、vision=识图、convert=待转换（doc/xls/ppt，交给会话或用户去转，工作台不代做）、
+ * none=不支持（mhtml/压缩包/音视频等）。这里只是分类标签，不等于「工作台会处理」。
+ */
 export const CHANNEL_LABEL = {
   read: '直读',
   vision: '识图',
@@ -424,8 +427,9 @@ export function derivedMountName(mount) {
 
 /**
  * 派生文件 → 原件在 data/ 里的相对路径。
- * 识图稿是 `<原名>.pNNNN.txt`，转码是 `<原名>.<新扩展>`（docx/xlsx/pptx）。
- * 对不上形状的返回 null（那就不算派生，宁可不写这行也不瞎标）。
+ * 识图稿是 `<原名>.pNNNN.txt`；`<原名>.<docx/xlsx/pptx>` 是更早版本工作台转出来的 OOXML
+ * （转换已交给会话/用户，这类文件只会来自旧账，认得出来就记来源，认不出就不写这行）。
+ * 对不上形状的返回 null（那就不算派生，宁可不写也不瞎标）。
  */
 export function derivedOrigin(mount, relInDerived) {
   const rel = String(relInDerived || '').split(path.sep).join('/');

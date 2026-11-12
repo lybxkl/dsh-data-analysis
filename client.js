@@ -167,8 +167,11 @@
         nextStep: '运行下一步',
         nextAllDone: '八个阶段都已完成',
         nextManual: '下一步要人工完成',
-        nextRunStarted: '已启动：',
-        nextRunFailed: '启动失败：',
+        nextStarting: '启动中…',
+        nextStarted: '已启动',
+        nextStartFailed: '启动失败',
+        nextStateRunning: '运行中',
+        nextStateManual: '待人工',
         tailTitle: '工作台',
         tailOpen: '打开',
         chatCardTitle: '研究对话',
@@ -513,35 +516,39 @@
       }
 
       /**
-       * 面板投递：拿任务卡 → 有绑定就复用，没有就建会话 → prompt(queue) → 绑定 → 打开原生对话。
+       * 把一段文字投给研究对话：有绑定就复用，没有就建会话 → prompt(queue) → 绑定 → 打开原生对话。
        * 任一步失败都如实抛回面板，不静默换会话、不重试。
        */
-      function deliverCard(stageId, projectDir, boundSessionId) {
-        return request('GET', '/task-card?stageId=' + encodeURIComponent(stageId)).then(function (card) {
-          if (!card || !card.ok) throw new Error((card && card.error) || '任务卡生成失败');
-          var idPromise = boundSessionId ? Promise.resolve(boundSessionId) : createSession(projectDir);
-          return idPromise.then(function (sessionId) {
-            return ensureRef(sessionId).then(function (ref) {
-              return ref.binding.session.prompt([{ type: 'text', text: card.text }], 'queue').then(function (result) {
-                if (!result || result.ok !== true) {
-                  var detail = result && result.error && (result.error.message || result.error.code);
-                  throw new Error('投递失败：' + (detail || '宿主拒绝了这条消息'));
-                }
-                return persistSession(sessionId).then(function (json) {
-                  openConversation(sessionId);
-                  return { ok: true, sessionId: sessionId, state: json.state };
-                }).catch(function (error) {
-                  // 消息已经发出去了：绑定失败不能谎报「投递失败」，照常进对话并如实提示。
-                  openConversation(sessionId);
-                  return {
-                    ok: true,
-                    sessionId: sessionId,
-                    warning: '任务卡已发出，但会话绑定失败（重启后可能找不到这条对话）：' + String((error && error.message) || error)
-                  };
-                });
+      function deliverText(text, projectDir, boundSessionId) {
+        var idPromise = boundSessionId ? Promise.resolve(boundSessionId) : createSession(projectDir);
+        return idPromise.then(function (sessionId) {
+          return ensureRef(sessionId).then(function (ref) {
+            return ref.binding.session.prompt([{ type: 'text', text: text }], 'queue').then(function (result) {
+              if (!result || result.ok !== true) {
+                var detail = result && result.error && (result.error.message || result.error.code);
+                throw new Error('投递失败：' + (detail || '宿主拒绝了这条消息'));
+              }
+              return persistSession(sessionId).then(function (json) {
+                openConversation(sessionId);
+                return { ok: true, sessionId: sessionId, state: json.state };
+              }).catch(function (error) {
+                // 消息已经发出去了：绑定失败不能谎报「投递失败」，照常进对话并如实提示。
+                openConversation(sessionId);
+                return {
+                  ok: true,
+                  sessionId: sessionId,
+                  warning: '任务卡已发出，但会话绑定失败（重启后可能找不到这条对话）：' + String((error && error.message) || error)
+                };
               });
             });
           });
+        });
+      }
+
+      function deliverCard(stageId, projectDir, boundSessionId) {
+        return request('GET', '/task-card?stageId=' + encodeURIComponent(stageId)).then(function (card) {
+          if (!card || !card.ok) throw new Error((card && card.error) || '任务卡生成失败');
+          return deliverText(card.text, projectDir, boundSessionId);
         });
       }
 
@@ -679,10 +686,14 @@
 
       function OpenWorkbenchAction() {
         return h(
-          'button',
-          { type: 'button', className: 'dsa-chat-btn', title: t('title'), onClick: openWorkbenchPanel },
-          h('span', { className: 'dsa-chat-glyph' }, '▤'),
-          ' ' + t('tailTitle')
+          'span',
+          { className: 'dsa-cmp' },
+          h(
+            'button',
+            { type: 'button', className: 'dsa-chat-btn', title: t('title'), onClick: openWorkbenchPanel },
+            h('span', { className: 'dsa-chat-glyph' }, '▤'),
+            ' ' + t('tailTitle')
+          )
         );
       }
 
@@ -694,7 +705,7 @@
         var totals = state.totals || {};
         return h(
           'div',
-          { className: 'dsa-tail' },
+          { className: 'dsa-tail dsa-cmp-tail' },
           h('span', { className: 'dsa-chat-dot ' + (totals.fail ? 'err' : 'ok') }),
           h('b', null, t('tailTitle')),
           h(
@@ -709,55 +720,121 @@
         );
       }
 
+      /* 输入行左侧的「下一步」：四种状态装在同一个按钮里，不再往旁边追加一句话——
+         追加的那句会把输入行撑长，点完还一直挂着（按钮已经换成下一阶段，旁边仍写着
+         「已启动：上一阶段」）。状态只来自两处真东西：本次请求的结果、/summary 里
+         next.status。没有假进度，也没有前端计时器造出来的「进行中」。 */
       function NextStepControl(props) {
         var tuple = useWorkbenchState(8000, [props.sessionId]);
         var state = tuple[0];
         var reload = tuple[1];
-        var busyTuple = useState(false);
-        var busy = busyTuple[0];
-        var setBusy = busyTuple[1];
-        var noteTuple = useState('');
-        var note = noteTuple[0];
-        var setNote = noteTuple[1];
+        // idle | starting | ok | error：只记这一次点击；运行中 / 待人工取自服务端
+        var phaseTuple = useState('idle');
+        var phase = phaseTuple[0];
+        var setPhase = phaseTuple[1];
+        var flashTuple = useState('');
+        var flash = flashTuple[0];
+        var setFlash = flashTuple[1];
+        var timerRef = useRef(0);
+
+        // 反馈有时限：成功 3 秒、失败 8 秒后退回真实状态，免得一次点击的结果变成长住的假状态
+        useEffect(function () {
+          if (phase !== 'ok' && phase !== 'error') return undefined;
+          timerRef.current = setTimeout(function () {
+            setPhase('idle');
+            setFlash('');
+          }, phase === 'ok' ? 3000 : 8000);
+          return function () {
+            clearTimeout(timerRef.current);
+          };
+        }, [phase]);
+
         if (!state || !state.active || !props.sessionId || state.active.sessionId !== props.sessionId) return null;
         var next = state.next;
-        if (!next) return h('span', { className: 'dsa-hint' }, t('nextAllDone'));
-        var runnable = Boolean(next.script) && next.status !== 'running';
+        if (!next) {
+          return h('span', { className: 'dsa-cmp' }, h('span', { className: 'dsa-cmp-text' }, t('nextAllDone')));
+        }
+
+        var running = next.status === 'running';
+        var runnable = Boolean(next.script) && !running;
+
         var click = function click() {
-          if (!runnable) {
+          if (phase === 'starting') return;
+          // 没有脚本、或者刚刚点过（服务端可能已经在跑）：点一下只去看日志，不再发一次 run
+          if (!runnable || phase === 'ok') {
             openWorkbenchPanel();
             return;
           }
-          setBusy(true);
-          setNote('');
+          setPhase('starting');
+          setFlash('');
           request('POST', '/stage/run', { stageId: next.id }).then(function (json) {
             if (json && json.ok) {
-              setNote(t('nextRunStarted') + next.name);
+              setPhase('ok');
+              setFlash(t('nextStarted') + ' ' + next.name);
               void reload();
-            } else {
-              setNote(t('nextRunFailed') + ((json && json.error) || '未知错误'));
+              return;
             }
+            setPhase('error');
+            setFlash(t('nextStartFailed') + ' ' + ((json && json.error) || '未知错误'));
           }).catch(function (e) {
-            setNote(t('nextRunFailed') + String((e && e.message) || e));
-          }).then(function () {
-            setBusy(false);
+            setPhase('error');
+            setFlash(t('nextStartFailed') + ' ' + String((e && e.message) || e));
           });
         };
+
+        var view;
+        if (phase === 'starting') {
+          view = { spinner: true, label: t('nextStarting'), hint: '正在启动「' + next.name + '」' };
+        } else if (phase === 'ok') {
+          view = { glyph: '✓', tone: 'ok', flash: flash, hint: flash + '，点一下去工作台看日志' };
+        } else if (phase === 'error') {
+          view = { glyph: '⚠', tone: 'err', flash: flash, hint: flash };
+        } else if (running) {
+          view = {
+            dot: true,
+            tone: 'run',
+            label: t('nextStateRunning'),
+            name: next.name,
+            hint: '「' + next.name + '」正在运行，点一下打开工作台看日志'
+          };
+        } else if (runnable) {
+          view = { glyph: '▶', label: t('nextStep'), name: next.name, hint: '在工作台里运行「' + next.name + '」' };
+        } else {
+          view = {
+            glyph: '→',
+            label: t('nextStateManual'),
+            name: next.name,
+            hint: t('nextManual') + '，点一下打开工作台'
+          };
+        }
+
+        var icon = view.spinner
+          ? h('span', { className: 'dsa-cmp-spin', 'aria-hidden': 'true' })
+          : view.dot
+            ? h('span', { className: 'dsa-cmp-dot', 'aria-hidden': 'true' })
+            : h('span', { className: 'dsa-cmp-icon', 'aria-hidden': 'true' }, view.glyph);
+
         return h(
           'span',
-          { className: 'dsa-inline', style: { gap: '6px' } },
+          { className: 'dsa-cmp' + (view.tone ? ' tone-' + view.tone : '') },
           h(
             'button',
             {
               type: 'button',
               className: 'dsa-chat-btn',
-              disabled: busy,
-              title: runnable ? '在工作台里运行「' + next.name + '」' : t('nextManual'),
+              disabled: phase === 'starting',
+              'aria-busy': phase === 'starting' ? 'true' : undefined,
+              title: view.hint,
               onClick: click
             },
-            busy ? '…' : (runnable ? '▶ ' : '→ ') + t('nextStep') + ' · ' + next.name
-          ),
-          note ? h('span', { className: 'dsa-hint' }, note) : null
+            icon,
+            view.flash
+              ? h('span', { className: 'dsa-cmp-flash' }, view.flash)
+              : [
+                  h('span', { key: 'label', className: 'dsa-cmp-label' }, view.label),
+                  view.name ? h('span', { key: 'name', className: 'dsa-cmp-name' }, view.name) : null
+                ]
+          )
         );
       }
 
@@ -1035,6 +1112,49 @@
         '.dsa-tail{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:4px 0 2px;padding:3px 7px;',
         '  border:1px solid var(--dsa-line);border-radius:3px;background:var(--dsa-bg);font-size:11px;color:var(--dsa-ink3);}',
         '.dsa-tail b{color:var(--dsa-ink2);font-weight:600;}',
+        // 原生对话里的零件长在 .dsa-root 之外：那里没有 --dsa-* 令牌，凡是 var() 写的边框、底色、
+        // 字色都会整条失效，按钮就退化成一行裸文字（看不出来能点，点了也看不出变化）。
+        // 这一组只用 currentColor 混色，跟着宿主主题走；宽度一律封顶——输入行是横向窄条，
+        // 标签再长也不许把右边的控件挤走。
+        '.dsa-cmp{display:inline-flex;align-items:center;min-width:0;max-width:min(280px,52vw);flex:0 1 auto;overflow:hidden;}',
+        '.dsa-cmp .dsa-chat-btn{display:inline-flex;align-items:center;gap:6px;height:24px;min-width:0;max-width:100%;',
+        '  padding:0 8px;border:1px solid color-mix(in srgb,currentColor 20%,transparent);border-radius:6px;',
+        '  background:transparent;color:inherit;font-size:12px;line-height:1;white-space:nowrap;cursor:pointer;',
+        '  transition:background-color .12s ease,border-color .12s ease;}',
+        '.dsa-cmp .dsa-chat-btn:hover{background:color-mix(in srgb,currentColor 7%,transparent);',
+        '  border-color:color-mix(in srgb,currentColor 32%,transparent);}',
+        '.dsa-cmp .dsa-chat-btn:active{background:color-mix(in srgb,currentColor 13%,transparent);}',
+        '.dsa-cmp .dsa-chat-btn:disabled{cursor:default;opacity:.72;}',
+        '.dsa-cmp .dsa-chat-btn:focus-visible{outline:2px solid color-mix(in srgb,currentColor 42%,transparent);outline-offset:2px;}',
+        '.dsa-cmp-icon{flex:0 0 auto;font-size:10px;line-height:1;color:color-mix(in srgb,#1e40af 72%,currentColor);}',
+        '.dsa-cmp-label{flex:0 0 auto;}',
+        '.dsa-cmp-name,.dsa-cmp-flash,.dsa-cmp-text{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;',
+        '  white-space:nowrap;}',
+        '.dsa-cmp-name{color:color-mix(in srgb,currentColor 58%,transparent);}',
+        '.dsa-cmp.tone-ok .dsa-chat-btn{color:color-mix(in srgb,#0f7a4a 74%,currentColor);',
+        '  border-color:color-mix(in srgb,#0f7a4a 34%,transparent);}',
+        '.dsa-cmp.tone-err .dsa-chat-btn{color:color-mix(in srgb,#b42c22 74%,currentColor);',
+        '  border-color:color-mix(in srgb,#b42c22 40%,transparent);}',
+        '.dsa-cmp.tone-run .dsa-chat-btn{color:color-mix(in srgb,#1e40af 74%,currentColor);',
+        '  border-color:color-mix(in srgb,#1e40af 30%,transparent);}',
+        '.dsa-cmp-dot{flex:0 0 auto;width:6px;height:6px;border-radius:50%;background:currentColor;',
+        '  animation:dsa-cmp-pulse 1.6s ease-in-out infinite;}',
+        '.dsa-cmp-spin{flex:0 0 auto;width:10px;height:10px;border-radius:50%;',
+        '  border:1.5px solid color-mix(in srgb,currentColor 26%,transparent);border-top-color:currentColor;',
+        '  animation:dsa-cmp-spin .7s linear infinite;}',
+        '@keyframes dsa-cmp-spin{to{transform:rotate(360deg)}}',
+        '@keyframes dsa-cmp-pulse{0%,100%{opacity:.4}50%{opacity:1}}',
+        '@media (prefers-reduced-motion:reduce){.dsa-cmp-dot,.dsa-cmp-spin{animation:none}.dsa-cmp-dot{opacity:.85}}',
+        // 会话尾巴上的工作台徽章同理：令牌拿不到时色点会变成看不见的透明点
+        '.dsa-cmp-tail{flex-wrap:nowrap;max-width:min(620px,92vw);overflow:hidden;white-space:nowrap;',
+        '  border:1px solid color-mix(in srgb,currentColor 12%,transparent);background:color-mix(in srgb,currentColor 4%,transparent);}',
+        '.dsa-cmp-tail>span{min-width:0;overflow:hidden;text-overflow:ellipsis;}',
+        '.dsa-cmp-tail .dsa-chat-btn{flex:0 0 auto;height:20px;padding:0 6px;background:transparent;color:inherit;',
+        '  border-color:color-mix(in srgb,currentColor 20%,transparent);}',
+        '.dsa-cmp-tail .dsa-chat-dot{background:color-mix(in srgb,currentColor 42%,transparent);}',
+        '.dsa-cmp-tail .dsa-chat-dot.ok{background:color-mix(in srgb,#0f7a4a 76%,currentColor);}',
+        '.dsa-cmp-tail .dsa-chat-dot.err{background:color-mix(in srgb,#b42c22 76%,currentColor);}',
+        '.dsa-cmp-tail .dsa-chat-dot.run{background:color-mix(in srgb,#1e40af 76%,currentColor);}',
         '.dsa-toolrow{display:flex;align-items:baseline;gap:7px;padding:3px 0;font-size:11.5px;color:var(--dsa-ink3);',
         '  min-width:0;}',
         '.dsa-tool-dot{width:5px;height:5px;border-radius:50%;background:var(--dsa-accent);flex:0 0 auto;}',
@@ -3523,7 +3643,10 @@
             return h(MaterialsDialog, {
               // 平台来自快照，弹窗自己拉的那份还没回来时也能用对的措辞
               platform: (snap && snap.materials && snap.materials.platform) || '',
-              // 挂载/识图/转码都会影响闸门：处理完让面板重新取一次快照，别等下一轮轮询
+              // 「交给会话」要投进这个项目的研究对话：路径与已绑定会话都从快照来
+              projectPath: (snap && snap.active && snap.active.path) || '',
+              sessionId: (snap && snap.active && snap.active.sessionId) || '',
+              // 挂载/识图都会影响闸门：处理完让面板重新取一次快照，别等下一轮轮询
               onChanged: function () { void load(true); },
               onCancel: function () { setDialog(null); }
             });
@@ -4180,12 +4303,9 @@
         var entriesState = useState({});
         var entries = entriesState[0];
         var setEntries = entriesState[1];
-        var limitState = useState('20');
-        var limit = limitState[0];
-        var setLimit = limitState[1];
-        var pagesState = useState('');
-        var pages = pagesState[0];
-        var setPages = pagesState[1];
+        var handingState = useState(false);
+        var handing = handingState[0];
+        var setHanding = handingState[1];
 
         var refresh = function () {
           return request('GET', '/materials').then(function (json) {
@@ -4196,7 +4316,7 @@
 
         useEffect(function () {
           void refresh();
-          // 识图/转码在后台跑：弹窗开着时每 4 秒刷一次进度
+          // 识图在后台跑：弹窗开着时每 4 秒刷一次进度
           var timer = setInterval(function () { void refresh(); }, 4000);
           return function () { clearInterval(timer); };
         }, []);
@@ -4225,8 +4345,26 @@
         var mounts = (data && data.mounts) || [];
         var derived = (data && data.derived) || [];
         var vision = (data && data.vision) || null;
-        var convert = (data && data.convert) || null;
-        var plan = (data && data.plan) || null;
+
+        // 交给会话：拿工作台生成的交办文案（挂载路径 + 只读约束 + 产物约定），投进研究对话
+        var handoff = function () {
+          setHanding(true);
+          setError('');
+          setNote('');
+          return request('GET', '/materials/card').then(function (card) {
+            if (!card || !card.ok) throw new Error((card && card.error) || '材料任务卡生成失败');
+            return deliverText(card.text, props.projectPath, props.sessionId);
+          }).then(function (res) {
+            setHanding(false);
+            if (res && res.warning) setNote(res.warning);
+            if (res && res.ok && !res.warning) setNote('已经把挂载清单和约束投进研究对话。');
+            return res;
+          }, function (err) {
+            setHanding(false);
+            setError(String((err && err.message) || err));
+            return null;
+          });
+        };
 
         var addRow = h(
           'div',
@@ -4386,6 +4524,8 @@
           : null;
 
         var visionSummary = vision && vision.summary;
+        // 识图不再是面板上的「一键跑」：跑不跑、跑哪些页由会话按任务决定（工具 data_analysis_vision）。
+        // 面板只留两件事——看得见进度、人来点头（human_verified 必须是人给的，不能让模型自己盖章）。
         var visionBlock = h(
           'div',
           { className: 'dsa-card', style: { padding: '10px 12px', marginTop: '10px' } },
@@ -4395,35 +4535,13 @@
               vision && vision.running ? '正在跑…' : '空闲')
           ),
           h('div', { className: 'dsa-hint', style: { marginTop: '4px' } },
-            '审计判为 image_only 的 PDF 与图片，交给多模态模型逐页转写；产物写进派生目录并挂回 data/。' +
-            '识图文本未经人工核对时，数字溯源闸门只会判「判不了」。'),
+            '审计判为 image_only 的 PDF 与图片才需要它。识图由工作台直连多模态模型逐页转写，' +
+            '产物写进派生目录并挂回 data/；未经人工核对的识别稿，数字溯源闸门只会判「判不了」。'),
           visionSummary && visionSummary.rows
             ? h('div', { className: 'dsa-hint', style: { marginTop: '4px' } },
                 '已识别 ' + visionSummary.pagesOk + ' 页 / ' + visionSummary.files + ' 份 · 失败 ' + visionSummary.pagesFailed + ' 页 · 人工已核 ' + visionSummary.pagesVerified + ' 页')
             : null,
           h('div', { className: 'dsa-inline', style: { marginTop: '8px', gap: '8px', flexWrap: 'wrap' } },
-            h('input', {
-              className: 'dsa-input',
-              style: { width: '90px' },
-              value: limit,
-              placeholder: '最多页数',
-              title: '本次最多识别多少页',
-              onChange: function (e) { setLimit(e.target.value); }
-            }),
-            h('input', {
-              className: 'dsa-input',
-              style: { width: '140px' },
-              value: pages,
-              placeholder: '只跑这些页，如 1-20',
-              onChange: function (e) { setPages(e.target.value); }
-            }),
-            h(Btn, {
-              variant: 'primary',
-              disabled: busy || Boolean(vision && vision.running),
-              onClick: function () {
-                void call('/materials/vision/run', { limit: Number(limit) || 20, pages: pages.trim() });
-              }
-            }, '开始识别'),
             vision && vision.running
               ? h(Btn, { variant: 'ghost', disabled: busy, onClick: function () { void call('/materials/vision/cancel', {}); } }, '停止')
               : null,
@@ -4436,37 +4554,28 @@
                     void call('/materials/vision/verify', { all: true });
                   }
                 }, '标记已核对')
-              : null
+              : null,
+            h('span', { className: 'dsa-hint' }, '要识别就直接跟 AI 说，或者用 data_analysis_vision 工具。')
           )
         );
 
-        var convertBlock = h(
+        var handoffBlock = h(
           'div',
           { className: 'dsa-card', style: { padding: '10px 12px', marginTop: '10px' } },
           h('div', { className: 'dsa-inline', style: { justifyContent: 'space-between', gap: '8px' } },
-            h('b', null, '旧版 Office 转码'),
-            h('span', { className: 'dsa-hint' }, convert && convert.running ? '正在跑…' : '空闲')
+            h('b', null, '交给会话处理'),
+            h('span', { className: 'dsa-hint' }, handing ? '正在投递…' : '只读挂载')
           ),
           h('div', { className: 'dsa-hint', style: { marginTop: '4px' } },
-            data && data.isWindows === false
-              ? 'macOS/Linux 没有桌面 Office COM，这条通道不适用：请用本机 Office/WPS 打开原文件另存为 docx/xlsx/pptx，放回原目录后点「重扫」。'
-              : (convert && convert.office
-                ? (convert.office.ok
-                  ? '本机 Office 可用'
-                  : '本机 Office 不可用：' + (convert.office.error || convert.office.detail || '未知原因')
-                    + (convert.office.hint ? ' —— ' + convert.office.hint : ''))
-                : 'doc/xls/ppt 技能读不了文本；Windows 上用桌面 Office 另存为 docx/xlsx/pptx。')),
-          convert && convert.summary && convert.summary.rows
-            ? h('div', { className: 'dsa-hint', style: { marginTop: '4px' } },
-                '已转 ' + convert.summary.converted + ' 份 · 失败 ' + convert.summary.failed + ' 份')
-            : null,
-          h('div', { className: 'dsa-inline', style: { marginTop: '8px', gap: '8px' } },
-            h(Btn, { variant: 'ghost', disabled: busy || (data && data.isWindows === false), onClick: function () { void call('/materials/office', {}); } }, '查本机 Office'),
+            '资料已经挂在 data/ 下，全程只读。怎么解析、要不要识图、doc 要不要转，交给 DSH 会话按任务决定；' +
+            '工作台只管两件事：不许改原件，识别稿写进派生目录并记账。'),
+          h('div', { className: 'dsa-inline', style: { marginTop: '8px', gap: '8px', flexWrap: 'wrap' } },
             h(Btn, {
               variant: 'primary',
-              disabled: busy || Boolean(convert && convert.running) || (data && data.isWindows === false),
-              onClick: function () { void call('/materials/convert/run', { limit: Number(limit) || 10 }); }
-            }, '开始转码')
+              disabled: busy || handing || !mounts.length,
+              onClick: function () { void handoff(); }
+            }, '让 AI 处理这些材料'),
+            !mounts.length ? h('span', { className: 'dsa-hint' }, '先挂一个材料目录') : null
           )
         );
 
@@ -4494,7 +4603,7 @@
             mountRows || h('div', { className: 'dsa-empty' }, '还没有挂载任何材料目录'),
             derivedLine,
             visionBlock,
-            convertBlock
+            handoffBlock
           )
         );
       }
