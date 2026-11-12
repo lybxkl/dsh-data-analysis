@@ -91,6 +91,17 @@ report('class 都有样式', missingClasses.length === 0, missingClasses.length 
 const unusedClasses = [...definedClasses].filter((name) => !usedClasses.has(name)).sort();
 if (unusedClasses.length) process.stdout.write('    （定义了但没用到的 class：' + unusedClasses.join('、') + '）\n');
 
+// window.confirm 是宿主原生对话框：样式不可控，和自绘的二次确认口径不一致
+// （先剥掉注释再判，否则解释「为什么不用它」的那行注释会把自己判红）
+const codeOnly = client
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/(^|[^:])\/\/.*$/gm, '$1');
+report(
+  '破坏性动作不用 window.confirm',
+  !/window\.confirm/.test(codeOnly),
+  /window\.confirm/.test(codeOnly) ? '还有地方在用 window.confirm' : '全走弹窗内确认条',
+);
+
 /* ---------------- 3. 客户端 API 调用 vs 路由 ---------------- */
 
 const clientCalls = new Set();
@@ -99,6 +110,13 @@ for (const match of client.matchAll(/request\(\s*'(GET|POST)'\s*,\s*'([^']+)'/g)
 }
 for (const match of client.matchAll(/request\(\s*"(GET|POST)"\s*,\s*'([^']+)'/g)) {
   clientCalls.add(match[1] + ' ' + match[2]);
+}
+// 材料库弹窗包了一层 call(path, body)（内部 request('POST', path)）：路径是变量，
+// 上面两条正则扫不到；资源补丁也好、路由改名也好，漏掉这些就等于没测。
+let helperCalls = 0;
+for (const match of client.matchAll(/\bcall\(\s*'(\/[^']*)'/g)) {
+  clientCalls.add('POST ' + match[1]);
+  helperCalls += 1;
 }
 
 // routes.js 里 path: `${basePath}/api/xxx` 与 method
@@ -127,7 +145,12 @@ function matchesRoute(call) {
 }
 
 const deadCalls = [...clientCalls].filter((call) => !matchesRoute(call)).sort();
-report('客户端调用的接口都存在', deadCalls.length === 0, deadCalls.length ? deadCalls.join('、') : `${clientCalls.size} 个调用都能对上`);
+report(
+  '客户端调用的接口都存在',
+  deadCalls.length === 0,
+  deadCalls.length ? deadCalls.join('、') : `${clientCalls.size} 个调用都能对上（含 ${helperCalls} 个经 call() 的）`,
+);
+report('材料库的 call() 调用被覆盖到', helperCalls > 0, helperCalls ? `${helperCalls} 个` : '一个都没扫到，检查 call() 的写法是否变了');
 
 /* ---------------- 4. 工具名 ---------------- */
 

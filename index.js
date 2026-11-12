@@ -2,7 +2,7 @@
  * @local/dsh-data-analysis —— 实证研究工作台（Host 半片）
  *
  * 职责：
- *   1. 登记一个 skill 包（只读），把它 scripts/ 下的脚本组织成 8 个阶段；
+ *   1. 登记一个 skill 包（只读），把它 scripts/ 下的脚本组织成 9 个阶段；
  *   2. 按阶段起子进程跑脚本，日志落项目的 runs/，退出状态如实记录；
  *   3. 只读解析产物（sample_flow / manifest / coef / number_issues），把闸门拆成
  *      pass / fail / unjudged 三态——判不了就说判不了；

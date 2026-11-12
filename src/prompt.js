@@ -43,7 +43,7 @@ const LINES = [
   "- **识图**：`data_analysis_vision` 先 action=plan 出「待识别页数」（只数页，零模型调用），再用 action=run 跑（limit/pages 控制本次上限，`pages=\"1-20\"` 可试跑）。识别稿落在 `<台账目录>\\sources-cache\\<源>\\derived\\`，并挂成 `data/<挂载名>__识别稿/`。每条结果记页图 sha256、模型、提示词版本，默认 `human_verified=false`。模型不能看图时会明确报错，**不会**静默降级成纯文本。",
   "- 识别稿是「机器转写」，不是原文：`human_verified=false` 的页一旦被数字溯源或质检记录引用，`qa-vision` 闸门只会给出 unjudged。交付前必须逐页核对，核完用 action=verify 打勾（`all:true` 表示全部核对过）。",
   "- **待转换**：doc/xls/ppt 下游脚本读不出文本。工作台不代做转换——让用户（或你自己）在 Office/WPS 里另存为 docx/xlsx/pptx，放回原目录后重扫材料；不要假装能转，也不要为了绕过去自己写解析器。",
-  "- 挂载、识图、转码都动过 `data/` 之后**必须重跑审计**：`audit-freshness` 与 `materials-provenance-cover` 会对不上，闸门会拦。",
+  "- 挂载、识图、解挂都动过 `data/` 之后**必须重跑审计**：`audit-freshness` 与 `materials-provenance-cover` 会对不上，闸门会拦。转换（doc/xls/ppt 另存为）是你或用户做的，做完同样要重扫材料并重跑审计。",
   "",
   "### 与 LLM 的分工",
   "- 工作台负责「跑、看、拦」；写作由 `data_analysis_draft` 起草，**人**核对后才写进交付物。",

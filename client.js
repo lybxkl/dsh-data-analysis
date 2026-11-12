@@ -165,7 +165,7 @@
         chatUnavailable: 'DSH 会话服务不可用（宿主没暴露 sessions）',
         chatNoProject: '先打开一个项目',
         nextStep: '运行下一步',
-        nextAllDone: '八个阶段都已完成',
+        nextAllDone: '所有阶段都已完成',
         nextManual: '下一步要人工完成',
         nextStarting: '启动中…',
         nextStarted: '已启动',
@@ -397,7 +397,10 @@
         if (!sessions || typeof sessions.create !== 'function') {
           return Promise.reject(new Error(t('chatUnavailable')));
         }
-        return sessions.create({ cwd: cwd });
+        // 没有项目目录时不要塞一个空串给宿主：那会被当成非法 cwd，直接开默认目录的会话
+        var where = typeof cwd === 'string' ? cwd.trim() : '';
+        // 宿主返回的可能是 id，也可能是 Promise<id>：统一成 Promise，调用方一律 .then
+        return Promise.resolve(sessions.create(where ? { cwd: where } : {}));
       }
 
       function persistSession(sessionId) {
@@ -517,9 +520,10 @@
 
       /**
        * 把一段文字投给研究对话：有绑定就复用，没有就建会话 → prompt(queue) → 绑定 → 打开原生对话。
-       * 任一步失败都如实抛回面板，不静默换会话、不重试。
+       * `shouldOpen` 让调用方在弹窗已关闭时不要再把人拽进对话；任一步失败都如实抛回面板。
        */
-      function deliverText(text, projectDir, boundSessionId) {
+      function deliverText(text, projectDir, boundSessionId, shouldOpen) {
+        var open = typeof shouldOpen === 'function' ? shouldOpen : function () { return true; };
         var idPromise = boundSessionId ? Promise.resolve(boundSessionId) : createSession(projectDir);
         return idPromise.then(function (sessionId) {
           return ensureRef(sessionId).then(function (ref) {
@@ -529,11 +533,11 @@
                 throw new Error('投递失败：' + (detail || '宿主拒绝了这条消息'));
               }
               return persistSession(sessionId).then(function (json) {
-                openConversation(sessionId);
+                if (open()) openConversation(sessionId);
                 return { ok: true, sessionId: sessionId, state: json.state };
               }).catch(function (error) {
                 // 消息已经发出去了：绑定失败不能谎报「投递失败」，照常进对话并如实提示。
-                openConversation(sessionId);
+                if (open()) openConversation(sessionId);
                 return {
                   ok: true,
                   sessionId: sessionId,
@@ -756,7 +760,9 @@
         }
 
         var running = next.status === 'running';
-        var runnable = Boolean(next.script) && !running;
+        // 只有「未开始」才直接从输入行起跑：被拦住 / 待人工要先看清拦截原因，
+        // 否则点下去只会收到一句 409，还得再来一次面板。这两种状态点开工作台定位。
+        var runnable = Boolean(next.script) && next.status === 'todo';
 
         var click = function click() {
           if (phase === 'starting') return;
@@ -816,7 +822,7 @@
 
         return h(
           'span',
-          { className: 'dsa-cmp' + (view.tone ? ' tone-' + view.tone : '') },
+          { className: 'dsa-cmp' + (view.tone ? ' tone-' + view.tone : ''), role: 'status', 'aria-live': 'polite' },
           h(
             'button',
             {
@@ -1419,7 +1425,11 @@
         '.dsa-forget-facts{margin-top:10px;padding:10px 12px;border-radius:var(--dsa-r2);background:var(--dsa-card2);',
         '  border:1px solid var(--dsa-line);font-size:12px;color:var(--dsa-ink2);line-height:1.7;}',
         '.dsa-ack{display:flex;align-items:flex-start;gap:8px;margin-top:12px;font-size:12.5px;color:var(--dsa-ink);cursor:pointer;}',
-        '.dsa-ack input{margin:2px 0 0;flex:0 0 auto;}'
+        '.dsa-ack input{margin:2px 0 0;flex:0 0 auto;}',
+        /* 弹窗内的二次确认条：破坏性动作不走 window.confirm */
+        '.dsa-ask{display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:8px 10px;',
+        '  border:1px solid var(--dsa-line2);border-radius:var(--dsa-r2);background:var(--dsa-warnsoft);}',
+        '.dsa-ask-t{flex:1 1 auto;font-size:12.5px;line-height:1.5;color:var(--dsa-ink);}'
       ].join('');
 
       function installStyles() {
@@ -2223,7 +2233,7 @@
             .then(function () {
               setBusy(false);
             });
-        }, [snap, projectSession, chatRunning, doOpenChat]);
+        }, [snap, projectSession, chatRunning]);
 
         var reviewNow = useCallback(function () {
           var target = null;
@@ -4306,6 +4316,22 @@
         var handingState = useState(false);
         var handing = handingState[0];
         var setHanding = handingState[1];
+        // 破坏性动作走弹窗内确认条：window.confirm 是宿主原生对话框，样式不可控、
+        // 在 Electron 里还可能被 webview 吞掉；这里和「移除项目」的二次确认口径保持一致
+        var askState = useState(null);
+        var ask = askState[0];
+        var setAsk = askState[1];
+        var confirmThen = function (text, run) {
+          setAsk({ text: text, run: run });
+        };
+        // 投递是异步的：弹窗关了就不该再 setState / 把人拽进对话
+        var aliveRef = useRef(true);
+        useEffect(function () {
+          aliveRef.current = true;
+          return function () {
+            aliveRef.current = false;
+          };
+        }, []);
 
         var refresh = function () {
           return request('GET', '/materials').then(function (json) {
@@ -4353,15 +4379,22 @@
           setNote('');
           return request('GET', '/materials/card').then(function (card) {
             if (!card || !card.ok) throw new Error((card && card.error) || '材料任务卡生成失败');
-            return deliverText(card.text, props.projectPath, props.sessionId);
+            // 弹窗已经关掉就别再把人拽进对话：投递本身照常完成
+            return deliverText(card.text, props.projectPath, props.sessionId, function () { return aliveRef.current; });
           }).then(function (res) {
+            if (!aliveRef.current) return res;
             setHanding(false);
-            if (res && res.warning) setNote(res.warning);
+            // 绑定失败在原生的对话框里是红字（那边会把会话弄丢），这里不能降级成灰色提示
+            if (res && res.warning) setError(res.warning);
             if (res && res.ok && !res.warning) setNote('已经把挂载清单和约束投进研究对话。');
+            // 会话可能刚被创建/绑定：让面板重新取一次快照，否则下一次投卡会再建一条会话
+            if (props.onChanged) props.onChanged();
             return res;
           }, function (err) {
-            setHanding(false);
-            setError(String((err && err.message) || err));
+            if (aliveRef.current) {
+              setHanding(false);
+              setError(String((err && err.message) || err));
+            }
             return null;
           });
         };
@@ -4431,11 +4464,12 @@
                       disabled: busy,
                       onClick: function () {
                         var used = src.usedBy.length;
-                        var ask = used
-                          ? '这个目录还被 ' + used + ' 个项目挂着，仍然要从材料库删掉吗？（磁盘上的文件不会动）'
+                        var question = used
+                          ? '这个目录还被 ' + used + ' 个项目挂着，仍然要从材料库删掉吗？（磁盘上的文件不会动，会先把这些挂载摘掉）'
                           : '从材料库删掉「' + src.label + '」？（磁盘上的文件不会动）';
-                        if (!window.confirm(ask)) return;
-                        void call('/materials/remove', { id: src.id, force: Boolean(used) });
+                        confirmThen(question, function () {
+                          void call('/materials/remove', { id: src.id, force: Boolean(used) });
+                        });
                       }
                     }, '删除')
                   )
@@ -4496,8 +4530,9 @@
                       variant: 'ghost',
                       disabled: busy,
                       onClick: function () {
-                        if (!window.confirm('把 data/' + mount.as + ' 的挂载摘掉？（材料原件不动）')) return;
-                        void call('/materials/unmount', { as: mount.as });
+                        confirmThen('把 data/' + mount.as + ' 的挂载摘掉？（材料原件不动）', function () {
+                          void call('/materials/unmount', { as: mount.as });
+                        });
                       }
                     }, '摘下'),
                     h(Btn, {
@@ -4512,8 +4547,9 @@
                             setError('逐份比对没通过，已停止、没有删任何文件；看报告里是哪几份');
                             return;
                           }
-                          if (!window.confirm('逐份 md5 全部一致。把 data/' + mount.as + ' 里的副本删掉、换成挂载？')) return;
-                          void call('/materials/migrate', { sourceId: mount.sourceId, entries: body.entries, as: mount.as, apply: true });
+                          confirmThen('逐份 md5 全部一致。把 data/' + mount.as + ' 里的副本删掉、换成挂载？', function () {
+                            void call('/materials/migrate', { sourceId: mount.sourceId, entries: body.entries, as: mount.as, apply: true });
+                          });
                         });
                       }
                     }, '副本换挂载')
@@ -4550,8 +4586,9 @@
                   variant: 'ghost',
                   disabled: busy,
                   onClick: function () {
-                    if (!window.confirm('确认这些识别稿你已经逐页对照过原件了？打勾之后 qa-vision 才可能通过。')) return;
-                    void call('/materials/vision/verify', { all: true });
+                    confirmThen('确认这些识别稿你已经逐页对照过原件了？打勾之后 qa-vision 才可能通过。', function () {
+                      void call('/materials/vision/verify', { all: true });
+                    });
                   }
                 }, '标记已核对')
               : null,
@@ -4591,6 +4628,21 @@
             : '材料留在你自己的目录里，工作台只记地址；挂到项目 data/ 下是目录联接（macOS/Linux 为镜像目录），不复制文件。' },
           error ? h('div', { className: 'dsa-error', style: { marginBottom: '10px' } }, error) : null,
           note ? h('div', { className: 'dsa-hint', style: { marginBottom: '10px' } }, note) : null,
+          ask
+            ? h('div', { className: 'dsa-ask' },
+              h('span', { className: 'dsa-ask-t' }, ask.text),
+              h(Btn, {
+                variant: 'primary',
+                disabled: busy,
+                onClick: function () {
+                  var run = ask.run;
+                  setAsk(null);
+                  if (run) run();
+                }
+              }, '确认'),
+              h(Btn, { variant: 'ghost', onClick: function () { setAsk(null); } }, '取消')
+            )
+            : null,
           h('div', { style: { maxHeight: '58vh', overflowY: 'auto', paddingRight: '2px' } },
             addRow,
             h('div', { className: 'dsa-rail-h', style: { padding: '6px 0' } }, '材料源'),

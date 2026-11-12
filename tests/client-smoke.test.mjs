@@ -429,7 +429,7 @@ scenario('暗色', { theme: 'dark' }, (tree) => {
   check(tree && tree.props && tree.props['data-dsa-theme'] === 'dark', '根节点带暗色标记');
 });
 
-/* 6. 七个弹窗都能开（用真实形状的入参，别拿半截数据骗自己） */
+/* 6. 八个弹窗都能开（用真实形状的入参，别拿半截数据骗自己） */
 const dialogFixtures = {
   create: { kind: 'create' },
   open: { kind: 'open' },

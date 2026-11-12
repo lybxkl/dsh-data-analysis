@@ -383,6 +383,16 @@ export class Vision {
     return this.state ? { ...this.state } : { running: false };
   }
 
+  /** 能不能看图：只问一次，不改 state（后台任务启动前用它先把失败挡在门口）。 */
+  async capability() {
+    if (!this.assistant) return { ok: false, error: '模型服务没有初始化' };
+    if (typeof this.assistant.available === 'function') {
+      const gate = this.assistant.available() || { ok: false, reason: '模型服务不可用' };
+      if (!gate.ok) return { ok: false, error: gate.reason };
+    }
+    return this.assistant.imageCapability();
+  }
+
   cancel() {
     if (!this.controller) return { ok: false, error: '没有正在跑的识图任务' };
     try {
@@ -421,47 +431,55 @@ export class Vision {
    * 真跑：逐份渲染 → 逐页识别 → 落派生文件 → 记账。
    * limit 是本次最多处理「页」数；pageSpec 是页范围（"1-20"），试跑用。
    */
-  async run({ projectRoot, plan, limit = 40, pageSpec = '', signal, onTick } = {}) {
+  async run({ projectRoot, plan, limit = 40, pageSpec = '', signal, onTick, capability: precap = null } = {}) {
     if (this.state?.running) return { ok: false, error: '已经有一个识图任务在跑' };
-    // 先看模型通道是否可用；没有 available() 的实现不拦，交给 imageCapability 给准确原因
-    if (typeof this.assistant?.available === 'function') {
-      const gate = this.assistant.available() || { ok: false, reason: '模型服务不可用' };
-      if (!gate.ok) return { ok: false, error: gate.reason };
-    }
 
-    const capability = await this.assistant.imageCapability();
-    if (!capability.ok) return { ok: false, error: capability.error, capability };
-
-    this.controller = new AbortController();
+    // 重入守卫必须立刻生效：先占住 state 与 controller，再去探测模型能力（那一步可能要等几秒）
+    const controller = new AbortController();
     if (signal) {
       try {
-        signal.addEventListener('abort', () => this.controller.abort(), { once: true });
+        signal.addEventListener('abort', () => controller.abort(), { once: true });
       } catch {
         /* ignore */
       }
     }
-
-    const pythonPath = String(this.getConfig()?.pythonPath || DEFAULT_PYTHON);
-    this.sweepJobs();
-    const work = this.workDir();
-    const tmpRoot = path.join(work, 'pages');
+    this.controller = controller;
     const state = {
       running: true,
       startedAt: new Date().toISOString(),
-      provider: capability.provider,
-      model: capability.model,
-      modality: capability.modality,
+      provider: '',
+      model: '',
+      modality: 'unknown',
       totalPages: plan?.totals?.todoPages || 0,
       totalFiles: plan?.totals?.todoFiles || 0,
       donePages: 0,
       failedPages: 0,
       files: 0,
-      current: '',
+      current: '检查模型能不能看图…',
       limit,
       error: '',
       cancelled: false,
     };
     this.state = state;
+
+    const capability = precap || await this.capability();
+    if (!capability.ok) {
+      state.running = false;
+      state.error = capability.error || '当前模型不能看图';
+      state.current = '';
+      state.finishedAt = new Date().toISOString();
+      this.controller = null;
+      return { ok: false, error: state.error, capability };
+    }
+    state.provider = capability.provider;
+    state.model = capability.model;
+    state.modality = capability.modality;
+    state.current = '';
+
+    const pythonPath = String(this.getConfig()?.pythonPath || DEFAULT_PYTHON);
+    this.sweepJobs();
+    const work = this.workDir();
+    const tmpRoot = path.join(work, 'pages');
     const pending = [];
     let budget = Math.max(1, Number(limit) || 40);
 

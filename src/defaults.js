@@ -30,7 +30,7 @@ export const DEFAULT_CONFIG = {
 export const SKILL_PACKAGE = 'empirical-research-pipeline';
 
 /**
- * 8 个阶段。args 是默认参数模板；{dataDir}/{outputDir}/{projectRoot} 运行时替换。
+ * 9 个阶段。args 是默认参数模板；{dataDir}/{outputDir}/{projectRoot} 运行时替换。
  * script 为 null 表示这一步由人/模型完成（例如写 scope、拼分析宽表），面板只做验收。
  */
 export const STAGE_DEFS = [

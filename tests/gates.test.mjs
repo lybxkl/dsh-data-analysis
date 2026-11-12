@@ -227,6 +227,21 @@ check('识图未核对但没被引用 → 仍然 unjudged（未核不是通过�
   assert.equal(byId('qa-vision').status, 'unjudged');
 });
 
+check('识图日志全是失败行 → qa-vision unjudged（不是「都核对过了」）', () => {
+  const seed = {
+    'output/audit/vision_log.csv': 'rel_path,page,input_sha256,model,prompt_version,at,tokens,status,human_verified,derived_rel,error\r\n'
+      + '扫描件/笔录.pdf,1,,deepseek,vision-v1,2026-11-12T01:00:00Z,0,error,false,,模型返回了占位文本\r\n'
+      + '扫描件/笔录.pdf,2,,deepseek,vision-v1,2026-11-12T01:00:01Z,0,error,false,,渲染失败\r\n',
+  };
+  const root = makeProject(seed);
+  const { byId } = judge(root, {
+    artifacts: { verify: { file: 'output/verify/number_issues.csv', counts: { error: 0, input: 0, warning: 0, info: 0 } } },
+  });
+  const g = byId('qa-vision');
+  assert.equal(g.status, 'unjudged', g.detail);
+  assert.match(g.detail, /没有一行成功/);
+});
+
 check('识图全部人工核对 → qa-vision pass', () => {
   const root = makeProject(visionSeed('true'));
   const { byId } = judge(root, {

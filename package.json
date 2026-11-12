@@ -43,6 +43,7 @@
     "src",
     "assets",
     "locale",
+    "tests",
     "cordis.patch.yml",
     "README.md"
   ],

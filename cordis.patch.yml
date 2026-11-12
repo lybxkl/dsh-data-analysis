@@ -2,6 +2,7 @@
 #
 # config 是唯一可调入口（升级插件不会覆盖这里）。
 #   skillRoot     技能仓库根目录（只读）。插件只读取、绝不修改/复制/拆解 skill。
+#                 留空 = 自动探测常见安装位置（~/.agents/skills 等），不要在这里写死某台机器的路径。
 #   dataDir       插件自己的状态目录（projects/runs 台账）；留空 = <profile>/data-analysis
 #   pythonPath    运行脚本用的解释器（默认 python；可写绝对路径）
 #   maxRuns       每个项目保留的运行记录条数（默认 60）
@@ -10,7 +11,7 @@
     - id: data-analysis
       name: '@local/dsh-data-analysis'
       config:
-        skillRoot: 'F:\测试文件\SPSS-Style-Charting-Skill'
+        skillRoot: ''
         dataDir: ''
         pythonPath: python
         maxRuns: 60

@@ -11,7 +11,6 @@ import path from 'node:path';
 import {
   DEFAULT_CONFIG,
   DEFAULT_PYTHON,
-  SKILL_CANDIDATES,
   SKILL_PACKAGE,
   STAGE_DEFS,
   STAGE_BY_ID,
@@ -43,7 +42,6 @@ import {
   removeSource as dropSource,
   rescanSource,
   safeAlias,
-  scanSourceDir,
   unmountOne,
   verifyMounts,
   writeProvenance,
@@ -59,6 +57,14 @@ import { isLink, readMountMarker, removeTree } from './platform.js';
 
 const EMPTY_SKILL = { ok: false, reason: '未配置 skillRoot', root: '', packageDir: '', version: '', sha256: '', scripts: [] };
 
+/** 交办文案里给「状态不对的挂载」写一句人话，别让会话把旧副本/空目录当源文件。 */
+const CARD_MOUNT_NOTE = {
+  'not-link': '旧副本，不是挂载',
+  'missing-link': '挂载不见了',
+  'missing-target': '源目录不在了',
+  retargeted: '挂载指到了别的目录',
+};
+
 /**
  * 脚本找不到时，把「为什么找不到」说清楚。
  *
@@ -73,6 +79,18 @@ function scriptErrorMessage(stage, scriptRel, found, projectRoot, skill) {
   return `脚本不存在：${scriptRel}（${scope} 里都没有；阶段脚本请写相对路径，如 scripts/auto_stats.py）`;
 }
 
+/**
+ * 源内相对路径规整：统一正斜杠、去首尾斜杠。
+ * 返回 null 表示这个路径不能用（`.`/`..` 之类会跳出材料目录的段）。
+ */
+function normalizeEntry(value) {
+  const rel = String(value || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+  if (!rel) return '';
+  const parts = rel.split('/');
+  if (parts.some((part) => part === '..' || part === '.')) return null;
+  return rel;
+}
+
 export class Workbench {
   constructor({ getConfig, store, runner, onChange, materials }) {
     this.getConfig = getConfig;
@@ -84,6 +102,7 @@ export class Workbench {
     this.preflightState = { value: null, at: 0, promise: null };
     // 材料库的外部依赖：识图执行器（只被工具显式调用，不做自动流水线）+ 派生缓存目录
     this.materials = materials || null;
+    this.summaryCache = null;
   }
 
   /* ------------------------------ 技能包 ------------------------------ */
@@ -486,17 +505,56 @@ export class Workbench {
     return { ...result, receipt: receiptLine(result.source?.scan) };
   }
 
-  removeSource(id, { force = false } = {}) {
+  async removeSource(id, { force = false } = {}) {
     const projects = (this.store.get().projects || [])
       .map((item) => {
         const read = readProject(item.path);
         return read.ok ? { path: item.path, name: item.name, project: read.project } : null;
       })
       .filter(Boolean);
-    const result = dropSource(this.store, id, { projects, force });
+    // 先查引用：force 不是「留一堆悬空引用」，而是「先把这些挂载摘掉，再删库条目」
+    const refs = [];
+    for (const project of projects) {
+      const materials = readMaterials(project.project);
+      for (const mount of materials.mounts) {
+        if (mount.sourceId === id) refs.push({ project: project.path, name: project.name, as: mount.as });
+      }
+    }
+    if (refs.length && !force) {
+      return {
+        ok: false,
+        error: `还有 ${refs.length} 处挂载在用它（${refs.map((item) => item.as).join('、')}），先解挂再删`,
+        refs,
+      };
+    }
+    const detached = [];
+    for (const project of projects) {
+      const materials = readMaterials(project.project);
+      const mine = materials.mounts.filter((mount) => mount.sourceId === id);
+      if (!mine.length) continue;
+      for (const mount of mine) {
+        // 只删工作台自己建的联接/镜像；真实目录 unmountOne 会拒绝并报错
+        const run = await unmountOne({ projectRoot: project.path, mount });
+        if (!run.ok) {
+          return {
+            ok: false,
+            error: `${project.name || project.path} 的 ${mount.as} 摘不掉：${(run.errors || []).join('；') || '未知原因'}`,
+            refs,
+            detached,
+          };
+        }
+      }
+      this.saveMaterials(project.path, {
+        version: 1,
+        mounts: materials.mounts.filter((mount) => mount.sourceId !== id),
+      });
+      this.refreshMaterials(project.path);
+      detached.push({ project: project.path, name: project.name, as: mine.map((mount) => mount.as) });
+    }
+    const result = dropSource(this.store, id, { projects: [], force: true });
     if (!result.ok) return result;
     this.onChange({ kind: 'sources' });
-    return { ...result, sources: this.sources() };
+    return { ...result, detached, sources: this.sources() };
   }
 
   materialsOf() {
@@ -547,36 +605,50 @@ export class Workbench {
     if (!mounts.length) return { ok: false, error: '这个项目还没有挂载任何材料目录' };
     const byId = new Map(this.sources().map((item) => [item.id, item]));
     const name = (active.project && active.project.name) || active.path;
+    const broken = mounts.filter((item) => item.status !== 'ok');
     const lines = [];
     lines.push(`[材料读取] 项目「${name}」的资料已经挂到 data/ 下，全程只读。`);
     lines.push('');
+    // 状态不对的挂载必须点名：不然会话会把「真实目录里的旧副本」或空目录当成源文件读
+    if (broken.length) {
+      lines.push(`注意：有 ${broken.length} 条挂载状态异常（见下面标注），先修挂载再读，否则读到的可能是旧副本或空目录。`);
+      lines.push('');
+    }
     lines.push('挂载（都在项目 data/ 下，指向用户自己的目录，不复制文件）：');
     for (const mount of mounts) {
       const source = byId.get(mount.sourceId);
-      const files = Number(source && source.scan && source.scan.files);
-      const where = source ? `${source.path}${mount.entry ? ' / ' + mount.entry : ''}` : '（材料源已删除，这条挂载失效）';
-      lines.push(`- data/${mount.as} → ${where}${Number.isFinite(files) ? `（${files} 个文件）` : ''}`);
+      // 老台账里源还在但没扫过：Number(null) 是 0，会写成「（0 个文件）」骗人
+      const scanned = source && source.scan ? Number(source.scan.files) : NaN;
+      const files = Number.isFinite(scanned) ? scanned : null;
+      const where = source ? `${source.path}${mount.entry ? ' / ' + mount.entry : ''}` : '（材料源已删除）';
+      const target = mount.resolved || mount.target;
+      const note = mount.status === 'ok' ? '' : `［${CARD_MOUNT_NOTE[mount.status] || mount.status}］`;
+      lines.push(`- data/${mount.as} → ${where}${files !== null ? `（${files} 个文件）` : ''}${note}`);
+      // not-link 是项目内的真实目录，报「实际指向」只会让人以为它连着别处
+      if (mount.status !== 'ok' && mount.status !== 'not-link' && target) lines.push(`  实际指向：${target}`);
     }
     const derived = state.derived || [];
     if (derived.length) {
       lines.push('');
-      lines.push('已有的派生稿（此前的识图/转码产物，未人工核对的不算数）：');
+      lines.push('已有的派生稿（此前的识图产物，未人工核对的不算数）：');
       for (const item of derived) lines.push(`- data/${item.mountName}（${item.files} 份）`);
     }
     lines.push('');
     lines.push('约束：');
     lines.push('1. 只读：不要修改、移动、删除用户原始资料目录里的任何文件；data/ 下这些目录就是指向源目录的挂载，往里写等于改原件。');
+    lines.push('   （标了「旧副本」的那条不是挂载，是项目内的复制品——也不要改，它会和源文件分叉。）');
     lines.push('2. 派生只走派生目录：需要转写时先跑 data_analysis_vision（action=plan 只数页不花 token，确认后再 action=run），产物会自动落到 data/<挂载名>__识别稿/ 并记账；不要手写到别处。');
     lines.push('3. 不要自己把页图读进上下文：纯文本模型会把图片静默换成占位行，等于白跑一遍；识图交给工作台直连模型。');
     lines.push('4. doc/xls/ppt 下游脚本读不了文本：转换由你或用户在 Office/WPS 里另存为 docx/xlsx/pptx 后重扫材料；工作台不代转。');
     lines.push('5. 处理完重跑 audit：data/ 变了指纹就变，audit-freshness 会拦住后续阶段。');
     lines.push('');
     lines.push('先跑 data_analysis_status 看当前进度，再决定从哪个阶段继续。');
-    return { ok: true, text: lines.join('\n'), mounts: mounts.length, project: active.path };
+    return { ok: true, text: lines.join('\n'), mounts: mounts.length, broken: broken.length, project: active.path };
   }
 
   /** 重写留痕文件：provenance.csv / mounts.json / selection.csv。 */
   refreshMaterials(projectRoot) {
+    this.invalidateSummary();
     const read = readProject(projectRoot);
     if (!read.ok) return { ok: false, error: read.error };
     const materials = readMaterials(read.project);
@@ -599,9 +671,12 @@ export class Workbench {
       return { ok: false, error: '这个目录在项目目录里面：项目自己的 data/ 本来就能读，不需要再挂一次' };
     }
 
-    const picked = (Array.isArray(entries) ? entries : [])
-      .map((item) => String(item).replace(/\\/g, '/').replace(/^\/+|\/+$/g, ''))
-      .filter(Boolean);
+    const picked = [];
+    for (const raw of Array.isArray(entries) ? entries : []) {
+      const rel = normalizeEntry(raw);
+      if (rel === null) return { ok: false, error: `「${raw}」不是材料目录里的路径（不能带 .. 或 .）` };
+      if (rel) picked.push(rel);
+    }
     const plan = [];
     if (!picked.length) {
       plan.push({ entry: '', as: safeAlias(as || source.label || path.basename(source.path)) });
@@ -747,10 +822,13 @@ export class Workbench {
   visionStatus() {
     const active = this.active();
     const vision = this.materialServices().vision;
+    const task = vision?.status?.() || { running: false };
     return {
       ok: true,
-      running: Boolean(vision?.status?.().running),
-      task: vision?.status?.() || { running: false },
+      running: Boolean(task.running),
+      task,
+      // 后台任务失败不该只在日志里：面板/工具要看得到原因
+      error: this.visionError || task.error || '',
       summary: active.ok ? visionSummary(active.path) : null,
     };
   }
@@ -768,8 +846,11 @@ export class Workbench {
     if (!(planned.items || []).length) {
       return { ok: false, error: '没有待识别的文件：要么审计还没跑（先跑 audit），要么没有扫描件 PDF', plan: planned };
     }
+    // 先把「模型不能看图」挡在门口：不然数页那步白跑，后台任务还会静默失败
+    const capability = await vision.capability();
+    if (!capability.ok) return { ok: false, error: capability.error || '当前模型不能看图', capability, plan: planned };
     const counted = await vision.countPages(planned);
-    const args = { projectRoot: planned.projectRoot, plan: counted, limit, pageSpec: pages };
+    const args = { projectRoot: planned.projectRoot, plan: counted, limit, pageSpec: pages, capability };
     const brief = {
       files: (counted.items || []).length,
       pages: counted.totals?.pages ?? null,
@@ -782,13 +863,18 @@ export class Workbench {
       if (result.ok) await this.afterVision(planned.projectRoot);
       return { ...result, plan: brief };
     }
+    this.visionError = '';
     this.visionJob = vision
       .run(args)
       .then(async (result) => {
         if (result.ok) await this.afterVision(planned.projectRoot);
+        else this.visionError = result.error || '识图失败';
         return result;
       })
-      .catch((error) => ({ ok: false, error: error?.message || String(error) }));
+      .catch((error) => {
+        this.visionError = error?.message || String(error);
+        return { ok: false, error: this.visionError };
+      });
     return { ok: true, started: true, plan: brief, note: '后台在跑，用 vision-status 看进度；不要重复点开始' };
   }
 
@@ -828,9 +914,12 @@ export class Workbench {
     const source = findSource(this.store, sourceId);
     if (!source) return { ok: false, error: '找不到这个材料源' };
     const materials = readMaterials(active.project);
-    const picked = (Array.isArray(entries) ? entries : [])
-      .map((item) => String(item).replace(/\\/g, '/').replace(/^\/+|\/+$/g, ''))
-      .filter(Boolean);
+    const picked = [];
+    for (const raw of Array.isArray(entries) ? entries : []) {
+      const rel = normalizeEntry(raw);
+      if (rel === null) return { ok: false, error: `「${raw}」不是材料目录里的路径（不能带 .. 或 .）` };
+      if (rel) picked.push(rel);
+    }
     // entry 是源里的相对路径（整目录挂载时为空），as 是副本在 data/ 下的目录名——两者可能不同名
     const alias = String(as || '').trim();
     let targets;
@@ -868,7 +957,11 @@ export class Workbench {
 
     const done = [];
     for (const item of report) {
-      if (item.ok === false) return { ok: false, error: `${label(item)}：${item.error}`, report };
+      // 已经是挂载的条目：跳过，别再走删除
+      if (!item.localDir) {
+        done.push({ entry: item.as || item.entry, skipped: item.skipped || '不需要替换' });
+        continue;
+      }
       const localDir = item.localDir;
       if (isLink(localDir)) {
         done.push({ entry: item.as, skipped: '已经是联接' });
@@ -876,12 +969,13 @@ export class Workbench {
       }
       // 删之前重新比对，避免比对后有人动过文件；删完要复核，删不掉就明确停下
       const again = migrateCopiedEntry({ projectRoot: active.path, source, entry: item.entry, as: item.as });
-      if (!again.ok) return { ok: false, error: `${label(item)}：复检没通过，已停止`, report };
+      if (!again.ok) return { ok: false, error: `${label(item)}：复检没通过，已停止`, applied: done.length, report };
       const removal = await removeTree(localDir);
       if (!removal.ok || fs.existsSync(localDir)) {
         return {
           ok: false,
           error: `${label(item)}：删不掉 ${localDir}（${removal.error || '被占用'}），已停止；原件完好`,
+          applied: done.length,
           report,
         };
       }
@@ -894,16 +988,32 @@ export class Workbench {
         createdAt: new Date().toISOString(),
       };
       const run = await mountOne({ projectRoot: active.path, mount });
-      if (!run.ok) return { ok: false, error: `副本已删但联接没建成：${run.error}（原件在 ${item.sourceDir}）`, report };
+      if (!run.ok) {
+        // 副本已经删了：先把已完成的挂载落盘，别让台账和磁盘脱节
+        if (done.length) this.saveMaterials(active.path, materials);
+        return { ok: false, error: `副本已删但联接没建成：${run.error}（原件在 ${item.sourceDir}）`, applied: done.length, report };
+      }
       materials.mounts = [...materials.mounts.filter((row) => row.as !== mount.as), mount];
+      // 每个条目落一次盘：中途停下时，之前换好的挂载必须记进 project.json
+      const saved = this.saveMaterials(active.path, materials);
+      if (!saved.ok) return saved;
       done.push({ entry: item.as, mounted: true });
     }
-    const saved = this.saveMaterials(active.path, materials);
-    if (!saved.ok) return saved;
+    const swapped = done.filter((item) => item.mounted).length;
     for (const mount of materials.mounts) await this.mountDerived(active.path, mount);
     this.refreshMaterials(active.path);
     this.onChange({ kind: 'project', path: active.path });
-    return { ok: true, applied: true, done, report, note: '副本已换成挂载；请重跑审计，指纹会按源文件重算', state: this.mountsState(active.path) };
+    return {
+      ok: true,
+      applied: true,
+      swapped,
+      done,
+      report,
+      note: swapped
+        ? '副本已换成挂载；请重跑审计，指纹会按源文件重算'
+        : '没有需要替换的副本（这些条目本来就是挂载）',
+      state: this.mountsState(active.path),
+    };
   }
 
   /** 快照里的材料段：只给面板要的东西，源目录的完整文件清单不进快照。 */
@@ -996,10 +1106,22 @@ export class Workbench {
     };
   }
 
+  invalidateSummary() {
+    this.summaryCache = null;
+  }
+
   /** 原生对话里的徽章每 8–10 秒轮询一次：只回摘要，不搬图表清单与产物明细。 */
   summary() {
     const active = this.active();
     if (!active.ok) return { ok: true, active: null, summary: null, totals: null, next: null, running: false };
+    const running = Object.keys(this.runner.activeFor(active.id)).length > 0;
+    const now = Date.now();
+    const cache = this.summaryCache;
+    // 每条不属于该项目的对话也在轮询 /summary，而这里要全量扫产物：
+    // 2 秒内直接复用上一次结果（跑着的时候不复用，进度要动）
+    if (!running && cache && cache.id === active.id && now - cache.at < 2000) {
+      return JSON.parse(JSON.stringify(cache.value));
+    }
     const artifacts = scanArtifacts(active.path);
     const stages = evaluateProject({
       projectRoot: active.path,
@@ -1011,7 +1133,7 @@ export class Workbench {
       sources: listSources(this.store),
     });
     const next = stages.find((item) => item.status !== 'done') || null;
-    return {
+    const value = {
       ok: true,
       active: {
         id: active.id,
@@ -1024,8 +1146,10 @@ export class Workbench {
       next: next
         ? { id: next.id, index: next.index, name: next.name, status: next.status, script: next.script || null, args: next.args || [] }
         : null,
-      running: Object.keys(this.runner.activeFor(active.id)).length > 0,
+      running,
     };
+    this.summaryCache = { id: active.id, at: now, value };
+    return value;
   }
 
   publicConfig(config) {
@@ -1204,6 +1328,7 @@ export class Workbench {
     if (!stage) return { ok: false, error: `未知阶段：${stageId}` };
     const active = this.active();
     if (!active.ok) return { ok: false, error: active.error };
+    this.invalidateSummary();
 
     const live = this.runner.activeFor(active.id);
     if (live[stageId]) {
@@ -1236,6 +1361,7 @@ export class Workbench {
   cancelStage(stageId) {
     const active = this.active();
     if (!active.ok) return { ok: false, error: active.error };
+    this.invalidateSummary();
     const cancelled = this.runner.cancelStage(active.id, stageId);
     if (!cancelled.length) return { ok: false, error: '当前没有在跑的进程' };
     return { ok: true, cancelled };
@@ -1252,6 +1378,7 @@ export class Workbench {
   adjudicate({ stageId, gateId, status, note }) {
     const active = this.active();
     if (!active.ok) return { ok: false, error: active.error };
+    this.invalidateSummary();
     const allowed = new Set(['pass', 'fail', 'unjudged']);
     if (!allowed.has(status)) return { ok: false, error: '人工裁定只能是 pass / fail / unjudged' };
     const stage = this.stageById(stageId);
@@ -1439,6 +1566,7 @@ export class Workbench {
 
   /** 由 runner 在每次运行结束时回调。 */
   onRunFinished(run) {
+    this.invalidateSummary();
     const chain = this.chainStatus();
     if (!chain || chain.status !== 'running') return;
     if (run.projectId && chain.projectId && run.projectId !== chain.projectId) return;
@@ -1523,6 +1651,7 @@ export class Workbench {
     const next = normalizeConfig({ ...current, ...patch });
     this.store.set({ config: next });
     this.invalidateSkill();
+    this.invalidateSummary();
     if ('skillRoot' in patch || 'pythonPath' in patch || 'dataDir' in patch) this.invalidatePreflight();
     this.onChange({ kind: 'config' });
     return { ok: true, config: next };

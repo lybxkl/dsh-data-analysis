@@ -869,10 +869,13 @@ const PROBE = `(() => {
 
 /* ============================ 主流程 ============================ */
 
+// 断点以 client.js 的 widthOf() 为准：<=860 narrow / <=1100 compact / <=1240 mid / else wide。
+// 这里每一档都要真的测到：mid（1101–1240）之前从没被渲染过，等于漏了一整个断点。
 const VARIANTS = [
   { key: 'wide', width: 1560, height: 1000, widthClass: 'wide', theme: 'light', projects: 14 },
-  { key: 'medium', width: 1180, height: 900, widthClass: 'compact', theme: 'light', projects: 14 },
-  { key: 'narrow', width: 900, height: 900, widthClass: 'narrow', theme: 'light', projects: 4 },
+  { key: 'mid', width: 1180, height: 900, widthClass: 'mid', theme: 'light', projects: 14 },
+  { key: 'compact', width: 1000, height: 900, widthClass: 'compact', theme: 'light', projects: 14 },
+  { key: 'narrow', width: 820, height: 900, widthClass: 'narrow', theme: 'light', projects: 4 },
   { key: 'dark', width: 1560, height: 1000, widthClass: 'wide', theme: 'dark', projects: 3 },
 ];
 

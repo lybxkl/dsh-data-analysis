@@ -224,7 +224,7 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
                 '来源账与审计对得上',
                 'warn',
                 'unjudged',
-                `provenance 记了 ${provCsv.rows.length} 行，审计扫到 ${scanned} 个文件，差 ${Math.abs(provCsv.rows.length - scanned)}。常见原因：挂了新目录还没重跑审计 / data/ 里还留着旧副本 / 识图或转码之后没重跑审计。判不了，先重跑审计再看`,
+                `provenance 记了 ${provCsv.rows.length} 行，审计扫到 ${scanned} 个文件，差 ${Math.abs(provCsv.rows.length - scanned)}。常见原因：挂了新目录还没重跑审计 / data/ 里还留着旧副本 / 识图或另存转换之后没重跑审计。判不了，先重跑审计再看`,
                 { source: 'output/materials/provenance.csv' },
               ),
             );
@@ -520,9 +520,14 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
       // 已经识别但还没核对，也同样不能算通过——「未核」不是「通过」。
       const visionRows = readVisionLog(root);
       if (visionRows.length) {
-        const pending = visionRows.filter((row) => row.status === 'ok' && !row.human_verified);
-        if (!pending.length) {
-          gates.push(gate('qa-vision', '识图文本已人工核对', 'warn', 'pass', `${visionRows.length} 页识别结果都已人工核对`));
+        const okRows = visionRows.filter((row) => row.status === 'ok');
+        const pending = okRows.filter((row) => !row.human_verified);
+        if (!okRows.length) {
+          // 全是失败行：这不是「都核对过了」，是根本没有可用的识别结果
+          gates.push(gate('qa-vision', '识图文本已人工核对', 'warn', 'unjudged',
+            `识别日志有 ${visionRows.length} 行，但没有一行成功；逐页排除失败原因后重跑`));
+        } else if (!pending.length) {
+          gates.push(gate('qa-vision', '识图文本已人工核对', 'warn', 'pass', `${okRows.length} 页识别结果都已人工核对`));
         } else {
           const absOf = (rel) => (path.isAbsolute(String(rel || '')) ? String(rel) : path.join(root, String(rel || '')));
           const needles = new Set(['__识别稿']);

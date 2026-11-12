@@ -111,7 +111,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
   register(defineTool({
     name: 'data_analysis_status',
     description:
-      '查看实证研究工作台当前状态：skill 是否就位、当前项目 8 个阶段各自的闸门判定（✓通过 / ✗未过 / ?判不了）、'
+      '查看实证研究工作台当前状态：skill 是否就位、当前项目 9 个阶段各自的闸门判定（✓通过 / ✗未过 / ?判不了）、'
       + '最近运行记录、图表清单摘要。任何涉及「下一步跑什么」「为什么被拦住」的问题先调它。',
     parameters: {
       verbose: { type: 'boolean', description: '是否逐条列出闸门明细（默认只列阶段汇总）' },
@@ -187,7 +187,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
     },
     output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '自检完成') },
     async execute(args) {
-      const pre = await workbench.ensurePreflight({ force: Boolean(args?.refresh) });
+      const pre = await workbench.ensurePreflight({ force: isTrue(args?.refresh) });
       const label = { pass: '通过', fail: '未通过', warn: '可用但有降级', unjudged: '判不了', pending: '待检查' };
       const lines = [`环境自检：${label[pre.status] || pre.status}${pre.python ? ` · Python ${pre.python}` : ''}`];
       if (pre.platform) lines.push(`平台：${pre.platform}${pre.pythonCommand ? ` · 用的是 ${pre.pythonCommand}` : ''}`);
@@ -210,7 +210,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
 
   register(defineTool({
     name: 'data_analysis_list_stages',
-    description: '列出工作台的 8 个阶段、每个阶段的用途、绑定的 skill 脚本与预期产物；用于向用户解释流程。',
+    description: '列出工作台的 9 个阶段、每个阶段的用途、绑定的 skill 脚本与预期产物；用于向用户解释流程。',
     parameters: {},
     output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '已列出阶段') },
     async execute() {
@@ -330,7 +330,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
     },
     output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '已启动运行') },
     async execute(args) {
-      const result = workbench.runStage(String(args.stageId || '').trim(), { force: Boolean(args.force) });
+      const result = workbench.runStage(String(args.stageId || '').trim(), { force: isTrue(args.force) });
       if (!result.ok) return { ok: false, error: result.error, text: `操作未完成：${result.error}` };
       return {
         ok: true,
@@ -434,7 +434,10 @@ export function registerTools(ctx, workbench, helpers = {}) {
         return { ok: true, issue: result.issue, text: `${result.issue.id} → ${result.issue.status}` };
       }
       if (action === 'apply') {
-        const result = workbench.applyIssue(String(args.id || ''), { advance: args.advance !== false });
+        const result = workbench.applyIssue(String(args.id || ''), {
+          // 默认 true；显式传 false / "false" 才不自动重跑下游
+          advance: args.advance === undefined || args.advance === null ? true : isTrue(args.advance),
+        });
         if (!result.ok) return { ok: false, error: result.error, text: `套用失败：${result.error}` };
         return {
           ok: true,
@@ -552,9 +555,11 @@ export function registerTools(ctx, workbench, helpers = {}) {
       const result = await assistant.draft({ taskId: args.task, instruction: args.instruction });
       if (!result.ok) return { ok: false, error: result.error, text: `起草失败：${result.error}` };
       let saved = null;
-      if (args.save) saved = assistant.save({ taskId: result.task, text: result.text });
+      // 参数偶发是字符串（"false" 是真值）：写盘与否必须按真布尔判，否则会静默写文件
+      const shouldSave = isTrue(args.save);
+      if (shouldSave) saved = assistant.save({ taskId: result.task, text: result.text });
       // 写盘失败不能报成功：模型会据此告诉用户「已经写进 docs/ 了」
-      if (args.save && !saved?.ok) {
+      if (shouldSave && !saved?.ok) {
         return {
           ok: false,
           error: saved?.error || '写入 docs/ 失败',
@@ -685,9 +690,17 @@ export function registerTools(ctx, workbench, helpers = {}) {
         };
       }
       if (action === 'remove') {
-        const result = workbench.removeSource(args?.sourceId, { force: Boolean(args?.force) });
+        const result = await workbench.removeSource(args?.sourceId, { force: isTrue(args?.force) });
         if (!result.ok) return { ok: false, error: result.error, text: `删除失败：${result.error}` };
-        return { ok: true, text: '已从材料库删掉这个目录（磁盘上的文件没动）', sources: result.sources };
+        const detached = (result.detached || []).reduce((sum, item) => sum + item.as.length, 0);
+        return {
+          ok: true,
+          text: detached
+            ? `已从材料库删掉这个目录（磁盘上的文件没动）；顺带摘掉了 ${detached} 处挂载，请重跑审计`
+            : '已从材料库删掉这个目录（磁盘上的文件没动）',
+          detached: result.detached || [],
+          sources: result.sources,
+        };
       }
       if (action === 'mount') {
         const result = await workbench.mountSource({
@@ -759,7 +772,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
         return { ok: true, text: lines.join('\n'), items: items.slice(0, 200), skipped: skipped.slice(0, 50), totals: plan.totals };
       }
       if (action === 'run') {
-        const result = await workbench.startVision({ limit: args?.limit ?? 40, pages: args?.pages || '', wait: Boolean(args?.wait) });
+        const result = await workbench.startVision({ limit: args?.limit ?? 40, pages: args?.pages || '', wait: isTrue(args?.wait) });
         if (!result.ok) return { ok: false, error: result.error, text: `识图没能开始：${result.error}` };
         if (result.started) {
           return {
@@ -794,7 +807,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
         return { ok: true, text: lines.join('\n'), status };
       }
       if (action === 'verify') {
-        const result = workbench.verifyVision({ relPaths: splitList(args?.relPaths), all: Boolean(args?.all) });
+        const result = workbench.verifyVision({ relPaths: splitList(args?.relPaths), all: isTrue(args?.all) });
         if (!result.ok) return { ok: false, error: result.error, text: `打勾失败：${result.error}` };
         return { ok: true, text: `已标记 ${result.changed ?? 0} 页为人工已核。`, result };
       }
@@ -824,11 +837,12 @@ export function registerTools(ctx, workbench, helpers = {}) {
       if (!result.ok) {
         // 不能替它下结论说「未执行」：apply 时副本可能已经删了、只是联接没建成，
         // 两种相反后果都走这个分支，原样透传错误 + 报告让人自己看。
-        const removed = (result.report || []).some((item) => item.applied || item.removed);
+        const applied = Number(result.applied) || 0;
         return {
           ok: false,
           error: result.error,
-          text: `${removed ? '迁移中途失败（副本可能已删）' : '迁移未执行'}：${result.error}`,
+          text: `${applied ? `迁移中途失败（已替换 ${applied} 条，副本可能已删）` : '迁移未执行'}：${result.error}`,
+          applied,
           report: result.report,
         };
       }

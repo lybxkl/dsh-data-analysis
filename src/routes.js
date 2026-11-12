@@ -315,7 +315,9 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
       path: `${basePath}/api/recheck/apply`,
       method: 'POST',
       handler: (body) => {
-        const result = workbench.applyIssue(String(body?.id || ''), { advance: body?.advance !== false });
+        const result = workbench.applyIssue(String(body?.id || ''), {
+          advance: body?.advance === undefined || body?.advance === null ? true : isTrue(body.advance),
+        });
         if (!result.ok) return { status: 409, payload: { ok: false, error: result.error } };
         return { ok: true, ...result, state: workbench.snapshot() };
       },
@@ -375,10 +377,12 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
     {
       path: `${basePath}/api/materials/remove`,
       method: 'POST',
-      handler: (body) => {
-        const result = workbench.removeSource(String(body?.id || ''), { force: isTrue(body?.force) });
-        if (!result.ok) return { status: 409, payload: { ok: false, error: result.error, usedBy: result.usedBy || [] } };
-        return { ok: true, sources: result.sources, state: workbench.snapshot() };
+      handler: async (body) => {
+        const result = await workbench.removeSource(String(body?.id || ''), { force: isTrue(body?.force) });
+        if (!result.ok) {
+          return { status: 409, payload: { ok: false, error: result.error, usedBy: result.refs || [] } };
+        }
+        return { ok: true, sources: result.sources, detached: result.detached || [], state: workbench.snapshot() };
       },
     },
     {
@@ -426,7 +430,18 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
     {
       path: `${basePath}/api/materials/vision`,
       method: 'GET',
-      handler: () => { const status = workbench.visionStatus(); const plan = workbench.visionPlan(); return { ok: plan.ok !== false, ...status, plan, ...(plan.ok === false ? { error: plan.error } : {}) }; },
+      handler: () => {
+        const status = workbench.visionStatus();
+        const plan = workbench.visionPlan();
+        const ok = plan.ok !== false && status.ok !== false;
+        // ok 必须最后写：status 里恒为 ok:true，先写会被它盖掉
+        return {
+          ...status,
+          plan,
+          ok,
+          ...(plan.ok === false ? { error: plan.error } : {}),
+        };
+      },
     },
     {
       path: `${basePath}/api/materials/vision/run`,

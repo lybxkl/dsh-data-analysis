@@ -163,6 +163,14 @@ section('二之二、materialsCard：挂载清单 + 只读约束（没有挂载�
   check('卡里指路 data_analysis_vision', text.includes('data_analysis_vision'));
   check('卡里不再提转换工具', !text.includes('data_analysis_convert'));
   check('卡里要求重跑审计', text.includes('重跑 audit'));
+  check('挂载都正常时不加异常提示', card.broken === 0 && !text.includes('状态异常'), text.slice(0, 160));
+
+  // 手删挂载：卡里必须点名，不能让它把「空目录」当成源文件读
+  fs.unlinkSync(path.join(bench.proj, 'data', '卷'));
+  const broken = bench.wb.materialsCard();
+  const brokenText = String(broken.text || '');
+  check('挂载失效仍能出卡（不静默丢掉）', broken.ok === true && broken.broken >= 1, broken.error || '');
+  check('卡里标出失效挂载', brokenText.includes('状态异常') && brokenText.includes('挂载不见了'), brokenText.slice(0, 200));
 }
 
 /* ------------------------------ 三、旧副本迁移 ------------------------------ */
@@ -280,6 +288,11 @@ section('五、识图：计划、数页、留痕、派生稿、人工核对');
     const refused = await bench.wb.startVision({ wait: true });
     check('模型不支持图片时报错', refused.ok === false, refused.error || '');
     check('一次模型调用都没发', !blind.called);
+
+    // 后台模式：以前这里会把 ok:false 的 promise 丢掉、照样回「已开始」
+    const background = await bench.wb.startVision({ wait: false });
+    check('后台模式也不谎报「已开始」', background.ok === false, background.error || '');
+    check('拒绝时带上能力信息', Boolean(background.capability && background.capability.ok === false));
 
     // 换成能看图的假模型，跑第 1 页
     let calls = 0;
@@ -500,6 +513,50 @@ section('十、移除项目：只删登记，不碰磁盘');
   check('活动项目清空', bench.ledger.activeProjectId === '' && bench.ledger.activeProjectPath === '');
   check('active() 不再报 ok', bench.wb.active().ok === false);
   check('当前项目的目录也还在', fs.existsSync(bench.proj) && fs.existsSync(path.join(bench.proj, 'project.json')));
+  await removeTree(bench.root);
+}
+
+/* --------------------------- 十一、删材料源 --------------------------- */
+
+section('十一、删材料源：有引用先拒绝，force 会先摘挂载再删库');
+{
+  const bench = makeBench('dsa-t11-');
+  fs.writeFileSync(path.join(bench.sourceRoot, 'a.pdf'), 'pdf');
+  const added = bench.wb.addSource({ path: bench.sourceRoot, label: '要删的源' });
+  const mounted = await bench.wb.mountSource({ sourceId: added.source.id, as: '样本' });
+  check('先挂上', mounted.ok === true, mounted.error || '');
+
+  const refused = await bench.wb.removeSource(added.source.id, { force: false });
+  check('有项目挂着时拒绝删除', refused.ok === false, refused.error || '');
+  check('拒绝时点名引用位置', Array.isArray(refused.refs) && refused.refs.length === 1, JSON.stringify(refused.refs || []));
+  check('挂载还在', bench.wb.mountsStateSafe().mounts.length === 1);
+
+  const forced = await bench.wb.removeSource(added.source.id, { force: true });
+  check('force 删除成功', forced.ok === true, forced.error || '');
+  check('force 先摘掉挂载（不留悬空引用）', bench.wb.mountsStateSafe().mounts.length === 0);
+  check('data/样本 的联接删掉了', !fs.existsSync(path.join(bench.proj, 'data', '样本')));
+  check('回报摘了哪几条', (forced.detached || []).length === 1, JSON.stringify(forced.detached || []));
+  check('磁盘上的材料原件没动', fs.existsSync(path.join(bench.sourceRoot, 'a.pdf')));
+  check('材料库条目已删', !(bench.wb.sources() || []).some((s) => s.id === added.source.id));
+  await removeTree(bench.root);
+}
+
+/* ------------------- 十二、迁移对「已经是挂载」的条目是幂等的 ------------------- */
+
+section('十二、迁移：已经是挂载的条目跳过，不报错也不删东西');
+{
+  const bench = makeBench('dsa-t12-');
+  fs.writeFileSync(path.join(bench.sourceRoot, 'm.pdf'), 'pdf');
+  const added = bench.wb.addSource({ path: bench.sourceRoot, label: '已挂载的源' });
+  const mounted = await bench.wb.mountSource({ sourceId: added.source.id, as: '已挂' });
+  check('先挂上', mounted.ok === true, mounted.error || '');
+
+  // 旧实现会在这里拿到 localDir=undefined → removeTree(undefined) 抛 TypeError
+  const applied = await bench.wb.migrateSource({ sourceId: added.source.id, as: '已挂', apply: true });
+  check('对已挂载条目 apply 不报错', applied.ok === true, applied.error || '');
+  check('没有可替换的副本', applied.swapped === 0, `swapped=${applied.swapped}`);
+  check('挂载还在（没被这个动作删掉）', bench.wb.mountsStateSafe().mounts.length === 1);
+  check('材料原件没动', fs.existsSync(path.join(bench.sourceRoot, 'm.pdf')));
   await removeTree(bench.root);
 }
 

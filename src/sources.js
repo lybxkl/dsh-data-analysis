@@ -791,7 +791,10 @@ export function migrateCopiedEntry({ projectRoot, source, entry = '', as = '' })
   const localName = String(as || rel || path.basename(source.path)).replace(/\\/g, '/');
   const localDir = path.join(path.resolve(projectRoot), 'data', localName);
   const sourceDir = rel ? path.join(source.path, rel) : source.path;
-  if (isLink(localDir)) return { ok: true, skipped: 'already-linked', entry: rel, as: localName };
+  if (isLink(localDir)) {
+    // 已经是联接：带上 localDir，调用方据此跳过（不能让它走到删除那一步）
+    return { ok: true, skipped: 'already-linked', entry: rel, as: localName, localDir, sourceDir, verified: 0 };
+  }
   let stat = null;
   try {
     stat = fs.statSync(localDir);
