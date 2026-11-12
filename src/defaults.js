@@ -7,6 +7,9 @@
  *     模型现场写的新脚本也能登记进来（改 project.json 的 stages[].args / script 即可）。
  */
 
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
 /** 各平台最常见的 Python 命令：Windows 上是 python，macOS/Linux 上只有 python3。 */
 export const DEFAULT_PYTHON = process.platform === 'win32' ? 'python' : 'python3';
 
@@ -165,6 +168,14 @@ export const STAGE_BY_ID = new Map(STAGE_DEFS.map((stage) => [stage.id, stage]))
 
 /** 已知的 skill 目录候选：用户没配 skillRoot 时按顺序探测。 */
 export const SKILL_CANDIDATES = [
+  // DSH 发现技能的位置（安装方法见 README）：用户级 ~/.agents/skills、~/.dsh/skills
+  join(homedir(), '.agents', 'skills', SKILL_PACKAGE),
+  join(homedir(), '.dsh', 'skills', SKILL_PACKAGE),
+  join(homedir(), '.agents', 'skills', 'SPSS-Style-Charting-Skill', SKILL_PACKAGE),
+  // 手动 clone 到常见位置
+  join(homedir(), 'SPSS-Style-Charting-Skill'),
+  join(homedir(), 'SPSS-Style-Charting-Skill', SKILL_PACKAGE),
+  // 开发机上的固定路径（老配置兜底）
   'F:\\测试文件\\SPSS-Style-Charting-Skill',
   'F:\\测试文件\\SPSS-Style-Charting-Skill\\empirical-research-pipeline',
 ];

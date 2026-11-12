@@ -4,6 +4,9 @@
 
 它不是第二套研究方法，而是技能的**操作台**——脚本还是技能里那些 Python 脚本，工作台负责登记、运行、展示与拦截。
 
+依赖：[**SPSS-Style-Charting-Skill**](https://github.com/lybxkl/SPSS-Style-Charting-Skill)（`empirical-research-pipeline` 包，
+提供审计/编码/统计/图表/终检的全部脚本）。装法见下文，工作台对它是只读的。
+
 ## 它解决什么
 
 - **跑没跑**：每次运行都是一个 `run-*` 记录，命令、退出码、信号、日志尾部全部落盘。
@@ -15,13 +18,47 @@
 
 ## 安装
 
+工作台只负责「跑、看、拦」，真正干活的是技能包 [SPSS-Style-Charting-Skill](https://github.com/lybxkl/SPSS-Style-Charting-Skill)。
+**先装技能，再装工作台。**
+
+### 1. 装技能包（依赖）
+
+DSH 从这些目录发现技能：`~/.agents/skills`（用户级）、`~/.dsh/skills`、`<工作区>/.dsh/skills`、`<工作区>/.agents/skills`。
+技能包要能放在「`SKILL.md` 直接在这一层」的位置。
+
 ```powershell
-# 用 DSH 的插件管理装本地包（绝对路径）
-# plugin_manager: action=install_bundle, target=F:\deepseek-data-analysis\dsh-data-analysis
-#   已装过则 set_plugin false → true 重载（target 用 entryId：include:data-analysis）
+# Windows
+git clone https://github.com/lybxkl/SPSS-Style-Charting-Skill
+Copy-Item -Recurse .\SPSS-Style-Charting-Skill\empirical-research-pipeline "$HOME\.agents\skills\"
+pip install -r .\SPSS-Style-Charting-Skill\requirements.txt
 ```
 
-装好后刷新页面，侧栏出现「实证研究工作台」图标。
+```bash
+# macOS / Linux
+git clone https://github.com/lybxkl/SPSS-Style-Charting-Skill
+mkdir -p ~/.agents/skills
+cp -r SPSS-Style-Charting-Skill/empirical-research-pipeline ~/.agents/skills/
+pip3 install -r SPSS-Style-Charting-Skill/requirements.txt
+```
+
+装好后 `~/.agents/skills/empirical-research-pipeline/SKILL.md` 应该存在，DSH 的技能目录里能看到它。
+技能装在哪只决定 Agent 能不能自己调用它；工作台的 `skillRoot` 指向同一份包，两边可以共用一个 clone。
+
+### 2. 装工作台（插件）
+
+用 DSH 的插件管理装本地包：`plugin_manager`，`action=install_bundle`，`target` 填**本目录的绝对路径**。
+图形界面下的等价操作是 **插件 → 添加插件 → 选本地目录**。
+
+装好刷新页面，侧栏出现「实证研究工作台」图标。已装过的重装/重载：先 `set_plugin` 停用再启用
+（`target` 用 entry id `include:data-analysis`），或直接重启 DSH。
+
+> 改了 host 侧代码（`src/*.js`、`index.js`）要重启 DSH 才生效；只改 `client.js` 刷新页面即可。
+
+### 3. 指一下技能在哪
+
+`skillRoot` 留空时会按顺序探测 `~/.agents/skills/empirical-research-pipeline`、`~/.dsh/skills/empirical-research-pipeline`、
+`~/SPSS-Style-Charting-Skill` 等常见位置。探测不到就在设置里手填——指向**仓库根**或**其中的
+`empirical-research-pipeline` 包目录**都可以，工作台自己找出包。
 
 ## 配置
 
@@ -29,9 +66,9 @@
 
 | 项 | 说明 | 默认 |
 | --- | --- | --- |
-| `skillRoot` | 技能仓库根或其中的 `empirical-research-pipeline` 包目录；**只读**。配了但无效会直接报错，不再偷偷回退 | `F:\测试文件\SPSS-Style-Charting-Skill` |
+| `skillRoot` | 技能仓库根或其中的 `empirical-research-pipeline` 包目录；**只读**。留空则自动探测常见安装位置；配了但无效会直接报错，不再偷偷回退 | 空（自动探测） |
 | `dataDir` | 台账目录（`data-analysis.json` 所在）；空 = 按 profile 自动选 | 空 |
-| `pythonPath` | Python 可执行文件 | `python` |
+| `pythonPath` | Python 可执行文件；留空/失败时依次试 `python3`、`python`、`py`（Windows 先试 `python`） | Windows `python`，其它 `python3` |
 | `maxRuns` | 台账保留的运行记录数 | `60` |
 | `maxLogLines` | 面板保留的日志行数 | `800` |
 | `modelMode` | `follow` = 跟随 DSH 默认模型；`custom` = 用下面两项 | `follow` |
@@ -75,6 +112,99 @@
   { "script": "scripts/qa_outputs.py", "args": ["--out", "output/qa/qa_report.json", "--exit-zero"], "continueOnError": true },
   { "script": "scripts/verify_numbers.py", "args": ["--out", "output/verify"] }
 ] } }
+```
+
+## 界面
+
+面板是三段式工作区：左边阶段、中间当前阶段、右边运行台。**面板不自己算结论**，
+所有状态都来自服务端快照（闸门三态、运行记录、产物解析都在 host 侧算好）。
+
+```
+实证研究工作台 · <项目名>          [技能包就位 · v]   AI 接手▾   项目▾   运行台   刷新
+──────────────────────────────────────────────────────────────────────────────
+│ 材 材料库 · 3 条挂载        ← 左栏：材料库入口 + 阶段 1–9（圆点三态）
+│ ① 范围 ✓   ② 审计 ✓   ③ 编码 ◉   ④ 数据集 ✗   ⑤ 统计 ○   …
+──────────────────────────────────────────────────────────────────────────────
+│ ③ 编码   ✓ 已完成 · 4 项通过 · 1 项待处理      ← 中栏：结论 + 闸门 + 产物
+│  ✓ 编码表在        output/coding/codebook.csv
+│  ✗ 逐条对账        3 份对不上（点开看证据）
+│  ! 跳过清单        等你拍板                       [去拍板]
+│  产物 output/coding/…      技术细节 ⌄ 命令 / 日志 / 覆盖表
+──────────────────────────────────────────────────────────────────────────────
+│ run-4f21 运行中   run-4e02 ok   run-4d90 failed   ← 右栏：运行台（窄屏收成抽屉）
+│ $ python audit_corpus.py …      > 读入 223 份   > 跳过 4 份
+```
+
+五个区域：
+
+- **顶栏**：项目名 + 技能包指纹（SKILL.md 与项目记录不一致时标 ⚠）、`AI 接手▾`（起草 / 在对话里做这一步 /
+  复核）、`项目▾`（打开 · 新建 · 材料库 · 设置）、运行台、刷新。
+- **左栏**：最上面是「**材**」——材料库入口，副标题 `N 条挂载 · M 个材料源`，挂载失效时整条变红；
+  下面是阶段 1–9，圆点表示三态，副标题一句话说进度（`已完成` / `被拦住` / `等你拍板` / `还没查`）。
+- **中栏**：当前阶段。顶部一行结论，然后闸门卡（未过的排在前面，通过的折叠成一行），再是产物清单；
+  命令、日志、覆盖表都收在「技术细节」里，默认不占版面。
+- **右栏（运行台）**：运行记录（状态 / 开始时间 / 阶段 / 退出码）+ 选中那条的命令与日志，运行中自动滚到底。
+  `运行本阶段` 只负责启动——**退出码 0 不等于阶段完成**，完成与否看中间那排闸门。
+- **弹窗**：设置、打开项目、新建项目、AI 起草、人工裁定、材料库、复核、补丁预览。全部自绘，Esc 关闭。
+
+三种宽度各有形态：>1240 三栏；≤1240 右栏收成抽屉（顶栏「运行台」打开）；≤860 左栏也收起，
+改用顶栏的阶段下拉。中栏永远只有一个实心主按钮（运行 / 去拍板 / AI 接手），其余在次级菜单。
+
+## 上手：从空目录到一份能交付的报告
+
+### 1. 建项目
+
+`项目 ▾ → 新建项目`（或工具 `data_analysis_create_project`）——**只能指向空目录**。
+工作台建好 `data/ docs/ output/ scripts/ runs/` 与 `project.json`，并设为当前项目。
+
+### 2. 把材料挂进来（不复制）
+
+`材 → 登记材料目录`，填资料所在目录的绝对路径（例如 `F:\案例打包pdf\刑事pdf`）。
+回执按四类报数：直读 / 识图 / 待转换 / 不支持（相加等于目录里的文件总数）。然后在下面挂到 `data/`：
+
+- 挂整包：子目录留空，挂载名自己起（例如「刑事」）
+- 只挂几个省：子目录填 `安徽,北京,福建`
+- 旧项目里已复制过副本：点「副本换挂载」，先逐份 md5 比对，全等才删副本
+
+### 3. 定范围，跑审计
+
+`① 范围与口径` 是人工阶段：写清研究问题与纳入/排除标准（`docs/scope.md`）。然后跑 `② 资料审计`，
+产出 `output/audit/corpus_files.csv`、`corpus_summary.json`、`sample_flow.csv`。
+`audit-freshness` 与 `materials-provenance-cover` 会核对「来源账行数 = 现在 data/ 里的文件数」。
+
+### 4. 扫描件走识图
+
+审计表里 `status=image_only` 的行就是要识图的（没有文字层的扫描 PDF 与图片）。`材 → 识图`：
+先看「待识别页数」（只数页、零调用），再小批量试跑（`pages=1-5`），满意了再放开。
+识别稿落在 `data/<挂载名>__识别稿/`，每页留 `页图 sha256 / 模型 / 提示词版本`。
+**逐页核对完再点「标记已核对」**——未核的稿子一旦被文稿或质检引用，`qa-vision` 只给「判不了」。
+
+### 5. 编码 → 数据集 → 统计 → 图表 → 成稿
+
+每步都是「运行 → 看闸门 → 该修就修」。`✗` 点开看证据；`!` 是只能人拍板的那类（例如交付清单确认），
+弹窗里先摆证据再写理由；阶段重跑后旧裁定自动失效。
+`doc/xls/ppt` 这类旧格式先走转码（`材 → 转码`），`Image only` 之外的 PDF 直接读文本，不用识别。
+
+### 6. 终检与复核
+
+`⑧ 终检` 是两步：`qa_outputs.py` 出合规报告、`verify_numbers.py` 做数字溯源，任一步非零就停。
+`AI 接手 → 复核` 进入第 9 阶段：12 项机器复算 → 模型逐条提问题（severity / 证据 / 修法）→ 人裁定 →
+改 `scripts/` 或 `data/` 后自动重跑下游。补丁不会直接落盘，要人点「套用」。
+
+### 7. 让模型代笔（可选）
+
+`AI 接手 → 写一份草稿`：用 DSH 当前默认模型起草研究范围 / 变量字典 / 图表解读 / 文稿小节 / 质检说明。
+默认只回文本，`save` 才写进 `docs/`。**草稿里的每个数字都必须能溯源**，找不到出处就标未核，不许顺补。
+
+### 用工具跑（等价于点按钮）
+
+```
+data_analysis_status
+  → data_analysis_create_project
+  → data_analysis_materials(action=add, path=…)
+  → data_analysis_materials(action=mount, sourceId=…, entries=…, as=…)
+  → data_analysis_run_stage(stageId=audit) → data_analysis_status
+  → …（逐阶段）→ data_analysis_recheck(action=status)
 ```
 
 ## 面板怎么读
