@@ -7,10 +7,13 @@
  *     模型现场写的新脚本也能登记进来（改 project.json 的 stages[].args / script 即可）。
  */
 
+/** 各平台最常见的 Python 命令：Windows 上是 python，macOS/Linux 上只有 python3。 */
+export const DEFAULT_PYTHON = process.platform === 'win32' ? 'python' : 'python3';
+
 export const DEFAULT_CONFIG = {
   skillRoot: '',
   dataDir: '',
-  pythonPath: 'python',
+  pythonPath: DEFAULT_PYTHON,
   maxRuns: 60,
   maxLogLines: 800,
   // 起草用的模型：follow = 跟随 DSH 当前的默认模型选择；custom = 面板里指定 provider/model
@@ -183,7 +186,7 @@ export function normalizeConfig(raw = {}) {
   return {
     skillRoot: str(merged.skillRoot).trim(),
     dataDir: str(merged.dataDir).trim(),
-    pythonPath: str(merged.pythonPath, 'python').trim() || 'python',
+    pythonPath: str(merged.pythonPath, DEFAULT_PYTHON).trim() || DEFAULT_PYTHON,
     maxRuns: num(merged.maxRuns, 60, 5, 500),
     maxLogLines: num(merged.maxLogLines, 800, 100, 5000),
     modelMode: mode,

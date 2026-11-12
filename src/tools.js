@@ -131,6 +131,8 @@ export function registerTools(ctx, workbench, helpers = {}) {
       }
       lines.push(`项目：${snap.active.name}（${snap.active.path}）`);
       if (snap.active.skillDrift) lines.push('注意：项目的 SKILL.md 指纹与当前 skill 不一致，旧产物可能来自旧版本。');
+      const matLine = materialsLine(snap.materials);
+      if (matLine) lines.push(matLine);
       for (const stage of snap.stages) {
         lines.push(stageLine(stage));
         if (args?.verbose) for (const gate of stage.gates) lines.push(gateLine(gate));
@@ -150,6 +152,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
         preflight: snap.preflight,
         active: { id: snap.active.id, name: snap.active.name, path: snap.active.path, skillDrift: Boolean(snap.active.skillDrift) },
         summary: snap.summary,
+        materials: snap.materials || null,
         stages: snap.stages.map((stage) => ({
           id: stage.id,
           index: stage.index,
@@ -185,6 +188,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
       const pre = await workbench.ensurePreflight({ force: Boolean(args?.refresh) });
       const label = { pass: '通过', fail: '未通过', warn: '可用但有降级', unjudged: '判不了', pending: '待检查' };
       const lines = [`环境自检：${label[pre.status] || pre.status}${pre.python ? ` · Python ${pre.python}` : ''}`];
+      if (pre.platform) lines.push(`平台：${pre.platform}${pre.pythonCommand ? ` · 用的是 ${pre.pythonCommand}` : ''}`);
       for (const item of pre.checks || []) {
         lines.push(`${CHECK_MARK[item.status] || '?'} ${item.label} — ${item.detail}`);
         if (item.hint && item.status !== 'pass') lines.push(`   → ${item.hint}`);
@@ -194,7 +198,9 @@ export function registerTools(ctx, workbench, helpers = {}) {
         status: pre.status,
         text: lines.join('\n'),
         checkedAt: pre.checkedAt,
+        platform: pre.platform || '',
         python: pre.python,
+        pythonCommand: pre.pythonCommand || '',
         checks: pre.checks,
       };
     },
@@ -553,6 +559,316 @@ export function registerTools(ctx, workbench, helpers = {}) {
     },
   }));
 
+  /* ---------------------------- 材料库 ---------------------------- */
+
+  const MOUNT_STATUS = {
+    ok: '有效',
+    'not-link': '不是工作台建的挂载（真实目录）',
+    'missing-link': '挂载不见了',
+    retargeted: '挂载指到了别的目录',
+    'missing-target': '目标目录不在了',
+  };
+
+  function splitList(raw) {
+    return String(raw || '')
+      .split(/[\n,，;；]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  function materialsText(sources, mounts = [], derived = []) {
+    const lines = [];
+    if (!sources.length) lines.push('材料库：空 —— 先用 action=add 登记一个材料目录（path=绝对路径）');
+    else {
+      lines.push(`材料库：${sources.length} 个目录（全局一份，多个项目可以共用）`);
+      sources.forEach((item, index) => {
+        lines.push(`${index + 1}. ${item.label}${item.exists ? '' : '（目录不在了！）'} — ${item.path}`);
+        if (item.receipt) lines.push(`   ${item.receipt}`);
+        if (item.usedBy?.length) lines.push(`   已挂到：${item.usedBy.map((row) => `${row.project} → data/${row.as}`).join('、')}`);
+        else lines.push('   还没有项目挂载它');
+      });
+    }
+    if (mounts.length) {
+      lines.push('当前项目 data/ 下的挂载：');
+      for (const mount of mounts) {
+        const bad = mount.status !== 'ok';
+        lines.push(` ${bad ? '✗' : '✓'} data/${mount.as} → ${mount.target}（${MOUNT_STATUS[mount.status] || mount.status}）${mount.detail ? ` — ${mount.detail}` : ''}`);
+      }
+    }
+    if (derived.length) {
+      lines.push(`派生稿：${derived.map((item) => `${item.mountName}（${item.files} 份）`).join('、')}`);
+    }
+    return lines.join('\n');
+  }
+
+  /** status 里的一行材料摘要；没挂任何材料时返回空串，不占版面。 */
+  function materialsLine(materials) {
+    if (!materials) return '';
+    const mounts = materials.mounts || [];
+    const sources = materials.sources || [];
+    if (!mounts.length) {
+      return sources.length
+        ? `材料库：已登记 ${sources.length} 个目录但当前项目没挂载（data_analysis_materials action=mount 可挂上）`
+        : '';
+    }
+    const bad = mounts.filter((item) => item.status !== 'ok');
+    const derived = materials.derived || [];
+    const head = `材料：data/ 下 ${mounts.length} 条挂载（${mounts.map((item) => item.as).join('、')}）`;
+    const tail = derived.length ? `，派生稿 ${derived.reduce((sum, item) => sum + (item.files || 0), 0)} 份` : '';
+    return bad.length
+      ? `${head}${tail} —— ⚠ ${bad.length} 条失效：${bad.map((item) => `data/${item.as}（${MOUNT_STATUS[item.status] || item.status}）`).join('、')}，用 data_analysis_materials action=repair 修`
+      : `${head}${tail}`;
+  }
+
+  register(defineTool({
+    name: 'data_analysis_materials',
+    description:
+      '管理材料库：把用户准备好的资料目录登记进来（全局一份，与项目解耦），再挂到项目 data/ 下（Windows 目录联接 / macOS·Linux 镜像目录，都不复制文件）。'
+      + 'action=list 看清单与挂载状态；add 登记目录（path）；remove 删条目（先查引用）；'
+      + 'mount 挂载（sourceId + 可选 entries 逗号分隔的子目录）；unmount 解挂（as）；repair 修断掉的联接。'
+      + '登记回执会把目录里的文件按「直读 / 识图 / 待转换 / 不支持」四类报数。',
+    parameters: {
+      action: { type: 'string', required: true, description: 'list | add | remove | mount | unmount | repair' },
+      path: { type: 'string', description: 'add：材料目录绝对路径' },
+      label: { type: 'string', description: 'add：给这个目录起的名（默认取目录名）' },
+      sourceId: { type: 'string', description: 'mount/remove：材料库条目 id' },
+      entries: { type: 'string', description: 'mount：只挂源里的这几个子目录，逗号或换行分隔；留空=挂整个目录' },
+      as: { type: 'string', description: 'mount：挂到 data/ 下用什么名字；unmount：要摘掉的那个名字' },
+      force: { type: 'boolean', description: 'remove：确认删（有项目在用时仍需 force）' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '材料库已更新') },
+    async execute(args) {
+      const action = String(args?.action || 'list');
+      if (action === 'list') {
+        const list = workbench.sources();
+        const state = workbench.mountsStateSafe();
+        return { ok: true, text: materialsText(list, state.mounts, state.derived), sources: list, mounts: state.mounts, derived: state.derived, entries: state.entries };
+      }
+      if (action === 'add') {
+        const result = workbench.addSource({ label: args?.label, path: args?.path });
+        if (!result.ok) return { ok: false, error: result.error, text: `登记失败：${result.error}` };
+        return {
+          ok: true,
+          text: [`已登记「${result.source.label}」— ${result.source.path}`, result.receipt || '', '这一步只登记，没有复制任何文件；要让它进项目就再 action=mount'].filter(Boolean).join('\n'),
+          source: result.source,
+          sources: result.sources,
+        };
+      }
+      if (action === 'remove') {
+        const result = workbench.removeSource(args?.sourceId, { force: Boolean(args?.force) });
+        if (!result.ok) return { ok: false, error: result.error, text: `删除失败：${result.error}` };
+        return { ok: true, text: '已从材料库删掉这个目录（磁盘上的文件没动）', sources: result.sources };
+      }
+      if (action === 'mount') {
+        const result = await workbench.mountSource({
+          sourceId: args?.sourceId,
+          entries: splitList(args?.entries),
+          as: args?.as,
+        });
+        if (!result.ok) return { ok: false, error: result.error, text: `挂载失败：${result.error}` };
+        const state = result.state || {};
+        return {
+          ok: true,
+          text: [materialsText(workbench.sources(), state.mounts, state.derived), '', result.note].filter(Boolean).join('\n'),
+          mounts: result.mounts,
+          state,
+        };
+      }
+      if (action === 'unmount') {
+        const result = await workbench.unmountSource({ as: args?.as });
+        if (!result.ok) return { ok: false, error: result.error, text: `解挂失败：${result.error}` };
+        const state = result.state || {};
+        return { ok: true, text: `${result.note}\n${materialsText(workbench.sources(), state.mounts, state.derived)}`, state };
+      }
+      if (action === 'repair') {
+        const result = await workbench.repairMounts();
+        if (!result.ok) return { ok: false, error: result.error, text: `修复失败：${result.error}` };
+        const fixed = (result.fixed || []).filter((row) => row.ok);
+        const failed = (result.fixed || []).filter((row) => !row.ok);
+        const lines = [`重连 ${fixed.length} 条`];
+        if (failed.length) lines.push(`仍有 ${failed.length} 条没修好：${failed.map((row) => `${row.as}（${row.error}）`).join('；')}`);
+        return { ok: true, text: lines.join('\n'), fixed: result.fixed };
+      }
+      return { ok: false, text: `不认识的 action：${action}（list|add|remove|mount|unmount|repair）` };
+    },
+  }));
+
+  register(defineTool({
+    name: 'data_analysis_vision',
+    description:
+      '扫描件识图：把审计判为 image_only 的 PDF 与图片交给多模态模型转写成文本，产物挂回 data/ 作为可直读材料。'
+      + 'action=plan 看待识别清单（不花 token）；run 开始识别（默认后台跑，limit 是本次最多识别多少页、pages 只跑指定页如 1-20）；'
+      + 'status 看进度；verify 人工核对后打勾。识图文本未经人工核对时，数字溯源闸门只会判「判不了」，不会放行。',
+    parameters: {
+      action: { type: 'string', required: true, description: 'plan | run | status | verify' },
+      limit: { type: 'number', description: 'run：本次最多识别多少「页」，默认 40' },
+      pages: { type: 'string', description: 'run：只跑这些页，如 1-20 / 3 / 1,3,5-7；留空=全部页' },
+      wait: { type: 'boolean', description: 'run：同步等跑完（小批量试跑用；默认后台）' },
+      relPaths: { type: 'string', description: 'verify：要打勾的文件（逗号分隔的相对路径）' },
+      all: { type: 'boolean', description: 'verify：把已识别过的全部打勾' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '识图任务已处理') },
+    async execute(args) {
+      const action = String(args?.action || 'plan');
+      if (action === 'plan') {
+        const plan = workbench.visionPlan();
+        if (!plan.ok) return { ok: false, error: plan.error, text: `无法生成识别清单：${plan.error}` };
+        const items = plan.items || [];
+        const skipped = plan.skipped || [];
+        const lines = [`待识别：${items.length} 份`];
+        if (items.length) {
+          for (const item of items.slice(0, 10)) lines.push(`  · ${item.relPath}${item.pages ? `（${item.pages} 页）` : ''}`);
+          if (items.length > 10) lines.push(`  …另有 ${items.length - 10} 份`);
+          lines.push('还没调模型，不花 token；确认后 action=run 再开始。');
+        }
+        if (skipped.length) {
+          lines.push(`跳过 ${skipped.length} 份：`);
+          for (const item of skipped.slice(0, 8)) lines.push(`  · ${item.relPath} — ${item.reason}`);
+        }
+        if (!items.length) lines.push('没有待识别的文件：要么审计还没跑，要么目录里没有扫描件 PDF。');
+        return { ok: true, text: lines.join('\n'), items: items.slice(0, 200), skipped: skipped.slice(0, 50), totals: plan.totals };
+      }
+      if (action === 'run') {
+        const result = await workbench.startVision({ limit: args?.limit ?? 40, pages: args?.pages || '', wait: Boolean(args?.wait) });
+        if (!result.ok) return { ok: false, error: result.error, text: `识图没能开始：${result.error}` };
+        if (result.started) {
+          return {
+            ok: true,
+            started: true,
+            text: `已开始（${result.plan.files} 份 / ${result.plan.pages ?? '?'} 页，本次上限 ${result.plan.limit} 页）。${result.note}`,
+            plan: result.plan,
+          };
+        }
+        const done = result.state?.donePages ?? 0;
+        const failed = result.state?.failedPages ?? 0;
+        const cancelled = result.state?.cancelled ? '（中途被停）' : '';
+        return {
+          ok: true,
+          text: `识图完成${cancelled}：${done} 页成功 / ${failed} 页失败，共 ${result.state?.files ?? 0} 份。`
+            + '文本已写进派生目录并挂回 data/；记得逐页对照原件后在面板点「标记已核对」。',
+          result,
+        };
+      }
+      if (action === 'status') {
+        const status = workbench.visionStatus();
+        const summary = status.summary || null;
+        const lines = [status.running ? '识图：正在跑' : '识图：空闲'];
+        if (status.running && status.task) {
+          lines.push(`进度 ${status.task.donePages ?? 0}/${status.task.totalPages ?? '?'} 页，正在处理 ${status.task.current || '—'}`);
+        }
+        if (summary) {
+          const files = Array.isArray(summary.files) ? summary.files.length : Number(summary.files) || 0;
+          lines.push(`已识别 ${summary.pagesOk ?? 0} 页 / ${files} 份；人工已核 ${summary.pagesVerified ?? 0} 页`);
+          if (summary.pagesFailed) lines.push(`失败 ${summary.pagesFailed} 页（看 output/audit/vision_log.csv 的 error 列）`);
+        }
+        return { ok: true, text: lines.join('\n'), status };
+      }
+      if (action === 'verify') {
+        const result = workbench.verifyVision({ relPaths: splitList(args?.relPaths), all: Boolean(args?.all) });
+        if (!result.ok) return { ok: false, error: result.error, text: `打勾失败：${result.error}` };
+        return { ok: true, text: `已标记 ${result.changed ?? 0} 页为人工已核。`, result };
+      }
+      return { ok: false, text: `不认识的 action：${action}（plan|run|status|verify）` };
+    },
+  }));
+
+  register(defineTool({
+    name: 'data_analysis_convert',
+    description:
+      '旧版 Office（.doc/.xls/.ppt）转码：调用本机桌面 Office 另存为 docx/xlsx/pptx，产物挂回 data/ 后技能就能直读。'
+      + 'action=probe 查本机 Office 能不能用；plan 看待转换清单；run 开始转（默认后台）；status 看进度。'
+      + 'macOS 上没有这条通道，需要用户在 Office/WPS 里自己另存为新格式。',
+    parameters: {
+      action: { type: 'string', required: true, description: 'probe | plan | run | status' },
+      limit: { type: 'number', description: 'run：本次最多转几个文件，默认 20' },
+      wait: { type: 'boolean', description: 'run：同步等跑完（默认后台）' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '转码任务已处理') },
+    async execute(args) {
+      const action = String(args?.action || 'plan');
+      if (action === 'probe') {
+        const info = await workbench.officeProbe({ force: true });
+        return {
+          ok: info.ok,
+          text: info.ok
+            ? `本机 Office 可用：${(info.apps || []).map((app) => app.name).join('、') || [info.word && 'Word', info.excel && 'Excel', info.ppt && 'PowerPoint'].filter(Boolean).join('、')}`
+            : [`旧版 Office 转码不可用：${info.error || info.detail || '未知原因'}`, info.hint || ''].filter(Boolean).join('\n'),
+          office: info,
+        };
+      }
+      if (action === 'plan') {
+        const plan = workbench.convertPlan();
+        if (!plan.ok) return { ok: false, error: plan.error, text: `无法生成转码清单：${plan.error}` };
+        const items = plan.items || [];
+        const lines = [`待转换：${items.length} 份`];
+        for (const item of items.slice(0, 10)) lines.push(`  · ${item.relPath} → ${item.targetExt}`);
+        if (items.length > 10) lines.push(`  …另有 ${items.length - 10} 份`);
+        if (!items.length) lines.push('没有 .doc/.xls/.ppt。');
+        return { ok: true, text: lines.join('\n'), items: items.slice(0, 200) };
+      }
+      if (action === 'run') {
+        const result = await workbench.startConvert({ limit: args?.limit ?? 20, wait: Boolean(args?.wait) });
+        if (!result.ok) return { ok: false, error: result.error, text: `转码没能开始：${result.error}` };
+        if (result.started) return { ok: true, started: true, text: `已开始（${result.plan.files} 份，本次上限 ${result.plan.limit} 份）。${result.note}`, plan: result.plan };
+        return {
+          ok: true,
+          text: `转码完成：${result.state?.done ?? 0} 份成功 / ${result.state?.failed ?? 0} 份失败。`,
+          result,
+        };
+      }
+      if (action === 'status') {
+        const status = workbench.convertStatus();
+        const summary = status.summary || null;
+        const lines = [status.running ? '转码：正在跑' : '转码：空闲'];
+        if (status.running && status.task) {
+          lines.push(`进度 ${status.task.done ?? 0}/${status.task.total ?? '?'} 份，正在处理 ${status.task.current || '—'}`);
+        }
+        if (summary) {
+          lines.push(`累计已转 ${summary.converted ?? 0} 份，失败 ${summary.failed ?? 0} 份`);
+          if (summary.lastError) lines.push(`最近一次失败：${summary.lastError}`);
+        }
+        return { ok: true, text: lines.join('\n'), status };
+      }
+      return { ok: false, text: `不认识的 action：${action}（probe|plan|run|status）` };
+    },
+  }));
+
+  register(defineTool({
+    name: 'data_analysis_migrate',
+    description:
+      '把老项目里复制进 data/ 的副本换成材料库的挂载：先逐份 md5 比对源文件，全部一致才允许 apply。'
+      + 'apply=false（默认）只比对、不删任何东西，返回 report；有不一致或缺失的会明确列出来，整条停下问用户。',
+    parameters: {
+      sourceId: { type: 'string', required: true, description: '材料库条目 id' },
+      entries: { type: 'string', description: '要比对的目录名（源里的相对路径），逗号或换行分隔；留空=该项目已挂载的全部条目' },
+      as: { type: 'string', description: '副本在 data/ 下的目录名，和源里的路径不同名时才用（整目录挂载时也用它定位）' },
+      apply: { type: 'boolean', description: 'true 才真的删副本并建联接（必须先跑过一次 apply=false 且 safe=true）' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '迁移检查完成') },
+    async execute(args) {
+      const result = await workbench.migrateSource({
+        sourceId: args?.sourceId,
+        entries: splitList(args?.entries),
+        as: args?.as || '',
+        apply: Boolean(args?.apply),
+      });
+      if (!result.ok) return { ok: false, error: result.error, text: `迁移未执行：${result.error}`, report: result.report };
+      const lines = [];
+      for (const item of result.report || []) {
+        const name = item.as || item.entry || '(根目录)';
+        if (item.skipped) {
+          lines.push(`· ${name}：${item.skipped === 'already-linked' ? '已经是联接，跳过' : item.skipped}`);
+          continue;
+        }
+        lines.push(`· ${name}：核对 ${item.verified}/${item.totalLocal} 份完全一致${item.onlyInSource ? `，源里另有 ${item.onlyInSource} 份没被复制` : ''}`);
+        if (item.mismatched?.length) lines.push(`    内容不一致：${item.mismatched.join('、')}`);
+        if (item.missing?.length) lines.push(`    源里找不到：${item.missing.join('、')}`);
+      }
+      if (result.note) lines.push('', result.note);
+      return { ok: true, text: lines.filter(Boolean).join('\n'), safe: result.safe, applied: result.applied, report: result.report, done: result.done };
+    },
+  }));
+
   /* ---------------------------- 配置 ---------------------------- */
 
   register(defineTool({
@@ -561,7 +877,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
       '修改工作台配置（skillRoot / pythonPath / dataDir）。skillRoot 指向 SPSS-Style-Charting-Skill 仓库根或其中的 empirical-research-pipeline 包目录；插件对它是只读的。',
     parameters: {
       skillRoot: { type: 'string', description: '技能包目录' },
-      pythonPath: { type: 'string', description: 'python 可执行文件（默认 python）' },
+      pythonPath: { type: 'string', description: 'python 可执行文件（Windows 默认 python；macOS/Linux 默认 python3）；改了会重新自检' },
       dataDir: { type: 'string', description: '台账目录（留空=按 profile 默认）；改了会换一份项目登记' },
     },
     output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '已更新配置') },

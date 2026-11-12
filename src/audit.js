@@ -538,10 +538,19 @@ export function corpusCurrentSignature(projectRoot, { force = false } = {}) {
   let files = 0;
   let bytes = 0;
   let truncated = false;
+  const seen = new Set();
   const walk = (dir) => {
     let entries;
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    // 联接/镜像会让同一份真实目录从多个路径进来，按真实路径去重，避免重复计数和成环
+    try {
+      const real = fs.realpathSync(dir);
+      if (seen.has(real)) return;
+      seen.add(real);
     } catch {
       return;
     }
@@ -551,19 +560,24 @@ export function corpusCurrentSignature(projectRoot, { force = false } = {}) {
         return;
       }
       const name = entry.name;
-      if (name.startsWith('.') || name.startsWith('._')) continue; // 与 skill 的 hidden/._ 规则一致
+      // 注意：技能的 audit_corpus.py 把隐藏文件也算进 total_files（只是状态记为 hidden/metadata），
+      // 所以这里不能再跳过点开头的文件，否则挂了带 .DS_Store 的材料就会假报「新鲜度对不上」。
       const abs = path.join(dir, name);
-      if (entry.isDirectory()) {
+      // 不能用 entry.isDirectory()：目录联接在 Dirent 里是符号链接，isDirectory() 为 false，
+      // 那样整个挂载目录都会被当成「不是文件也不是目录」跳过。用 stat 跟随链接判断。
+      let stat;
+      try {
+        stat = fs.statSync(abs);
+      } catch {
+        continue; // 遍历时被移走，或断链
+      }
+      if (stat.isDirectory()) {
         walk(abs);
         continue;
       }
-      if (!entry.isFile()) continue;
+      if (!stat.isFile()) continue;
       files += 1;
-      try {
-        bytes += fs.statSync(abs).size;
-      } catch {
-        /* 文件在遍历时被移走：忽略 */
-      }
+      bytes += stat.size;
     }
   };
   walk(root);

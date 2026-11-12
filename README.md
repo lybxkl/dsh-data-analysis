@@ -103,6 +103,81 @@
 - **窄屏**：面板宽度 ≤1240 时右栏收成抽屉（顶栏「运行台」打开）；≤860 时左栏也收起，改用顶栏的
   阶段下拉切换。
 
+## 材料库：用户资料留在原地
+
+早先只有一条路——把文件复制进项目 `data/`。复制之后材料与原件就断链了：审计表里没有绝对路径、没有源 mtime，
+用户改了源目录项目也不知道。现在的做法是**挂载**：
+
+1. `data_analysis_materials`（action=add，path=目录）把用户目录登记进**全局材料库**（台账里的 `sources[]`，与 `projects[]` 同级）。
+   一个目录只登记一次，多个项目共用；摘掉挂载不会删库。
+2. action=mount 把它挂到项目的 `data/<挂载名>` 下：Windows 建目录联接（junction），macOS/Linux 建
+   「真实目录 + 逐文件软链」的镜像（技能用 `os.walk` 默认不跟随目录软链，只能逐文件链）。
+   `--root data` 一行不用改，技能照常扫。源文件一个字节都不复制。
+3. 摘掉（unmount）只删联接；联接被手删/移动用 action=repair 修；`materials-mounted`、`sources-outside` 两条闸门盯着
+   「断链、指进项目内、重叠挂载」和「源目录被放进项目里」。
+
+挂载粒度由用户决定：挂整个资料包、挂到省/案由、或只挂某一个子目录都行，不预设分类。单文件材料按「父目录 + 子目录」挂。
+
+### 四类文件，逐类报数
+
+登记回执会报四类，且**相加等于目录里的文件总数**：
+
+| 类别 | 包含 | 处理 |
+| --- | --- | --- |
+| 直读 | 技能能抽文本的 27 种：txt/md/csv/json/xml/yaml 等文本、pdf、docx/docm、odt、pptx/pptm、xlsx/xlsm、html/htm/xhtml | 挂上就能用 |
+| 识图 | png/jpg/jpeg/tif/tiff/bmp/webp/gif/heic，以及**没有文字层**的 pdf（审计判 `status=image_only`） | 多模态模型逐页转写（不搞 OCR） |
+| 待转换 | doc/xls/ppt | 桌面 Office 另存为 docx/xlsx/pptx |
+| 不支持 | mhtml、压缩包、音视频、其他扩展、网址 | 告诉用户怎么换格式 |
+
+`.DS_Store`、`Thumbs.db`、`~$` 锁文件这类记为「系统文件」，来源账里单独标 `channel=junk`，不进四类统计。
+（审计会把它们也算进总文件数，所以来源账必须一起记——否则行数对不上。）
+
+### 识图（多模态，不做 OCR）
+
+- `data_analysis_vision`（action=plan）只数页、零模型调用；先给用户看「待识别 N 份 / M 页」，再 action=run。
+  `limit` 是本次最多多少页，`pages="1-20"` 可以试跑前 20 页。
+- 判定口径跟技能一致：`chars < min_chars 且 pdf 里有图` 才算 `image_only`——带 logo 但有正文的 PDF 不会被误判。
+- 每页记：页图 sha256、provider/model、提示词版本（`prompts/vision-v1.md`）、token、产物路径、`human_verified`。
+  产物写到 `<台账目录>\sources-cache\<源 id>\derived\`，再挂成 `data/<挂载名>__识别稿/`。
+- 模型不能看图时**明确报错**，不会静默降级（DSH 的 llm 层会把图片换成一行文字占位，这里专门拦这个）。
+- **未核不是通过**：`human_verified=false` 的识别稿一旦被数字溯源/质检记录引用，`qa-vision` 只能是 unjudged；
+  全部识别完但没核对，也是 unjudged。核对后用 action=verify 打勾。
+
+### 待转换（桌面 Office）
+
+`data_analysis_convert`（action=probe 先探测，action=run 真转）走 COM：Word `SaveAs2(16)`、Excel `SaveAs(51)`、
+PowerPoint `SaveAs(24)`。转换前先把文件复制到系统临时目录，免得 Office 在用户的材料目录里写 `~$` 锁文件。
+非 Windows 或没装 Office 时给 Mac/替代方案的指引，不假装能转。
+
+### 旧副本迁移
+
+早先复制进 `data/` 的副本：`data_analysis_migrate` 先逐份 md5 比对（`apply` 不传只报告），
+全部对上才 `apply=true` 删副本、建联接；**只要有一份对不上就整条停下，一个文件都不删**。
+整目录挂载（`entry` 为空）或副本被改过名时，用 `as=<data/ 下的目录名>` 定位要替换的那份。
+迁移后必须重跑审计——`audit-freshness` 会因为文件数/字节数变化拦住。
+
+来源账写在 `output/materials/`：`provenance.csv`（每份文件从哪来，派生稿带 `derived_from` 指回原件）、
+`selection.csv`（源目录里每份文件 include/exclude 与理由）、`mounts.json`（挂载快照）。
+`materials-provenance-cover` 要求 provenance 行数等于审计扫到的文件数，对不上就判「判不了」。
+
+## Windows / macOS / Linux 的差异
+
+| 能力 | Windows | macOS / Linux |
+| --- | --- | --- |
+| 挂载方式 | 目录联接（junction），`data/安徽` 就是源目录 | 镜像目录：真实目录 + 逐文件软链 + `.dsh-mount.json` 标记 |
+| 源目录增删文件 | 立刻可见（就是同一个目录） | 镜像不会自动跟；点「修复」（`action=repair`）做增量补齐并清掉断链 |
+| Python 命令 | 默认 `python`，可在配置里填 `python.exe` 绝对路径 | 默认 `python3`，没有 `python` 也能跑 |
+| Word→PDF | COM + pywin32，`pass/warn` | `unjudged`（没有 Word COM），改用 `soffice --headless --convert-to pdf` |
+| doc/xls/ppt 转码 | 桌面 Office COM 另存为 OOXML | 不支持，请在 Office/WPS 里自己另存为；Linux 可用 soffice 批量转 |
+| 识图 | 支持 | 支持（PyMuPDF 渲染 + Pillow 转 PNG，逻辑一致） |
+
+两处容易踩的坑：
+
+- **Windows 只走 junction**：它不需要管理员权限，但**不能指向网络路径**（`\\NAS\...`）。指向网络共享会明确报错，
+  这种情形先把材料包挂到本地磁盘再登记。macOS/Linux 的镜像用的是文件软链，普通用户就能建。
+- **路径长度**：Windows 上深层材料目录容易超 260 字符。删除失败时错误信息会提示「路径超长」，
+  可以给系统开启长路径支持，或把材料包放到更浅的目录。
+
 ## 阶段参数的两条现实约束
 
 - **统计**：`auto_stats.py` 默认找不到因变量会直接 exit 2（`no outcome column found; pass config.outcome`），
@@ -135,11 +210,22 @@
 - **未开工 ≠ 未过**：还没产物、没运行、也没裁定的阶段是「未开始」，不计入「未过」总数，也不画成 ✗。
 - **多步阶段**：终检是 `qa_outputs.py → verify_numbers.py` 两步；面板显示两步脚本名，参数在任务卡与运行日志里。
 
-## 模型工具（14 个）
+## 模型工具（18 个）
 
 `data_analysis_status`（状态与闸门）、`doctor`（环境自检）、`list_stages`、`figures`、`create_project`、`open_project`、
-`run_stage`、`run_log`、`cancel_stage`、`adjudicate`、`configure`、`draft`（起草文本）、`recheck`（复核）、`issue`（写问题）。
+`run_stage`、`run_log`、`cancel_stage`、`adjudicate`、`configure`、`draft`（起草文本）、`recheck`（复核）、`issue`（写问题）、
+`materials`（材料库：登记/挂载/摘下/修复）、`vision`（识图：计划/跑/核对）、`convert`（Legacy Office 转码）、
+`migrate`（旧副本换联接）。
 状态类工具只回摘要与闸门，不回整份产物快照（避免一次读进 60 张图的全部列）。
+
+## 测试
+
+```bash
+node tests/materials.test.mjs    # 通道分类、挂载、迁移、识图全流程、来源账（全在临时目录里造数据）
+node tests/e2e-corpus.test.mjs   # 真实语料端到端（有材料包才跑；用 DSA_PROJECT / DSA_SOURCE 指定路径）
+```
+
+识图小节用假模型跑，不花 token；真实模型只在面板里手工试。
 
 ## 第 9 阶段：复核与修订（完整闭环）
 
@@ -208,13 +294,25 @@ dsh-data-analysis/
   src/audit.js        产物只读解析（CSV/JSON、三态徽章、ΔL*）
   src/gates.js        闸门判定、裁定失效、阶段状态
   src/runner.js       子进程运行（多步）、日志、取消、重启对账
-  src/service.js      面板/工具共用的服务层
-  src/assistant.js    LLM 桥：受控上下文 + llm.stream + 固定 docs/ 落点
+  src/service.js      面板/工具共用的服务层（含材料库、识图、转码、迁移）
+  src/assistant.js    LLM 桥：受控上下文 + llm.stream + 看图（seeImage）
+  src/platform.js     目录联接/镜像挂载、PowerShell 调用、自己走的递归删除
+  src/sources.js      材料库、挂载表、来源账、派生路径、旧副本迁移
+  src/vision.js       扫描件逐页识别、留痕、人工核对
+  src/convert.js      桌面 Office 转码（doc/xls/ppt → OOXML）
   src/taskcard.js     阶段任务卡（投递到原生会话的那段文字）
   src/tools.js        data_analysis_* 模型工具
   src/routes.js       /data-analysis/api/* 面板通道
   src/prompt.js       注入系统提示的使用规则
+  assets/render_pages.py  数页 / 渲染页图 / 图片转 PNG（PyMuPDF + Pillow）
+  tests/              材料库回归与真实语料端到端
 ```
+
+## 两个 Node 的坑（Windows）
+
+- `fs.rmSync({recursive:true})` 对**非 ASCII 路径**（`data\安徽`）会**静默失效**：不抛错、也不删。
+  所以 `platform.removeTree()` 自己走 `readdirSync + unlinkSync + rmdirSync`，别改回去。
+- `fs.cpSync` 在同样的语料树上也崩过（`STATUS_STACK_BUFFER_OVERRUN`）。要整树复制就自己递归 `copyFileSync`。
 
 ## v0.1 边界
 

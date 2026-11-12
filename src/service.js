@@ -10,6 +10,7 @@ import path from 'node:path';
 
 import {
   DEFAULT_CONFIG,
+  DEFAULT_PYTHON,
   SKILL_CANDIDATES,
   SKILL_PACKAGE,
   STAGE_DEFS,
@@ -20,10 +21,42 @@ import {
 import { evaluateProject, summarizeStages, gateTotals } from './gates.js';
 import { createProject, projectId, readProject, writeProject, runsDir } from './projects.js';
 import { fingerprint, resolveSkillRoot, resolveStageScript, listScripts } from './skill.js';
-import { scanArtifacts } from './audit.js';
+import { clearCorpusScan, scanArtifacts } from './audit.js';
 import { runPreflight } from './preflight.js';
 import { buildTaskCard } from './taskcard.js';
 import { applyPatch, buildEvidence, readIssues, recheckSummary, writeIssues } from './recheck.js';
+import {
+  addSource as registerSource,
+  derivedMountName,
+  derivedRoot,
+  findSource,
+  formatBytes,
+  isInside as isInsidePath,
+  listDataEntries,
+  listSources,
+  migrateCopiedEntry,
+  mountOne,
+  mountPathOf,
+  newId,
+  readMaterials,
+  receiptLine,
+  removeSource as dropSource,
+  rescanSource,
+  safeAlias,
+  scanSourceDir,
+  unmountOne,
+  verifyMounts,
+  writeProvenance,
+  writeSelection,
+} from './sources.js';
+import {
+  buildPlan as buildVisionPlan,
+  derivedInventory,
+  markVerified as markVisionVerified,
+  visionSummary,
+} from './vision.js';
+import { buildConvertPlan, convertSummary, probeOffice } from './convert.js';
+import { isLink, readMountMarker, removeTree } from './platform.js';
 
 const EMPTY_SKILL = { ok: false, reason: '未配置 skillRoot', root: '', packageDir: '', version: '', sha256: '', scripts: [] };
 
@@ -42,7 +75,7 @@ function scriptErrorMessage(stage, scriptRel, found, projectRoot, skill) {
 }
 
 export class Workbench {
-  constructor({ getConfig, store, runner, onChange }) {
+  constructor({ getConfig, store, runner, onChange, materials }) {
     this.getConfig = getConfig;
     this.store = store;
     this.runner = runner;
@@ -50,6 +83,9 @@ export class Workbench {
     this.skillCache = null;
     this.skillCacheKey = '';
     this.preflightState = { value: null, at: 0, promise: null };
+    // 材料库的三个外部依赖：识图执行器、桌面转换执行器、派生缓存目录
+    this.materials = materials || null;
+    this.officeCache = null;
   }
 
   /* ------------------------------ 技能包 ------------------------------ */
@@ -250,6 +286,7 @@ export class Workbench {
       adjudications: this.adjudicationsFor(active.id),
       activeRuns: this.runner.activeFor(active.id),
       runs: this.recentRuns(200, active.id),
+      sources: listSources(this.store),
     });
     const evaluated = stages.find((item) => item.id === stage.id) || stage;
     // 评估结果只带判定，不带登记表里的「期望产物」；任务卡要后者
@@ -321,6 +358,541 @@ export class Workbench {
     return all;
   }
 
+  /* ------------------------------ 材料库 ------------------------------ */
+
+  materialServices() {
+    return this.materials || {};
+  }
+
+  /** 派生缓存跟着台账走：换项目不用重算，也不往用户的材料目录里写东西。 */
+  cacheDir() {
+    const configured = this.materialServices().cacheDir;
+    if (configured) return configured;
+    const ledger = this.store?.filePath || '';
+    // 这是「缓存根」，sources-cache 由 derivedRoot / workDir 自己拼，避免出现 sources-cache\sources-cache
+    return ledger ? path.dirname(ledger) : path.join(process.cwd(), '.dsh-data-analysis');
+  }
+
+  /** 材料库清单（全局一份）+ 每个源被哪些项目用着。 */
+  sources() {
+    const projects = this.store.get().projects || [];
+    const usedBy = new Map();
+    for (const item of projects) {
+      const read = readProject(item.path);
+      if (!read.ok) continue;
+      for (const mount of readMaterials(read.project).mounts) {
+        const list = usedBy.get(mount.sourceId) || [];
+        list.push({ project: read.project.name || path.basename(item.path), projectPath: item.path, as: mount.as });
+        usedBy.set(mount.sourceId, list);
+      }
+    }
+    return listSources(this.store).map((item) => {
+      const scan = item.scan || null;
+      return {
+        id: item.id,
+        label: item.label,
+        path: item.path,
+        note: item.note || '',
+        createdAt: item.createdAt,
+        exists: fs.existsSync(item.path),
+        scan: scan
+          ? {
+              at: scan.at,
+              files: scan.files,
+              realFiles: scan.realFiles,
+              bytes: scan.bytes,
+              bytesText: formatBytes(scan.bytes),
+              byChannel: scan.byChannel,
+              byExt: scan.byExt,
+              entries: (scan.entries || []).slice(0, 80),
+              truncated: Boolean(scan.truncated),
+              errors: (scan.errors || []).slice(0, 10),
+            }
+          : null,
+        receipt: receiptLine(scan),
+        usedBy: usedBy.get(item.id) || [],
+      };
+    });
+  }
+
+  addSource({ label = '', path: rawPath = '', note = '' } = {}) {
+    const result = registerSource(this.store, { label, path: rawPath, note });
+    if (!result.ok) return result;
+    this.onChange({ kind: 'sources' });
+    return { ...result, receipt: receiptLine(result.source?.scan), sources: this.sources() };
+  }
+
+  rescanSource(id) {
+    const result = rescanSource(this.store, id);
+    if (!result.ok) return result;
+    this.onChange({ kind: 'sources' });
+    return { ...result, receipt: receiptLine(result.source?.scan) };
+  }
+
+  removeSource(id, { force = false } = {}) {
+    const projects = (this.store.get().projects || [])
+      .map((item) => {
+        const read = readProject(item.path);
+        return read.ok ? { path: item.path, name: item.name, project: read.project } : null;
+      })
+      .filter(Boolean);
+    const result = dropSource(this.store, id, { projects, force });
+    if (!result.ok) return result;
+    this.onChange({ kind: 'sources' });
+    return { ...result, sources: this.sources() };
+  }
+
+  materialsOf() {
+    const active = this.active();
+    if (!active.ok) return { ok: false, error: active.error };
+    return { ok: true, active, materials: readMaterials(active.project) };
+  }
+
+  saveMaterials(projectRoot, materials) {
+    const read = readProject(projectRoot);
+    if (!read.ok) return { ok: false, error: read.error };
+    const project = { ...read.project, materials: { version: 1, mounts: materials.mounts || [] } };
+    writeProject(projectRoot, project);
+    return { ok: true, project };
+  }
+
+  /** 挂载后的账：联接是否还有效 + 派生稿清单 + data/ 下现在有什么。 */
+  mountsState(projectRoot) {
+    const read = readProject(projectRoot);
+    const materials = read.ok ? readMaterials(read.project) : { mounts: [] };
+    const sources = listSources(this.store);
+    const cacheDir = this.cacheDir();
+    return {
+      materials,
+      mounts: verifyMounts(projectRoot, materials),
+      derived: derivedInventory(materials, sources, cacheDir),
+      entries: listDataEntries(projectRoot),
+    };
+  }
+
+  /** 工具调用可能发生在还没打开项目的时候：给一份空账，别抛错。 */
+  mountsStateSafe() {
+    const active = this.active();
+    if (!active.ok) return { materials: { mounts: [] }, mounts: [], derived: [], entries: [] };
+    return this.mountsState(active.path);
+  }
+
+  /** 重写留痕文件：provenance.csv / mounts.json / selection.csv。 */
+  refreshMaterials(projectRoot) {
+    const read = readProject(projectRoot);
+    if (!read.ok) return { ok: false, error: read.error };
+    const materials = readMaterials(read.project);
+    const sources = listSources(this.store);
+    writeProvenance({ projectRoot, materials, sources, cacheDir: this.cacheDir() });
+    writeSelection({ projectRoot, materials, sources });
+    clearCorpusScan();
+    return { ok: true };
+  }
+
+  /** 把材料挂到 data/ 下：Windows 用目录联接，macOS/Linux 用镜像目录，都不复制文件。 */
+  async mountSource({ sourceId = '', entries = [], as = '' } = {}) {
+    const state = this.materialsOf();
+    if (!state.ok) return state;
+    const { active } = state;
+    const source = findSource(this.store, sourceId);
+    if (!source) return { ok: false, error: '找不到这个材料源，先把目录登记进材料库' };
+    if (!fs.existsSync(source.path)) return { ok: false, error: `材料目录不在了：${source.path}` };
+    if (isInsidePath(active.path, source.path)) {
+      return { ok: false, error: '这个目录在项目目录里面：项目自己的 data/ 本来就能读，不需要再挂一次' };
+    }
+
+    const picked = (Array.isArray(entries) ? entries : [])
+      .map((item) => String(item).replace(/\\/g, '/').replace(/^\/+|\/+$/g, ''))
+      .filter(Boolean);
+    const plan = [];
+    if (!picked.length) {
+      plan.push({ entry: '', as: safeAlias(as || source.label || path.basename(source.path)) });
+    } else {
+      for (const entry of picked) {
+        const abs = path.join(source.path, ...entry.split('/'));
+        if (!fs.existsSync(abs)) return { ok: false, error: `材料目录里没有「${entry}」` };
+        plan.push({ entry, as: safeAlias(picked.length === 1 && as ? as : path.basename(entry)) });
+      }
+    }
+
+    const materials = readMaterials(active.project);
+    const taken = new Set(materials.mounts.map((item) => item.as));
+    const seen = new Set();
+    for (const item of plan) {
+      if (taken.has(item.as)) return { ok: false, error: `data/${item.as} 已经挂过材料了` };
+      if (seen.has(item.as)) return { ok: false, error: `这次选的里面有两个都叫「${item.as}」，先改个名再挂` };
+      seen.add(item.as);
+      if (fs.existsSync(mountPathOf(active.path, { as: item.as }))) {
+        return { ok: false, error: `data/${item.as} 已经有东西了（真实目录或别的挂载），先处理掉再挂` };
+      }
+    }
+
+    const created = [];
+    const warnings = [];
+    for (const item of plan) {
+      // target 记的是「源根」，entry 是源内相对路径：解挂/校验/重连都按同一口径算绝对路径
+      const mount = { id: newId('mnt'), sourceId: source.id, entry: item.entry, as: item.as, target: source.path, createdAt: new Date().toISOString() };
+      const run = await mountOne({ projectRoot: active.path, mount });
+      if (!run.ok) {
+        for (const done of created) await unmountOne({ projectRoot: active.path, mount: done, includeDerived: true });
+        return { ok: false, error: run.error || '建立挂载失败' };
+      }
+      if (run.warning) warnings.push(`data/${mount.as}：${run.warning}`);
+      created.push(mount);
+    }
+
+    materials.mounts = [...materials.mounts, ...created];
+    const saved = this.saveMaterials(active.path, materials);
+    if (!saved.ok) {
+      for (const done of created) await unmountOne({ projectRoot: active.path, mount: done, includeDerived: true });
+      return saved;
+    }
+
+    for (const mount of created) await this.mountDerived(active.path, mount);
+    this.refreshMaterials(active.path);
+    this.onChange({ kind: 'project', path: active.path });
+    return {
+      ok: true,
+      mounts: created,
+      warnings,
+      note: warnings.length
+        ? `已挂上，但有 ${warnings.length} 条需要留意：${warnings.join('；')}`
+        : '已挂上，不复制文件；审计阶段会直接扫这些目录。1 份都没有从磁盘上搬过。',
+      state: this.mountsState(active.path),
+    };
+  }
+
+  /** 识别稿挂进 data/：`<挂载名>__识别稿`，让技能把转写文本当普通材料读。 */
+  async mountDerived(projectRoot, mount) {
+    const root = derivedRoot(this.cacheDir(), mount.sourceId);
+    if (!fs.existsSync(root)) return { ok: false, skipped: true, reason: '还没有识别稿' };
+    const derivedMount = { as: derivedMountName(mount), target: root, entry: mount.entry };
+    const link = mountPathOf(projectRoot, derivedMount);
+    if (isLink(link) || fs.existsSync(link)) return { ok: true, existing: true };
+    return mountOne({ projectRoot, mount: derivedMount });
+  }
+
+  async unmountSource({ as = '' } = {}) {
+    const state = this.materialsOf();
+    if (!state.ok) return state;
+    const { active } = state;
+    const materials = readMaterials(active.project);
+    const key = String(as || '').trim();
+    const mount = materials.mounts.find((item) => item.as === key || item.id === key);
+    if (!mount) return { ok: false, error: `没有挂在 data/${key} 上的材料` };
+    const run = await unmountOne({ projectRoot: active.path, mount, includeDerived: true });
+    if (!run.ok) return run;
+    materials.mounts = materials.mounts.filter((item) => item.id !== mount.id);
+    const saved = this.saveMaterials(active.path, materials);
+    if (!saved.ok) return saved;
+    this.refreshMaterials(active.path);
+    this.onChange({ kind: 'project', path: active.path });
+    return { ok: true, removed: mount, note: '解挂只删挂载，材料原件和材料库条目都还在', state: this.mountsState(active.path) };
+  }
+
+  /** 联接被手动删掉/改指了：按 project.json 的记录重连一次（不碰源文件）。 */
+  async repairMounts() {
+    const state = this.materialsOf();
+    if (!state.ok) return state;
+    const { active } = state;
+    const materials = readMaterials(active.project);
+    const report = verifyMounts(active.path, materials);
+    const fixed = [];
+    for (const item of report) {
+      if (item.status === 'ok') continue;
+      const mount = materials.mounts.find((row) => row.id === item.id);
+      if (!mount) continue;
+      const target = mount.entry ? path.join(mount.target, mount.entry) : mount.target;
+      if (!fs.existsSync(target)) {
+        fixed.push({ as: mount.as, ok: false, error: '材料源目录不在了，先恢复它或改登记' });
+        continue;
+      }
+      await unmountOne({ projectRoot: active.path, mount, includeDerived: false });
+      const run = await mountOne({ projectRoot: active.path, mount });
+      fixed.push({ as: mount.as, ok: run.ok, error: run.error || '' });
+    }
+    // macOS/Linux 的镜像目录：状态是 ok 也可能已经和源不同步（源里增删过文件），这里顺手对齐一次
+    for (const item of report) {
+      if (item.status !== 'ok' || item.mode !== 'mirror') continue;
+      const mount = materials.mounts.find((row) => row.id === item.id);
+      if (!mount) continue;
+      const before = readMountMarker(mountPathOf(active.path, mount));
+      const run = await mountOne({ projectRoot: active.path, mount });
+      if (!run.ok) {
+        fixed.push({ as: mount.as, ok: false, error: run.error || '' });
+        continue;
+      }
+      const added = Math.max(0, Number(run.files || 0) - Number(before?.files || 0));
+      const pruned = Number(run.pruned || 0);
+      if (added || pruned) fixed.push({ as: mount.as, ok: true, added, pruned, error: '' });
+    }
+    this.refreshMaterials(active.path);
+    this.onChange({ kind: 'project', path: active.path });
+    return { ok: true, fixed, state: this.mountsState(active.path) };
+  }
+
+  /* ------------------------- 识图（扫描件转写） ------------------------- */
+
+  visionPlan() {
+    const active = this.active();
+    if (!active.ok) return { ok: false, error: active.error };
+    const plan = buildVisionPlan({
+      projectRoot: active.path,
+      materials: readMaterials(active.project),
+      sources: listSources(this.store),
+      cacheDir: this.cacheDir(),
+    });
+    if (!plan.ok) return plan;
+    return { ...plan, projectRoot: active.path };
+  }
+
+  visionStatus() {
+    const active = this.active();
+    const vision = this.materialServices().vision;
+    return {
+      ok: true,
+      running: Boolean(vision?.status?.().running),
+      task: vision?.status?.() || { running: false },
+      summary: active.ok ? visionSummary(active.path) : null,
+    };
+  }
+
+  /**
+   * 开始识图。默认后台跑：一次几十页要几分钟，HTTP 请求和工具调用都不该挂着等。
+   * wait=true 时同步等结果（面板里的小批量试跑用）。
+   */
+  async startVision({ limit = 40, pages = '', wait = false } = {}) {
+    const vision = this.materialServices().vision;
+    if (!vision) return { ok: false, error: '识图执行器没有初始化' };
+    if (vision.status().running) return { ok: false, error: '已经有一个识图任务在跑，等它跑完或先取消' };
+    const planned = this.visionPlan();
+    if (!planned.ok) return planned;
+    if (!(planned.items || []).length) {
+      return { ok: false, error: '没有待识别的文件：要么审计还没跑（先跑 audit），要么没有扫描件 PDF', plan: planned };
+    }
+    const counted = await vision.countPages(planned);
+    const args = { projectRoot: planned.projectRoot, plan: counted, limit, pageSpec: pages };
+    const brief = {
+      files: (counted.items || []).length,
+      pages: counted.totals?.pages ?? null,
+      skipped: (counted.skipped || []).length,
+      limit,
+      pageSpec: pages || '全部页',
+    };
+    if (wait) {
+      const result = await vision.run(args);
+      if (result.ok) await this.afterVision(planned.projectRoot);
+      return { ...result, plan: brief };
+    }
+    this.visionJob = vision
+      .run(args)
+      .then(async (result) => {
+        if (result.ok) await this.afterVision(planned.projectRoot);
+        return result;
+      })
+      .catch((error) => ({ ok: false, error: error?.message || String(error) }));
+    return { ok: true, started: true, plan: brief, note: '后台在跑，用 vision-status 看进度；不要重复点开始' };
+  }
+
+  cancelVision() {
+    const vision = this.materialServices().vision;
+    if (!vision) return { ok: false, error: '识图执行器没有初始化' };
+    return vision.cancel();
+  }
+
+  cancelConvert() {
+    const converter = this.materialServices().converter;
+    if (!converter?.cancel) return { ok: false, error: '转换执行器没有初始化' };
+    return converter.cancel();
+  }
+
+  async afterVision(projectRoot) {
+    const read = readProject(projectRoot);
+    if (!read.ok) return;
+    const materials = readMaterials(read.project);
+    for (const mount of materials.mounts) await this.mountDerived(projectRoot, mount);
+    this.refreshMaterials(projectRoot);
+    this.onChange({ kind: 'project', path: projectRoot });
+  }
+
+  verifyVision({ relPaths = [], all = false } = {}) {
+    const active = this.active();
+    if (!active.ok) return active;
+    const result = markVisionVerified(active.path, { relPaths, all });
+    if (result.ok) this.refreshMaterials(active.path);
+    return result;
+  }
+
+  /* ------------------------ 旧版 Office 转码 ------------------------ */
+
+  convertPlan() {
+    const active = this.active();
+    if (!active.ok) return { ok: false, error: active.error };
+    const plan = buildConvertPlan({
+      projectRoot: active.path,
+      materials: readMaterials(active.project),
+      sources: listSources(this.store),
+      cacheDir: this.cacheDir(),
+    });
+    if (!plan.ok) return plan;
+    return { ...plan, projectRoot: active.path };
+  }
+
+  convertStatus() {
+    const active = this.active();
+    const converter = this.materialServices().converter;
+    return {
+      ok: true,
+      running: Boolean(converter?.status?.().running),
+      task: converter?.status?.() || { running: false },
+      summary: active.ok ? convertSummary(active.path) : null,
+      office: this.officeCache,
+    };
+  }
+
+  async officeProbe({ force = false } = {}) {
+    const info = await probeOffice({ force });
+    this.officeCache = info;
+    return info;
+  }
+
+  async startConvert({ limit = 20, wait = false } = {}) {
+    const converter = this.materialServices().converter;
+    if (!converter) return { ok: false, error: '转换执行器没有初始化' };
+    if (converter.status().running) return { ok: false, error: '已经有一个转换任务在跑' };
+    const planned = this.convertPlan();
+    if (!planned.ok) return planned;
+    if (!(planned.items || []).length) return { ok: false, error: '没有待转换的 doc/xls/ppt', plan: planned };
+    const office = await this.officeProbe();
+    if (!office.ok) return { ok: false, error: office.error, office };
+    const args = { projectRoot: planned.projectRoot, plan: planned, limit };
+    const brief = { files: (planned.items || []).length, limit };
+    if (wait) {
+      const result = await converter.run(args);
+      if (result.ok) await this.afterVision(planned.projectRoot);
+      return { ...result, plan: brief };
+    }
+    this.convertJob = converter
+      .run(args)
+      .then(async (result) => {
+        if (result.ok) await this.afterVision(planned.projectRoot);
+        return result;
+      })
+      .catch((error) => ({ ok: false, error: error?.message || String(error) }));
+    return { ok: true, started: true, plan: brief, note: '后台在跑，用 convert-status 看进度' };
+  }
+
+  /* --------------------------- 旧项目迁移 --------------------------- */
+
+  /**
+   * 把早先复制进 data/ 的副本换成联接。默认只比对不删：
+   * 全部逐份 md5 对上才允许 apply，任何一个对不上就整条停下。
+   */
+  async migrateSource({ sourceId = '', entries = [], as = '', apply = false } = {}) {
+    const state = this.materialsOf();
+    if (!state.ok) return state;
+    const { active } = state;
+    const source = findSource(this.store, sourceId);
+    if (!source) return { ok: false, error: '找不到这个材料源' };
+    const materials = readMaterials(active.project);
+    const picked = (Array.isArray(entries) ? entries : [])
+      .map((item) => String(item).replace(/\\/g, '/').replace(/^\/+|\/+$/g, ''))
+      .filter(Boolean);
+    // entry 是源里的相对路径（整目录挂载时为空），as 是副本在 data/ 下的目录名——两者可能不同名
+    const alias = String(as || '').trim();
+    let targets;
+    if (alias) {
+      const mounted = materials.mounts.find((item) => item.as === alias);
+      const entry = picked.length === 1 ? picked[0] : (mounted ? mounted.entry || '' : '');
+      targets = [{ entry, as: alias }];
+    } else if (picked.length) targets = picked.map((entry) => ({ entry, as: path.basename(entry) }));
+    else {
+      targets = materials.mounts
+        .filter((item) => item.sourceId === source.id)
+        .map((item) => ({ entry: item.entry || '', as: item.as }));
+    }
+    if (!targets.length) return { ok: false, error: '没有要比对的目录：先挂载，或直接给出源里的目录名' };
+
+    const report = [];
+    for (const target of targets) {
+      const one = migrateCopiedEntry({ projectRoot: active.path, source, entry: target.entry, as: target.as });
+      report.push(one);
+    }
+    const label = (item) => item.as || item.entry;
+    const safe = report.every((item) => item.ok);
+    if (!apply) {
+      return {
+        ok: true,
+        applied: false,
+        safe,
+        report,
+        note: safe
+          ? '逐份 md5 全部一致，可以执行替换（会删掉 data/ 下的副本，原件在材料目录里不动）'
+          : '有不一致或缺失的副本，不能替换；先看 report 里是哪几份',
+      };
+    }
+    if (!safe) return { ok: false, error: '有副本没对上，已停止，没有删任何文件', safe, report };
+
+    const done = [];
+    for (const item of report) {
+      if (item.ok === false) return { ok: false, error: `${label(item)}：${item.error}`, report };
+      const localDir = item.localDir;
+      if (isLink(localDir)) {
+        done.push({ entry: item.as, skipped: '已经是联接' });
+        continue;
+      }
+      // 删之前重新比对，避免比对后有人动过文件；删完要复核，删不掉就明确停下
+      const again = migrateCopiedEntry({ projectRoot: active.path, source, entry: item.entry, as: item.as });
+      if (!again.ok) return { ok: false, error: `${label(item)}：复检没通过，已停止`, report };
+      const removal = await removeTree(localDir);
+      if (!removal.ok || fs.existsSync(localDir)) {
+        return {
+          ok: false,
+          error: `${label(item)}：删不掉 ${localDir}（${removal.error || '被占用'}），已停止；原件完好`,
+          report,
+        };
+      }
+      const mount = {
+        id: newId('mnt'),
+        sourceId: source.id,
+        entry: item.entry,
+        as: item.as,
+        target: source.path,
+        createdAt: new Date().toISOString(),
+      };
+      const run = await mountOne({ projectRoot: active.path, mount });
+      if (!run.ok) return { ok: false, error: `副本已删但联接没建成：${run.error}（原件在 ${item.sourceDir}）`, report };
+      materials.mounts = [...materials.mounts.filter((row) => row.as !== mount.as), mount];
+      done.push({ entry: item.as, mounted: true });
+    }
+    const saved = this.saveMaterials(active.path, materials);
+    if (!saved.ok) return saved;
+    for (const mount of materials.mounts) await this.mountDerived(active.path, mount);
+    this.refreshMaterials(active.path);
+    this.onChange({ kind: 'project', path: active.path });
+    return { ok: true, applied: true, done, report, note: '副本已换成挂载；请重跑审计，指纹会按源文件重算', state: this.mountsState(active.path) };
+  }
+
+  /** 快照里的材料段：只给面板要的东西，源目录的完整文件清单不进快照。 */
+  publicMaterials(active) {
+    const sources = this.sources();
+    // 面板要按平台说人话：Windows 是目录联接，macOS/Linux 是镜像目录（逐文件软链）
+    const platform = { platform: process.platform, isWindows: process.platform === 'win32' };
+    if (!active?.ok) {
+      return { sources, mounts: [], derived: [], entries: [], ...platform, vision: this.visionStatus(), convert: this.convertStatus() };
+    }
+    const state = this.mountsState(active.path);
+    return {
+      sources,
+      mounts: state.mounts,
+      derived: state.derived,
+      entries: state.entries,
+      ...platform,
+      vision: this.visionStatus(),
+      convert: this.convertStatus(),
+    };
+  }
+
   /* ------------------------------ 状态快照 ------------------------------ */
 
   snapshot() {
@@ -343,6 +915,7 @@ export class Workbench {
         artifacts: null,
         runs: this.recentRuns(8),
         adjudications: {},
+        materials: this.publicMaterials(null),
       };
     }
 
@@ -356,6 +929,7 @@ export class Workbench {
       adjudications,
       activeRuns,
       runs: this.recentRuns(200, active.id),
+      sources: listSources(this.store),
     });
     const summary = summarizeStages(stages);
     const totals = gateTotals(stages);
@@ -385,6 +959,7 @@ export class Workbench {
       runs: this.recentRuns(12, active.id),
       adjudications,
       activeRuns,
+      materials: this.publicMaterials(active),
     };
   }
 
@@ -400,6 +975,7 @@ export class Workbench {
       adjudications: this.adjudicationsFor(active.id),
       activeRuns: this.runner.activeFor(active.id),
       runs: this.recentRuns(200, active.id),
+      sources: listSources(this.store),
     });
     const next = stages.find((item) => item.status !== 'done') || null;
     return {
@@ -517,7 +1093,7 @@ export class Workbench {
    */
   commandFor(projectRoot, project, stage) {
     const override = project?.stages?.[stage.id] || {};
-    const python = this.getConfig().pythonPath || 'python';
+    const python = this.getConfig().pythonPath || DEFAULT_PYTHON;
     const skill = this.skill();
 
     const spec = [];
@@ -574,6 +1150,7 @@ export class Workbench {
       adjudications,
       activeRuns: this.runner.activeFor(projectId(projectRoot)),
       runs: this.recentRuns(200, projectId(projectRoot)),
+      sources: listSources(this.store),
     });
     const index = stages.findIndex((item) => item.id === stageId);
     const reasons = [];
@@ -893,3 +1470,4 @@ export function stageCatalog() {
 }
 
 export { DEFAULT_CONFIG, runsDir, listScripts };
+

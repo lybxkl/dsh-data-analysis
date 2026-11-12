@@ -302,6 +302,161 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
       },
     },
     {
+      path: `${basePath}/api/materials`,
+      method: 'GET',
+      handler: () => {
+        const state = workbench.mountsStateSafe();
+        return {
+          ok: true,
+          sources: workbench.sources(),
+          platform: process.platform,
+          isWindows: process.platform === 'win32',
+          ...state,
+          vision: workbench.visionStatus(),
+          convert: workbench.convertStatus(),
+        };
+      },
+    },
+    {
+      path: `${basePath}/api/materials/add`,
+      method: 'POST',
+      handler: (body) => {
+        const result = workbench.addSource({ label: body?.label, path: body?.path, note: body?.note });
+        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
+        return { ok: true, source: result.source, sources: result.sources, state: workbench.snapshot() };
+      },
+    },
+    {
+      path: `${basePath}/api/materials/scan`,
+      method: 'POST',
+      handler: (body) => {
+        const result = workbench.rescanSource(String(body?.id || ''));
+        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
+        return { ok: true, source: result.source, sources: workbench.sources(), state: workbench.snapshot() };
+      },
+    },
+    {
+      path: `${basePath}/api/materials/remove`,
+      method: 'POST',
+      handler: (body) => {
+        const result = workbench.removeSource(String(body?.id || ''), { force: Boolean(body?.force) });
+        if (!result.ok) return { status: 409, payload: { ok: false, error: result.error, usedBy: result.usedBy || [] } };
+        return { ok: true, sources: result.sources, state: workbench.snapshot() };
+      },
+    },
+    {
+      path: `${basePath}/api/materials/mount`,
+      method: 'POST',
+      handler: async (body) => {
+        const entries = Array.isArray(body?.entries)
+          ? body.entries
+          : String(body?.entries || '').split(/[\n,，;；]+/).map((item) => item.trim()).filter(Boolean);
+        const result = await workbench.mountSource({ sourceId: String(body?.sourceId || ''), entries, as: body?.as });
+        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
+        return { ok: true, mounts: result.mounts, note: result.note, state: workbench.snapshot() };
+      },
+    },
+    {
+      path: `${basePath}/api/materials/unmount`,
+      method: 'POST',
+      handler: async (body) => {
+        const result = await workbench.unmountSource({ as: String(body?.as || '') });
+        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
+        return { ok: true, removed: result.removed, note: result.note, state: workbench.snapshot() };
+      },
+    },
+    {
+      path: `${basePath}/api/materials/repair`,
+      method: 'POST',
+      handler: async () => {
+        const result = await workbench.repairMounts();
+        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
+        return { ok: true, fixed: result.fixed, state: workbench.snapshot() };
+      },
+    },
+    {
+      path: `${basePath}/api/materials/migrate`,
+      method: 'POST',
+      handler: async (body) => {
+        const entries = Array.isArray(body?.entries)
+          ? body.entries
+          : String(body?.entries || '').split(/[\n,，;；]+/).map((item) => item.trim()).filter(Boolean);
+        const result = await workbench.migrateSource({ sourceId: String(body?.sourceId || ''), entries, as: body?.as || '', apply: Boolean(body?.apply) });
+        if (!result.ok) return { status: 409, payload: { ok: false, error: result.error, report: result.report || [] } };
+        return { ok: true, ...result, state: workbench.snapshot() };
+      },
+    },
+    {
+      path: `${basePath}/api/materials/vision`,
+      method: 'GET',
+      handler: () => ({ ok: true, ...workbench.visionStatus(), plan: workbench.visionPlan() }),
+    },
+    {
+      path: `${basePath}/api/materials/vision/run`,
+      method: 'POST',
+      handler: async (body) => {
+        const result = await workbench.startVision({
+          limit: Number(body?.limit) || 40,
+          pages: String(body?.pages || ''),
+          wait: Boolean(body?.wait),
+        });
+        if (!result.ok) return { status: 409, payload: { ok: false, error: result.error, plan: result.plan || null } };
+        return result;
+      },
+    },
+    {
+      path: `${basePath}/api/materials/vision/cancel`,
+      method: 'POST',
+      handler: () => {
+        const result = workbench.cancelVision();
+        if (!result.ok) return { status: 409, payload: result };
+        return result;
+      },
+    },
+    {
+      path: `${basePath}/api/materials/vision/verify`,
+      method: 'POST',
+      handler: (body) => {
+        const relPaths = Array.isArray(body?.relPaths)
+          ? body.relPaths
+          : String(body?.relPaths || '').split(/[\n,，;；]+/).map((item) => item.trim()).filter(Boolean);
+        const result = workbench.verifyVision({ relPaths, all: Boolean(body?.all) });
+        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
+        return { ok: true, ...result, state: workbench.snapshot() };
+      },
+    },
+    {
+      path: `${basePath}/api/materials/convert`,
+      method: 'GET',
+      handler: () => ({ ok: true, ...workbench.convertStatus(), plan: workbench.convertPlan() }),
+    },
+    {
+      path: `${basePath}/api/materials/convert/run`,
+      method: 'POST',
+      handler: async (body) => {
+        const result = await workbench.startConvert({ limit: Number(body?.limit) || 20, wait: Boolean(body?.wait) });
+        if (!result.ok) return { status: 409, payload: { ok: false, error: result.error, office: result.office || null } };
+        return result;
+      },
+    },
+    {
+      path: `${basePath}/api/materials/convert/cancel`,
+      method: 'POST',
+      handler: () => {
+        const result = workbench.cancelConvert();
+        if (!result.ok) return { status: 409, payload: result };
+        return result;
+      },
+    },
+    {
+      path: `${basePath}/api/materials/office`,
+      method: 'GET',
+      handler: async (_body, query) => {
+        const info = await workbench.officeProbe({ force: query?.refresh === '1' });
+        return { ok: info.ok, office: info };
+      },
+    },
+    {
       path: `${basePath}/api/health`,
       method: 'GET',
       handler: () => ({ ok: true, version: '0.1.0', skill: workbench.skill().ok }),

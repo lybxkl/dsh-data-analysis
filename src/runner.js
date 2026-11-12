@@ -13,6 +13,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
+import { DEFAULT_PYTHON } from './defaults.js';
 
 const LIVE = new Map();
 const STEP_KEYS = ['script', 'args', 'continueOnError'];
@@ -88,7 +89,7 @@ export class Runner {
   start({ project, stageId, steps }) {
     const config = this.getConfig();
     const projectRoot = project.path;
-    const python = config.pythonPath || 'python';
+    const python = config.pythonPath || DEFAULT_PYTHON;
     const list = (Array.isArray(steps) ? steps : []).filter((step) => step && Array.isArray(step.argv) && step.argv.length);
     if (!list.length) return null;
 
@@ -189,7 +190,12 @@ export class Runner {
     child.stderr?.on('data', (chunk) => pump(chunk, live.decoderErr));
 
     child.on('error', (error) => {
-      this.appendLog(live, `\n[spawn error] ${error.message}\n`);
+      const hint = error?.code === 'ENOENT'
+        ? (process.platform === 'win32'
+          ? `\n[提示] 找不到 Python 命令「${live.python}」：在设置里填 python.exe 的绝对路径。\n`
+          : `\n[提示] 找不到 Python 命令「${live.python}」：macOS 上通常要写 python3 或它的绝对路径。\n`)
+        : '';
+      this.appendLog(live, `\n[spawn error] ${error.message}${hint}\n`);
       this.finish(live, { exitCode: null, signal: null, status: 'failed', error: error.message, stepIndex: index });
     });
 

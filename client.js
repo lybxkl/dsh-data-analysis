@@ -1761,6 +1761,7 @@
               { className: 'dsa-menu-list' },
               h('button', { type: 'button', onClick: function () { setDialog({ kind: 'open' }); } }, t('open')),
               h('button', { type: 'button', onClick: function () { setDialog({ kind: 'create' }); } }, t('create')),
+              h('button', { type: 'button', onClick: function () { setDialog({ kind: 'materials' }); } }, '材料库…'),
               h('button', { type: 'button', onClick: function () { setDialog({ kind: 'settings' }); } }, t('settings'))
             )
           ),
@@ -1834,9 +1835,39 @@
 
         /* ---------------- 阶段栏 ---------------- */
 
+        var mat = (snap && snap.materials) || { sources: [], mounts: [], derived: [] };
+        var matMounts = mat.mounts || [];
+        var matBad = matMounts.filter(function (item) { return item.status !== 'ok'; }).length;
+        var matMeta = matBad
+          ? '⚠ ' + matBad + ' 条挂载失效'
+          : matMounts.length
+            ? matMounts.length + ' 条挂载 · ' + ((mat.sources || []).length) + ' 个材料源'
+            : '未挂载材料（点开管理）';
+
         var rail = h(
           'div',
           { className: 'dsa-rail' },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsa-stage ' + (matBad ? 'blocked' : ''),
+              title: '材料库：登记用户的资料目录，挂到 data/ 下（不复制文件）',
+              onClick: function () { setDialog({ kind: 'materials' }); }
+            },
+            h('div', { className: 'dsa-idx' }, '材'),
+            h(
+              'div',
+              { className: 'dsa-stage-main' },
+              h(
+                'div',
+                { className: 'dsa-stage-name' },
+                h('span', { className: 'dot ' + (matBad ? 'fail' : matMounts.length ? 'pass' : '') }),
+                '材料库'
+              ),
+              h('div', { className: 'dsa-stage-meta' }, matMeta)
+            )
+          ),
           h('div', { className: 'dsa-rail-h' }, '阶段 1–9'),
           stages.map(function (stage) {
             var dotClass = stateDot(stage.status);
@@ -2824,6 +2855,13 @@
               }
             });
           }
+          if (d.kind === 'materials') {
+            return h(MaterialsDialog, {
+              // 挂载/识图/转码都会影响闸门：处理完让面板重新取一次快照，别等下一轮轮询
+              onChanged: function () { void load(true); },
+              onCancel: function () { setDialog(null); }
+            });
+          }
           if (d.kind === 'adjudicate') {
             return h(AdjudicateDialog, {
               busy: busy,
@@ -3281,6 +3319,369 @@
                     : t('skillMissing') + '：' + (props.skill.reason || '')
                 )
               : null
+          )
+        );
+      }
+
+      /* ------------------------------------------------------------------ *
+       * 材料库
+       * ------------------------------------------------------------------ */
+
+      var MOUNT_WORD = {
+        ok: '有效',
+        'not-link': '不是工作台建的挂载',
+        'missing-link': '挂载不见了',
+        retargeted: '指向被改过',
+        'missing-target': '目标不在了'
+      };
+
+      function splitEntries(text) {
+        return String(text || '')
+          .split(/[\n,，;；]+/)
+          .map(function (item) { return item.trim(); })
+          .filter(Boolean);
+      }
+
+      /**
+       * 材料库：用户的资料放在自己的目录里，工作台只记地址。
+       * 挂到 data/ 下是目录联接（Windows）或镜像目录（macOS/Linux），一个字节都不复制；所以这里能删的只有挂载，删不掉原件。
+       */
+      function MaterialsDialog(props) {
+        var dataState = useState(null);
+        var data = dataState[0];
+        var setData = dataState[1];
+        var busyState = useState(false);
+        var busy = busyState[0];
+        var setBusy = busyState[1];
+        var errState = useState('');
+        var error = errState[0];
+        var setError = errState[1];
+        var noteState = useState('');
+        var note = noteState[0];
+        var setNote = noteState[1];
+        var addState = useState('');
+        var addPath = addState[0];
+        var setAddPath = addState[1];
+        var labelState = useState('');
+        var addLabel = labelState[0];
+        var setAddLabel = labelState[1];
+        var entriesState = useState({});
+        var entries = entriesState[0];
+        var setEntries = entriesState[1];
+        var limitState = useState('20');
+        var limit = limitState[0];
+        var setLimit = limitState[1];
+        var pagesState = useState('');
+        var pages = pagesState[0];
+        var setPages = pagesState[1];
+
+        var refresh = function () {
+          return request('GET', '/materials').then(function (json) {
+            if (json && json.ok !== false) setData(json);
+            return json;
+          });
+        };
+
+        useEffect(function () {
+          void refresh();
+          // 识图/转码在后台跑：弹窗开着时每 4 秒刷一次进度
+          var timer = setInterval(function () { void refresh(); }, 4000);
+          return function () { clearInterval(timer); };
+        }, []);
+
+        var call = function (path, body) {
+          setBusy(true);
+          setError('');
+          setNote('');
+          return request('POST', path, body || {}).then(function (json) {
+            setBusy(false);
+            if (!json || !json.ok) {
+              setError((json && json.error) || '操作失败');
+              return json;
+            }
+            if (json.note) setNote(json.note);
+            if (props.onChanged) props.onChanged();
+            return refresh().then(function () { return json; });
+          }, function (err) {
+            setBusy(false);
+            setError(String((err && err.message) || err));
+            return null;
+          });
+        };
+
+        var sources = (data && data.sources) || [];
+        var mounts = (data && data.mounts) || [];
+        var derived = (data && data.derived) || [];
+        var vision = (data && data.vision) || null;
+        var convert = (data && data.convert) || null;
+        var plan = (data && data.plan) || null;
+
+        var addRow = h(
+          'div',
+          { className: 'dsa-card', style: { padding: '10px 12px', marginBottom: '10px' } },
+          h('div', { className: 'dsa-row', style: { gap: '8px', alignItems: 'flex-end', flexWrap: 'wrap' } },
+            h('div', { className: 'dsa-field', style: { flex: '3 1 320px', margin: 0 } },
+              h('label', null, '材料目录（绝对路径）'),
+              h('input', {
+                className: 'dsa-input',
+                value: addPath,
+                placeholder: 'F:\\资料\\刑事判决书',
+                onChange: function (e) { setAddPath(e.target.value); }
+              })
+            ),
+            h('div', { className: 'dsa-field', style: { flex: '1 1 120px', margin: 0 } },
+              h('label', null, '名称（可选）'),
+              h('input', {
+                className: 'dsa-input',
+                value: addLabel,
+                placeholder: '刑事判决书',
+                onChange: function (e) { setAddLabel(e.target.value); }
+              })
+            ),
+            h(Btn, {
+              variant: 'primary',
+              disabled: busy || !addPath.trim(),
+              onClick: function () {
+                void call('/materials/add', { path: addPath.trim(), label: addLabel.trim() }).then(function (json) {
+                  if (json && json.ok) {
+                    setAddPath('');
+                    setAddLabel('');
+                    setNote('已登记；这一步不复制任何文件');
+                  }
+                });
+              }
+            }, '登记')
+          ),
+          h('div', { className: 'dsa-hint', style: { marginTop: '6px' } },
+            '登记只记地址：回执会把目录里的文件按「直读 / 识图 / 待转换 / 不支持」分成四类报数，四类相加就是这个目录的总数。')
+        );
+
+        var sourceRows = sources.length
+          ? sources.map(function (src) {
+              var scan = src.scan;
+              var usedText = src.usedBy.length
+                ? '已挂到：' + src.usedBy.map(function (u) { return u.project + ' → data/' + u.as; }).join('、')
+                : '还没有项目挂载它';
+              return h(
+                'div',
+                { key: src.id, className: 'dsa-card', style: { padding: '10px 12px', marginBottom: '8px' } },
+                h('div', { className: 'dsa-inline', style: { justifyContent: 'space-between', gap: '8px', alignItems: 'flex-start' } },
+                  h('div', { style: { minWidth: 0 } },
+                    h('div', { className: 'dsa-inline', style: { gap: '8px' } },
+                      h('b', null, src.label),
+                      h('span', { className: 'dsa-hint' },
+                        scan ? scan.files + ' 份 · ' + scan.bytesText : '还没扫描'),
+                      src.exists ? null : h('span', { className: 'dsa-tag err' }, '目录不在了')
+                    ),
+                    h('div', { className: 'dsa-mono', style: { fontSize: '11px', color: 'var(--dsa-mut)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: src.path }, src.path)
+                  ),
+                  h('div', { className: 'dsa-inline', style: { gap: '6px' } },
+                    h(Btn, { variant: 'ghost', disabled: busy, onClick: function () { void call('/materials/scan', { id: src.id }); } }, '重新登记'),
+                    h(Btn, {
+                      variant: 'ghost',
+                      disabled: busy,
+                      onClick: function () {
+                        var used = src.usedBy.length;
+                        var ask = used
+                          ? '这个目录还被 ' + used + ' 个项目挂着，仍然要从材料库删掉吗？（磁盘上的文件不会动）'
+                          : '从材料库删掉「' + src.label + '」？（磁盘上的文件不会动）';
+                        if (!window.confirm(ask)) return;
+                        void call('/materials/remove', { id: src.id, force: Boolean(used) });
+                      }
+                    }, '删除')
+                  )
+                ),
+                src.receipt ? h('div', { className: 'dsa-hint', style: { marginTop: '6px' } }, src.receipt) : null,
+                h('div', { className: 'dsa-hint', style: { marginTop: '2px' } }, usedText),
+                h('div', { className: 'dsa-inline', style: { marginTop: '8px', gap: '8px' } },
+                  h('input', {
+                    className: 'dsa-input',
+                    style: { flex: '1 1 auto' },
+                    placeholder: '只挂其中几个子目录，逗号分隔；留空 = 整个目录',
+                    value: entries[src.id] || '',
+                    onChange: function (e) {
+                      var value = e.target.value;
+                      setEntries(function (prev) {
+                        var next = {};
+                        for (var key in prev) next[key] = prev[key];
+                        next[src.id] = value;
+                        return next;
+                      });
+                    }
+                  }),
+                  h(Btn, {
+                    variant: 'primary',
+                    disabled: busy || !src.exists,
+                    onClick: function () {
+                      void call('/materials/mount', {
+                        sourceId: src.id,
+                        entries: splitEntries(entries[src.id]),
+                        as: ''
+                      });
+                    }
+                  }, '挂到当前项目')
+                )
+              );
+            })
+          : h('div', { className: 'dsa-empty' }, '材料库是空的：先在上面登记一个目录');
+
+        var mountRows = mounts.length
+          ? mounts.map(function (mount) {
+              var bad = mount.status !== 'ok';
+              return h(
+                'div',
+                { key: mount.id, style: { padding: '8px 0', borderTop: '1px solid var(--dsa-line)' } },
+                h('div', { className: 'dsa-inline', style: { justifyContent: 'space-between', gap: '8px', alignItems: 'flex-start' } },
+                  h('div', { style: { minWidth: 0 } },
+                    h('div', { className: 'dsa-inline', style: { gap: '6px' } },
+                      h('span', { className: 'dsa-tag ' + (bad ? 'err' : ''), title: mount.detail || '' }, bad ? '✗' : '✓'),
+                      h('b', { className: 'dsa-mono' }, 'data/' + mount.as),
+                      mount.mode === 'mirror' ? h('span', { className: 'dsa-hint' }, '镜像（逐文件软链）') : null
+                    ),
+                    h('div', { className: 'dsa-mono', style: { fontSize: '11px', color: 'var(--dsa-mut)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: mount.target },
+                      mount.target + '（' + (MOUNT_WORD[mount.status] || mount.status) + '）'),
+                    mount.detail ? h('div', { className: 'dsa-hint' }, mount.detail) : null
+                  ),
+                  h('div', { className: 'dsa-inline', style: { gap: '6px' } },
+                    h(Btn, {
+                      variant: 'ghost',
+                      disabled: busy,
+                      onClick: function () {
+                        if (!window.confirm('把 data/' + mount.as + ' 的挂载摘掉？（材料原件不动）')) return;
+                        void call('/materials/unmount', { as: mount.as });
+                      }
+                    }, '摘下'),
+                    h(Btn, {
+                      variant: 'ghost',
+                      disabled: busy,
+                      onClick: function () {
+                        // as 定位副本目录名，entries 只在副本名与源里路径不同名时为空
+                        var body = { sourceId: mount.sourceId, entries: mount.entry ? [mount.entry] : [], as: mount.as, apply: false };
+                        void call('/materials/migrate', body).then(function (json) {
+                          if (!json || !json.ok) return;
+                          if (!json.safe) {
+                            setError('逐份比对没通过，已停止、没有删任何文件；看报告里是哪几份');
+                            return;
+                          }
+                          if (!window.confirm('逐份 md5 全部一致。把 data/' + mount.as + ' 里的副本删掉、换成挂载？')) return;
+                          void call('/materials/migrate', { sourceId: mount.sourceId, entries: body.entries, as: mount.as, apply: true });
+                        });
+                      }
+                    }, '副本换挂载')
+                  )
+                )
+              );
+            })
+          : null;
+
+        var visionSummary = vision && vision.summary;
+        var visionBlock = h(
+          'div',
+          { className: 'dsa-card', style: { padding: '10px 12px', marginTop: '10px' } },
+          h('div', { className: 'dsa-inline', style: { justifyContent: 'space-between', gap: '8px' } },
+            h('b', null, '扫描件识图'),
+            h('span', { className: 'dsa-hint' },
+              vision && vision.running ? '正在跑…' : '空闲')
+          ),
+          h('div', { className: 'dsa-hint', style: { marginTop: '4px' } },
+            '审计判为 image_only 的 PDF 与图片，交给多模态模型逐页转写；产物写进派生目录并挂回 data/。' +
+            '识图文本未经人工核对时，数字溯源闸门只会判「判不了」。'),
+          visionSummary && visionSummary.rows
+            ? h('div', { className: 'dsa-hint', style: { marginTop: '4px' } },
+                '已识别 ' + visionSummary.pagesOk + ' 页 / ' + visionSummary.files + ' 份 · 失败 ' + visionSummary.pagesFailed + ' 页 · 人工已核 ' + visionSummary.pagesVerified + ' 页')
+            : null,
+          h('div', { className: 'dsa-inline', style: { marginTop: '8px', gap: '8px', flexWrap: 'wrap' } },
+            h('input', {
+              className: 'dsa-input',
+              style: { width: '90px' },
+              value: limit,
+              placeholder: '最多页数',
+              title: '本次最多识别多少页',
+              onChange: function (e) { setLimit(e.target.value); }
+            }),
+            h('input', {
+              className: 'dsa-input',
+              style: { width: '140px' },
+              value: pages,
+              placeholder: '只跑这些页，如 1-20',
+              onChange: function (e) { setPages(e.target.value); }
+            }),
+            h(Btn, {
+              variant: 'primary',
+              disabled: busy || Boolean(vision && vision.running),
+              onClick: function () {
+                void call('/materials/vision/run', { limit: Number(limit) || 20, pages: pages.trim() });
+              }
+            }, '开始识别'),
+            vision && vision.running
+              ? h(Btn, { variant: 'ghost', disabled: busy, onClick: function () { void call('/materials/vision/cancel', {}); } }, '停止')
+              : null,
+            visionSummary && visionSummary.pagesOk
+              ? h(Btn, {
+                  variant: 'ghost',
+                  disabled: busy,
+                  onClick: function () {
+                    if (!window.confirm('确认这些识别稿你已经逐页对照过原件了？打勾之后 qa-vision 才可能通过。')) return;
+                    void call('/materials/vision/verify', { all: true });
+                  }
+                }, '标记已核对')
+              : null
+          )
+        );
+
+        var convertBlock = h(
+          'div',
+          { className: 'dsa-card', style: { padding: '10px 12px', marginTop: '10px' } },
+          h('div', { className: 'dsa-inline', style: { justifyContent: 'space-between', gap: '8px' } },
+            h('b', null, '旧版 Office 转码'),
+            h('span', { className: 'dsa-hint' }, convert && convert.running ? '正在跑…' : '空闲')
+          ),
+          h('div', { className: 'dsa-hint', style: { marginTop: '4px' } },
+            data && data.isWindows === false
+              ? 'macOS/Linux 没有桌面 Office COM，这条通道不适用：请用本机 Office/WPS 打开原文件另存为 docx/xlsx/pptx，放回原目录后点「重扫」。'
+              : (convert && convert.office
+                ? (convert.office.ok
+                  ? '本机 Office 可用'
+                  : '本机 Office 不可用：' + (convert.office.error || convert.office.detail || '未知原因')
+                    + (convert.office.hint ? ' —— ' + convert.office.hint : ''))
+                : 'doc/xls/ppt 技能读不了文本；Windows 上用桌面 Office 另存为 docx/xlsx/pptx。')),
+          convert && convert.summary && convert.summary.rows
+            ? h('div', { className: 'dsa-hint', style: { marginTop: '4px' } },
+                '已转 ' + convert.summary.converted + ' 份 · 失败 ' + convert.summary.failed + ' 份')
+            : null,
+          h('div', { className: 'dsa-inline', style: { marginTop: '8px', gap: '8px' } },
+            h(Btn, { variant: 'ghost', disabled: busy || (data && data.isWindows === false), onClick: function () { void call('/materials/office', {}); } }, '查本机 Office'),
+            h(Btn, {
+              variant: 'primary',
+              disabled: busy || Boolean(convert && convert.running) || (data && data.isWindows === false),
+              onClick: function () { void call('/materials/convert/run', { limit: Number(limit) || 10 }); }
+            }, '开始转码')
+          )
+        );
+
+        var derivedLine = derived.length
+          ? h('div', { className: 'dsa-hint', style: { marginTop: '8px' } },
+              '派生稿：' + derived.map(function (item) { return item.mountName + '（' + item.files + ' 份）'; }).join('、'))
+          : null;
+
+        return h(
+          Modal,
+          { title: '材料库', onCancel: props.onCancel, desc: '材料留在你自己的目录里，工作台只记地址；挂到项目 data/ 下是目录联接（macOS/Linux 为镜像目录），不复制文件。' },
+          error ? h('div', { className: 'dsa-error', style: { marginBottom: '10px' } }, error) : null,
+          note ? h('div', { className: 'dsa-hint', style: { marginBottom: '10px' } }, note) : null,
+          h('div', { style: { maxHeight: '58vh', overflowY: 'auto', paddingRight: '2px' } },
+            addRow,
+            h('div', { className: 'dsa-rail-h', style: { padding: '6px 0' } }, '材料源'),
+            sourceRows,
+            h('div', { className: 'dsa-rail-h', style: { padding: '12px 0 6px' } }, '当前项目 data/ 下的挂载'),
+            h('div', { className: 'dsa-hint', style: { marginBottom: '4px' } },
+              data && data.isWindows === false
+                ? 'macOS/Linux 上没有目录联接，工作台建的是「镜像目录」：真实目录里逐个文件软链，源目录增删文件后点「修复」同步。'
+                : 'Windows 上建的是目录联接（junction）：data/ 下的目录直接指向材料目录，不占空间。'),
+            mountRows || h('div', { className: 'dsa-empty' }, '还没有挂载任何材料目录'),
+            derivedLine,
+            visionBlock,
+            convertBlock
           )
         );
       }

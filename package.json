@@ -41,10 +41,15 @@
     "client.js",
     "icon.svg",
     "src",
+    "assets",
     "locale",
     "cordis.patch.yml",
     "README.md"
   ],
+  "scripts": {
+    "test": "node tests/materials.test.mjs",
+    "test:e2e": "node tests/e2e-corpus.test.mjs"
+  },
   "keywords": [
     "dsh",
     "deepseek-harness",

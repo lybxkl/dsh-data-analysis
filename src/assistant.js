@@ -229,11 +229,12 @@ function withTimeout(promise, ms, label) {
 }
 
 export class Assistant {
-  constructor({ getConfig, getActive, llm, agentDefaultModel, logger }) {
+  constructor({ getConfig, getActive, llm, agentDefaultModel, attachments, logger }) {
     this.getConfig = getConfig;
     this.getActive = getActive;
     this.llm = llm || null;
     this.agentDefaultModel = agentDefaultModel || null;
+    this.attachments = attachments || null;
     this.logger = logger;
     this.modelCache = { at: 0, value: null };
   }
@@ -288,6 +289,146 @@ export class Assistant {
     const active = this.getActive?.();
     if (!active?.ok) return { ok: false, error: active?.error || '还没有打开项目' };
     return active;
+  }
+
+  /**
+   * 这条路由能不能看图。返回 modality：image（公布支持）/ unknown（没公布）/ text（明确只收文本）。
+   * 不能看图时**明确报错**，绝不把图片悄悄换成占位文本再当成识别完了。
+   */
+  async imageCapability() {
+    const gate = this.available();
+    if (!gate.ok) return { ok: false, error: gate.reason };
+    const route = this.route();
+    if (route.error) return { ok: false, error: route.error };
+    if (!this.attachments?.admitPromptContent) {
+      return { ok: false, provider: route.provider, model: route.model, error: '宿主没有附件服务（attachments），无法把图片交给模型' };
+    }
+    let info = null;
+    if (typeof this.llm.resolveModelInfo === 'function') {
+      try {
+        info = await withTimeout(this.llm.resolveModelInfo(route.provider, route.model), 8000, '模型能力查询');
+      } catch {
+        info = null;
+      }
+    }
+    const modalities = Array.isArray(info?.inputModalities) ? info.inputModalities : null;
+    if (modalities && !modalities.includes('image')) {
+      return {
+        ok: false,
+        provider: route.provider,
+        model: route.model,
+        modality: 'text',
+        modalities,
+        error: `${route.provider}/${route.model} 只接受文本输入，不能识图。请在设置里换一个支持图片的模型（自定义模型选一个多模态的），而不是让工作台把扫描件当成「没有内容」。`,
+      };
+    }
+    return {
+      ok: true,
+      provider: route.provider,
+      model: route.model,
+      modality: modalities ? 'image' : 'unknown',
+      modalities: modalities || [],
+      note: modalities ? '' : '模型没有公布输入模态，按支持图片尝试；一旦宿主把它换成占位文本，这里会报错停下',
+    };
+  }
+
+  /** 把一页图交给模型看，拿回转写文本。 */
+  async seeImage({ bytes, mediaType = 'image/png', prompt, signal, sessionId, maxTokens } = {}) {
+    const gate = this.available();
+    if (!gate.ok) return { ok: false, fatal: true, error: gate.reason };
+    const route = this.route();
+    if (route.error) return { ok: false, fatal: true, error: route.error };
+    if (!this.attachments?.admitPromptContent) {
+      return { ok: false, fatal: true, error: '宿主没有附件服务（attachments），无法把图片交给模型' };
+    }
+    const content = String(prompt || '');
+    if (!content.trim()) return { ok: false, fatal: true, error: '没有给识别提示词' };
+
+    let admitted = null;
+    try {
+      admitted = await this.attachments.admitPromptContent([
+        { type: 'image', mediaType, data: Buffer.from(bytes).toString('base64') },
+        { type: 'text', text: content },
+      ]);
+    } catch (error) {
+      return { ok: false, fatal: true, error: `图片没能交给宿主：${error?.message || error}` };
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 180000);
+    if (signal) {
+      try {
+        if (signal.aborted) controller.abort();
+        else signal.addEventListener('abort', () => controller.abort(), { once: true });
+      } catch {
+        /* ignore */
+      }
+    }
+
+    const startedAt = Date.now();
+    let text = '';
+    let usage = null;
+    try {
+      const stream = this.llm.stream({
+        provider: route.provider,
+        model: route.model,
+        reasoningEffort: route.reasoningEffort,
+        messages: [{ role: 'user', content: admitted.map((part) => (part.type === 'image' ? { type: 'image', attachment: part.attachment } : part)) }],
+        temperature: 0.1,
+        maxTokens: Number(maxTokens) || 2400,
+        sessionId: sessionId || 'data-analysis-vision',
+        purpose: 'data-analysis-vision',
+        signal: controller.signal,
+      });
+      for await (const chunk of stream) {
+        if (chunk.type === 'text-delta') text += chunk.text;
+        else if (chunk.type === 'usage') usage = chunk.usage;
+        else if (chunk.type === 'finish') {
+          if (chunk.reason?.kind === 'error' || chunk.reason?.kind === 'aborted') {
+            const failure = chunk.reason.failure || {};
+            throw new Error(`模型调用${chunk.reason.kind === 'aborted' ? '被中止' : '失败'}：${failure.code || ''} ${failure.message || ''}`.trim());
+          }
+        }
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        fatal: true,
+        error: String(error?.message || error),
+        provider: route.provider,
+        model: route.model,
+        elapsedMs: Date.now() - startedAt,
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+
+    // 宿主对纯文本模型的降级是「把图片换成一行占位文本」。这条要当场拦下，不能当成识别结果。
+    if (/image omitted because this model accepts text only/i.test(text)) {
+      return {
+        ok: false,
+        fatal: true,
+        provider: route.provider,
+        model: route.model,
+        error: `${route.provider}/${route.model} 把图片替换成了占位文本（说明它只支持文本输入），本次识别作废。请换一个多模态模型。`,
+      };
+    }
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return { ok: false, fatal: false, provider: route.provider, model: route.model, error: '模型没有返回文本（可能只有推理内容）' };
+    }
+    const total = Number(
+      usage?.totalTokens ?? usage?.total ?? (Number(usage?.inputTokens || 0) + Number(usage?.outputTokens || 0)),
+    ) || 0;
+    return {
+      ok: true,
+      text: clip(trimmed, MAX_TEXT),
+      provider: route.provider,
+      model: route.model,
+      tokens: total,
+      usage,
+      elapsedMs: Date.now() - startedAt,
+    };
   }
 
   async draft({ taskId, instruction = '', signal } = {}) {

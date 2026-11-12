@@ -16,3 +16,10 @@ runs/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Python 字节码
+__pycache__/
+*.pyc
+
+# 排查用临时脚本
+.tmp-*

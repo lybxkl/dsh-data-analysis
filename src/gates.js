@@ -15,9 +15,17 @@ import path from 'node:path';
 import { analysisFile, assessPalette, readCsv, statOf } from './audit.js';
 import { STAGE_DEFS } from './defaults.js';
 import { recheckSummary } from './recheck.js';
+import { verifyMounts } from './sources.js';
+import { readVisionLog } from './vision.js';
 
 function gate(id, label, level, status, detail, extra = {}) {
   return { id, label, level, status, detail, ...extra };
+}
+
+/** 目标路径是否落在 base 里面（含 base 本身）。 */
+function inside(base, target) {
+  const rel = path.relative(path.resolve(base), path.resolve(target || ''));
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
 /** 台账里存的是 ISO UTC：面板读起来像乱码，缩短成 MM-DD HH:mm（本地时区）。 */
@@ -43,7 +51,7 @@ function fileGate(id, label, file, { level = 'error', requireRows = false } = {}
   return gate(id, label, level, 'pass', stat.size < 1024 ? `${stat.size} B` : `${Math.round(stat.size / 1024)} KB`, { source: file.rel });
 }
 
-export function evaluateProject({ projectRoot, project, artifacts, adjudications = {}, activeRuns = {}, runs = [] }) {
+export function evaluateProject({ projectRoot, project, artifacts, adjudications = {}, activeRuns = {}, runs = [], sources = [] }) {
   const stages = [];
   const cancel = new Set();
 
@@ -104,6 +112,44 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
 
     if (def.id === 'scope') {
       gates.push(fileGate('scope-doc', '范围与口径文档', { abs: path.join(root, 'docs', 'scope.md'), rel: 'docs/scope.md' }, { level: 'error' }));
+
+      // 材料挂载：联接在不在、还指着当初那个目录、源是不是被放进了项目里面。
+      // 老项目（没有 materials 字段）本来就是 data/ 里放文件，这里判 pass 而不是「判不了」。
+      const mounts = Array.isArray(project?.materials?.mounts) ? project.materials.mounts : [];
+      if (!mounts.length) {
+        gates.push(gate('sources-mounted', '材料目录挂载', 'error', 'pass', '没有挂载材料目录（data/ 里的文件按项目自有材料处理）'));
+        gates.push(gate('sources-outside', '材料目录在项目之外', 'error', 'pass', '没有挂载材料目录'));
+      } else {
+        const report = verifyMounts(root, { mounts });
+        const bad = report.filter((item) => item.status !== 'ok');
+        // Windows 上是目录联接，macOS/Linux 上是镜像目录（真实目录 + 逐文件软链）：文案要说清是哪一种
+        const junctionCount = report.filter((item) => item.mode === 'junction').length;
+        const mirrorCount = report.filter((item) => item.mode === 'mirror').length;
+        const modeText = [junctionCount ? `${junctionCount} 条目录联接` : '', mirrorCount ? `${mirrorCount} 条镜像目录` : '']
+          .filter(Boolean)
+          .join(' + ');
+        gates.push(
+          bad.length
+            ? gate('sources-mounted', '材料目录挂载', 'error', 'fail', `${bad.length}/${report.length} 条挂载失效：${bad.map((item) => `${item.as}（${item.detail || item.status}）`).join('；')}`, { mounts: report })
+            : gate('sources-mounted', '材料目录挂载', 'error', 'pass', `${report.length} 条挂载有效（${modeText}，不复制文件）`, { mounts: report }),
+        );
+        const byId = new Map((Array.isArray(sources) ? sources : []).map((item) => [item.id, item]));
+        const problems = [];
+        for (const mount of mounts) {
+          const source = byId.get(mount.sourceId);
+          if (!source) {
+            problems.push(`${mount.as}：材料库条目 ${mount.sourceId} 已经不在了`);
+            continue;
+          }
+          const target = mount.entry ? path.join(source.path, ...String(mount.entry).split('/')) : source.path;
+          if (inside(root, target)) problems.push(`${mount.as} → ${target}（在项目目录里）`);
+        }
+        gates.push(
+          problems.length
+            ? gate('sources-outside', '材料目录在项目之外', 'error', 'fail', problems.join('；'))
+            : gate('sources-outside', '材料目录在项目之外', 'error', 'pass', `${mounts.length} 条挂载都指向项目外的材料目录`),
+        );
+      }
     }
 
     if (def.id === 'audit') {
@@ -146,6 +192,44 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
       }
       if (corpus?.hashDisabled) {
         gates.push(gate('audit-hash', '去重口径', 'warn', 'unjudged', 'hash_disabled=true：唯一样本数退化为有效资料数', { source: corpus.file }));
+      }
+      // 有挂载材料时，来源账与选材清单必须跟着审计一起在：它们是「这些文件从哪来」的唯一凭据。
+      const mountCount = Array.isArray(project?.materials?.mounts) ? project.materials.mounts.length : 0;
+      if (mountCount) {
+        const provCsv = readCsv(path.join(root, 'output', 'materials', 'provenance.csv'));
+        gates.push(
+          provCsv && provCsv.rows.length
+            ? gate('materials-provenance', '材料来源 provenance', 'warn', 'pass', `${provCsv.rows.length} 行（源目录 / 联接目标 / 时间）`, { source: 'output/materials/provenance.csv' })
+            : gate('materials-provenance', '材料来源 provenance', 'warn', 'fail', '有挂载材料但缺 output/materials/provenance.csv：重新挂载或点一次「修复联接」即可生成', { source: 'output/materials/provenance.csv' }),
+        );
+        const selCsv = readCsv(path.join(root, 'output', 'materials', 'selection.csv'));
+        gates.push(
+          selCsv && selCsv.rows.length
+            ? gate('materials-selection', '选材清单 selection', 'warn', 'pass', `${selCsv.rows.length} 份材料各有 include/exclude 与理由`, { source: 'output/materials/selection.csv' })
+            : gate('materials-selection', '选材清单 selection', 'warn', 'fail', '缺 output/materials/selection.csv 或没有数据行', { source: 'output/materials/selection.csv' }),
+        );
+        // 账要对得上：provenance 的行数应当等于审计扫到的文件数。
+        // 对不上通常只有三种原因——挂了新目录还没重跑审计、data/ 里还有旧的副本、派生稿是审计之后才生成的。
+        const scanned = Number(corpus?.totalFiles);
+        if (provCsv && provCsv.rows.length && Number.isFinite(scanned) && scanned > 0) {
+          const derivedRows = provCsv.rows.filter((row) => row.derived_from).length;
+          if (provCsv.rows.length === scanned) {
+            gates.push(
+              gate('materials-provenance-cover', '来源账与审计对得上', 'warn', 'pass', `${provCsv.rows.length} 行，与审计扫描到的 ${scanned} 个文件一致${derivedRows ? `（其中派生稿 ${derivedRows} 份）` : ''}`, { source: 'output/materials/provenance.csv' }),
+            );
+          } else {
+            gates.push(
+              gate(
+                'materials-provenance-cover',
+                '来源账与审计对得上',
+                'warn',
+                'unjudged',
+                `provenance 记了 ${provCsv.rows.length} 行，审计扫到 ${scanned} 个文件，差 ${Math.abs(provCsv.rows.length - scanned)}。常见原因：挂了新目录还没重跑审计 / data/ 里还留着旧副本 / 识图或转码之后没重跑审计。判不了，先重跑审计再看`,
+                { source: 'output/materials/provenance.csv' },
+              ),
+            );
+          }
+        }
       }
     }
 
@@ -431,6 +515,55 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
     if (def.id === 'qa') {
       const verify = artifacts.verify;
       const qaReports = artifacts.qa;
+
+      // 识图文本的留痕口径：未人工核对的识别稿一旦进了数字溯源/质检记录，就只能判「判不了」。
+      // 已经识别但还没核对，也同样不能算通过——「未核」不是「通过」。
+      const visionRows = readVisionLog(root);
+      if (visionRows.length) {
+        const pending = visionRows.filter((row) => row.status === 'ok' && !row.human_verified);
+        if (!pending.length) {
+          gates.push(gate('qa-vision', '识图文本已人工核对', 'warn', 'pass', `${visionRows.length} 页识别结果都已人工核对`));
+        } else {
+          const absOf = (rel) => (path.isAbsolute(String(rel || '')) ? String(rel) : path.join(root, String(rel || '')));
+          const needles = new Set(['__识别稿']);
+          for (const row of pending) {
+            if (row.derived_rel) needles.add(row.derived_rel);
+            if (row.rel_path) needles.add(row.rel_path);
+          }
+          const hits = [];
+          const scanFile = (rel) => {
+            if (!rel || hits.length) return;
+            const abs = absOf(rel);
+            try {
+              const st = fs.statSync(abs);
+              if (!st.isFile() || st.size > 2 * 1024 * 1024) return;
+              const text = fs.readFileSync(abs, 'utf8');
+              for (const needle of needles) {
+                if (needle && text.includes(needle)) {
+                  hits.push(String(rel));
+                  return;
+                }
+              }
+            } catch {
+              /* 文件不在或读不了：不算引用 */
+            }
+          };
+          if (verify?.file) scanFile(verify.file);
+          for (const report of Array.isArray(qaReports) ? qaReports : []) scanFile(report?.file);
+          gates.push(
+            gate(
+              'qa-vision',
+              '识图文本已人工核对',
+              'warn',
+              'unjudged',
+              hits.length
+                ? `${pending.length} 页识别结果还没人工核对，但已被 ${hits[0]} 引用：核对后用 data_analysis_vision（action=verify）打勾，或改回直读材料`
+                : `${pending.length} 页识别结果还没人工核对；交付前要逐页核对并打勾`,
+              { source: hits[0] || 'output/audit/vision_log.csv' },
+            ),
+          );
+        }
+      }
       if (verify) {
         const inputOnly = verify.counts.error > 0 && (verify.counts.input || 0) >= verify.counts.error;
         gates.push(
