@@ -257,6 +257,56 @@ export class Workbench {
   }
 
   /**
+   * 从台账里移除一个项目。
+   * 只删登记（项目条目、运行记录、裁定、复核链），**磁盘上一个文件都不动**：
+   * 用户点「移除」想清掉的是列表里的条目，不是他那份资料。
+   * 项目目录是否还存在都不影响——目录没了的条目更需要能删。
+   */
+  forgetProject(id) {
+    const key = String(id || '').trim();
+    const state = this.store.get();
+    const target = (state.projects || []).find((item) => item.id === key);
+    if (!target) return { ok: false, error: '台账里没有这个项目（可能已经被移除）' };
+
+    // 还在跑的阶段先停：否则移除后进程还在往一个没人看的项目里写产物
+    let cancelled = 0;
+    for (const run of Object.values(this.runner.activeFor(key) || {})) {
+      const result = this.runner.cancel(run.id);
+      if (result.ok) cancelled += 1;
+    }
+
+    const projects = (state.projects || []).filter((item) => item.id !== key);
+    const runs = (state.runs || []).filter((run) => run.projectId !== key);
+    const adjudications = { ...(state.adjudications || {}) };
+    delete adjudications[key];
+    const recheckChains = { ...(state.recheckChains || {}) };
+    delete recheckChains[key];
+
+    const patch = { projects, runs, adjudications, recheckChains };
+    const wasActive = state.activeProjectId === key;
+    if (wasActive) {
+      // 移除当前项目 = 回到「没选项目」，不要偷偷切到另一个项目让用户以为切错了
+      patch.activeProjectId = '';
+      patch.activeProjectPath = '';
+      patch.meta = { ...(state.meta || {}), detached: true };
+    }
+    this.store.set(patch);
+    clearCorpusScan();
+
+    return {
+      ok: true,
+      id: key,
+      name: target.name || path.basename(target.path),
+      path: target.path,
+      active: wasActive,
+      cancelled,
+      removed: { runs: (state.runs || []).length - runs.length },
+      diskKept: true,
+      state: this.snapshot(),
+    };
+  }
+
+  /**
    * 把面板里建好的 DSH 会话绑到当前项目。
    * 只记 sessionId，不校验会话是否存在——会话由 client 侧持有，宿主这里不猜测。
    */

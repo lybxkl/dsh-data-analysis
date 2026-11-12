@@ -845,7 +845,7 @@
         '.dsa-proj.sel{background:var(--dsa-panel);box-shadow:inset 2px 0 0 var(--dsa-accent);}',
         '.dsa-proj-name{display:block;font-size:12.5px;color:var(--dsa-ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
         '.dsa-proj.sel .dsa-proj-name{font-weight:600;}',
-        '.dsa-proj-path{display:block;margin-top:1px;font-size:10.5px;color:var(--dsa-ink3);overflow:hidden;',
+        '.dsa-proj-path{display:block;margin-top:1px;font-size:11px;color:var(--dsa-ink3);overflow:hidden;',
         '  text-overflow:ellipsis;white-space:nowrap;}',
         '.dsa-link{border:0;background:transparent;color:var(--dsa-ink2);font:inherit;font-size:11.5px;',
         '  cursor:pointer;padding:2px 0;}',
@@ -997,7 +997,7 @@
         '.dsa-chat-card{border:1px solid var(--dsa-line);border-radius:3px;background:var(--dsa-bg);padding:9px 10px;',
         '  display:flex;flex-direction:column;gap:6px;}',
         '.dsa-chat-card .dsa-hint{line-height:1.5;}',
-        '.dsa-chat-id{font-family:var(--dsa-mono);font-size:10.5px;color:var(--dsa-ink3);word-break:break-all;}',
+        '.dsa-chat-id{font-family:var(--dsa-mono);font-size:11px;color:var(--dsa-ink3);word-break:break-all;}',
         '.dsa-chat-dot{width:6px;height:6px;border-radius:50%;display:inline-block;margin-right:5px;background:var(--dsa-ink3);}',
         '.dsa-chat-dot.run{background:var(--dsa-accent);}',
         '.dsa-chat-dot.ok{background:var(--dsa-ok);}',
@@ -1097,7 +1097,7 @@
         '.dsa-brand{display:flex;align-items:center;gap:9px;min-width:0;}',
         '.dsa-brand-tx{display:flex;flex-direction:column;min-width:0;line-height:1.32;}',
         '.dsa-brand b{font-size:13.5px;font-weight:650;letter-spacing:-.01em;}',
-        '.dsa-brand-tx span{font-size:10.5px;color:var(--dsa-ink3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+        '.dsa-brand-tx span{font-size:11px;color:var(--dsa-ink3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
         '.dsa-chip{height:28px;padding:0 12px;border-radius:999px;background:var(--dsa-card2);}',
         '.dsa-btn{height:32px;padding:0 13px;border-radius:var(--dsa-r2);background:var(--dsa-panel);',
         '  transition:background .16s,border-color .16s,box-shadow .16s,transform .06s;}',
@@ -1118,9 +1118,9 @@
         '.dsa-rail-sec{flex:0 1 auto;min-height:0;max-height:46%;display:flex;flex-direction:column;',
         '  padding-bottom:8px;margin-bottom:6px;border-bottom:1px solid var(--dsa-line);}',
         '.dsa-rail-body{flex:1 1 auto;min-height:0;overflow-y:auto;padding:8px 0 24px;}',
-        '.dsa-rail-h{padding:0 6px 7px;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;',
+        '.dsa-rail-h{padding:0 6px 7px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;',
         '  font-weight:650;color:var(--dsa-ink3);}',
-        '.dsa-rail-h .dsa-count{margin-left:auto;font-family:var(--dsa-mono);font-size:10px;letter-spacing:0;',
+        '.dsa-rail-h .dsa-count{margin-left:auto;font-family:var(--dsa-mono);font-size:11px;letter-spacing:0;',
         '  text-transform:none;background:var(--dsa-line);color:var(--dsa-ink2);padding:1px 6px;border-radius:999px;font-weight:400;}',
         '.dsa-proj-list{flex:0 1 auto;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:2px;padding:0 2px 0 0;}',
         '.dsa-proj{padding:7px 8px;border:1px solid transparent;border-radius:var(--dsa-r2);',
@@ -1129,11 +1129,11 @@
         '.dsa-proj.sel{background:var(--dsa-panel);border-color:var(--dsa-line);box-shadow:var(--dsa-shadow);}',
         '.dsa-proj-h{display:flex;align-items:center;gap:7px;min-width:0;}',
         '.dsa-proj-av{flex:0 0 20px;width:20px;height:20px;border-radius:6px;background:var(--dsa-soft);',
-        '  color:var(--dsa-accent);font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;}',
+        '  color:var(--dsa-accent);font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;}',
         '.dsa-proj.sel .dsa-proj-av{background:linear-gradient(140deg,var(--dsa-accent2),var(--dsa-accent));color:#fff;}',
         '[data-dsa-theme="dark"] .dsa-proj.sel .dsa-proj-av{color:#0f1216;}',
         '.dsa-proj-name{font-size:12.5px;font-weight:550;}',
-        '.dsa-proj-path{margin:1px 0 0 27px;font-family:var(--dsa-mono);font-size:10px;color:var(--dsa-ink3);}',
+        '.dsa-proj-path{margin:1px 0 0 27px;font-family:var(--dsa-mono);font-size:11px;color:var(--dsa-ink3);}',
         '.dsa-proj-actions{gap:8px;padding:5px 4px 0;}',
         '.dsa-link{padding:3px 5px;border-radius:6px;font-size:11.5px;}',
         '.dsa-link:hover{background:var(--dsa-hover);}',
@@ -1145,7 +1145,7 @@
         '.dsa-stage.sel{background:var(--dsa-panel);border-color:var(--dsa-line);border-left-color:var(--dsa-line);',
         '  box-shadow:var(--dsa-shadow);}',
         '.dsa-idx{flex:0 0 18px;width:18px;height:18px;border-radius:50%;background:var(--dsa-line);',
-        '  border:1px solid transparent;color:var(--dsa-ink3);font-size:9.5px;font-weight:600;margin-top:0;}',
+        '  border:1px solid transparent;color:var(--dsa-ink3);font-size:11px;font-weight:600;margin-top:0;line-height:1;}',
         '.dsa-stage.done .dsa-idx{background:var(--dsa-oksoft);color:var(--dsa-ok);',
         '  border-color:color-mix(in srgb,var(--dsa-ok) 30%,transparent);}',
         '.dsa-stage.blocked .dsa-idx{background:var(--dsa-errsoft);color:var(--dsa-err);',
@@ -1158,7 +1158,7 @@
         '  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
         '.dsa-stage-name .dot{display:none;}',
         '.dsa-stage-meta{flex:0 0 auto;margin-top:0;padding:1px 7px;border-radius:999px;background:var(--dsa-line);',
-        '  color:var(--dsa-ink3);font-size:10px;font-weight:600;max-width:52%;}',
+        '  color:var(--dsa-ink3);font-size:11px;font-weight:600;max-width:52%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
         '.dsa-stage.done .dsa-stage-meta{background:var(--dsa-oksoft);color:var(--dsa-ok);}',
         '.dsa-stage.blocked .dsa-stage-meta{background:var(--dsa-errsoft);color:var(--dsa-err);}',
         '.dsa-stage.review .dsa-stage-meta{background:var(--dsa-warnsoft);color:var(--dsa-warn);}',
@@ -1173,11 +1173,11 @@
         '.dsa-kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin:0 0 14px;}',
         '.dsa-kpi{background:var(--dsa-panel);border:1px solid var(--dsa-line);border-radius:var(--dsa-r);',
         '  padding:11px 13px;box-shadow:var(--dsa-shadow);min-width:0;}',
-        '.dsa-kpi .k{font-size:10.5px;color:var(--dsa-ink3);letter-spacing:.04em;font-weight:550;',
+        '.dsa-kpi .k{font-size:11px;color:var(--dsa-ink3);letter-spacing:.04em;font-weight:550;',
         '  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
         '.dsa-kpi .v{font-family:var(--dsa-mono);font-size:21px;font-weight:600;letter-spacing:-.03em;margin-top:2px;',
         '  font-variant-numeric:tabular-nums;line-height:1.2;white-space:nowrap;}',
-        '.dsa-kpi .v small{font-size:10.5px;color:var(--dsa-ink3);margin-left:2px;font-weight:400;letter-spacing:0;}',
+        '.dsa-kpi .v small{font-size:11px;color:var(--dsa-ink3);margin-left:2px;font-weight:400;letter-spacing:0;}',
         '.dsa-kpi.hi{background:linear-gradient(180deg,color-mix(in srgb,var(--dsa-soft) 65%,var(--dsa-panel)),var(--dsa-panel));',
         '  border-color:color-mix(in srgb,var(--dsa-accent) 22%,var(--dsa-line));}',
         '.dsa-kpi.hi .v{color:var(--dsa-accent);}',
@@ -1219,7 +1219,56 @@
         '.dsa-root[data-dsa-width="compact"] .dsa-side,',
         '.dsa-root[data-dsa-width="mid"] .dsa-side,',
         '.dsa-root[data-dsa-width="narrow"] .dsa-side{top:58px;}',
-        '.dsa-scrim{top:58px;}'
+        '.dsa-scrim{top:58px;}',
+
+        // ---- 折叠行：卡里的折叠不能是「卡中卡」，独立折叠也要有可点的手感
+        '.dsa-card .dsa-fold{margin-top:0;border:0;border-top:1px solid var(--dsa-line);border-radius:0;',
+        '  background:transparent;box-shadow:none;}',
+        '.dsa-card .dsa-fold>summary{padding:10px 15px;}',
+        // 折叠行压在卡片底部时，hover 底色要跟着卡片圆角收，否则卡片下缘会露出直角
+        '.dsa-card .dsa-fold:last-child>summary{border-radius:0 0 var(--dsa-r) var(--dsa-r);}',
+        '.dsa-card .dsa-fold[open]:last-child>summary{border-radius:0;}',
+        '.dsa-fold>summary{transition:background .15s;border-radius:inherit;}',
+        '.dsa-fold>summary:hover{background:var(--dsa-hover);}',
+        '.dsa-fold[open]>summary{border-bottom:1px solid var(--dsa-line);}',
+        // 独立折叠（执行细节 · 命令）平时只是一行可点的说明，展开后才长出卡片边
+        '.dsa-fold-quiet{margin:2px 0 0;border:0;border-radius:var(--dsa-r2);background:transparent;box-shadow:none;}',
+        '.dsa-fold-quiet>summary{padding:7px 10px;font-size:12px;}',
+        '.dsa-fold-quiet[open]{background:var(--dsa-card);border:1px solid var(--dsa-line);box-shadow:var(--dsa-shadow);}',
+        '.dsa-fold-quiet[open]>summary{border-radius:var(--dsa-r2) var(--dsa-r2) 0 0;}',
+        '.dsa-fold-body{padding:10px 12px 12px;}',
+        // 闸门行里的小折叠（证据）：跟大折叠同一套三角，但更轻，不抢闸门结论
+        '.dsa-fold-sub>summary{cursor:pointer;list-style:none;font-size:11.5px;color:var(--dsa-ink2);}',
+        '.dsa-fold-sub>summary::-webkit-details-marker{display:none;}',
+        '.dsa-fold-sub>summary:before{content:"▸";display:inline-block;width:12px;color:var(--dsa-ink3);}',
+        '.dsa-fold-sub[open]>summary:before{content:"▾";}',
+
+        // ---- 项目行：整行可点 + 右侧移除键（两个并列 button，不能嵌套）
+        '.dsa-proj{position:relative;}',
+        '.dsa-proj-main{display:block;width:100%;padding:0 22px 0 0;border:0;background:none;',
+        '  font:inherit;color:inherit;text-align:left;cursor:pointer;}',
+        '.dsa-proj-main:focus-visible{outline:2px solid var(--dsa-accent);outline-offset:2px;}',
+        '.dsa-proj-del{position:absolute;top:5px;right:5px;width:20px;height:20px;padding:0;border:0;',
+        '  border-radius:6px;background:transparent;color:var(--dsa-ink2);font-size:14px;line-height:18px;',
+        // 常态可见（.3）：藏到悬停才出现等于没有按钮，用户会问「删除在哪」
+        '  cursor:pointer;opacity:.3;transition:opacity .15s,background .15s,color .15s;}',
+        '.dsa-proj:hover .dsa-proj-del,.dsa-proj:focus-within .dsa-proj-del{opacity:1;}',
+        // 没有 hover 的设备（触屏笔记本、平板）上没有「悬停」这一步，移除键不能永远隐身
+        '@media (hover: none){.dsa-proj-del{opacity:.55;}}',
+        '.dsa-proj-del:hover{background:var(--dsa-errsoft);color:var(--dsa-err);}',
+        '.dsa-proj-del:focus-visible{opacity:1;outline:2px solid var(--dsa-accent);outline-offset:1px;}',
+        // 目录已经不见的项目：移除键常显，因为这是用户唯一能对它做的动作
+        '.dsa-proj.orphan .dsa-proj-del{opacity:.85;}',
+        '.dsa-proj.orphan .dsa-proj-name{color:var(--dsa-err);}',
+
+        // ---- 移除项目的确认弹窗
+        '.dsa-forget-name{font-size:13px;font-weight:600;color:var(--dsa-ink);}',
+        '.dsa-forget-path{margin-top:3px;font-family:var(--dsa-mono);font-size:11px;color:var(--dsa-ink3);',
+        '  word-break:break-all;}',
+        '.dsa-forget-facts{margin-top:10px;padding:10px 12px;border-radius:var(--dsa-r2);background:var(--dsa-card2);',
+        '  border:1px solid var(--dsa-line);font-size:12px;color:var(--dsa-ink2);line-height:1.7;}',
+        '.dsa-ack{display:flex;align-items:flex-start;gap:8px;margin-top:12px;font-size:12.5px;color:var(--dsa-ink);cursor:pointer;}',
+        '.dsa-ack input{margin:2px 0 0;flex:0 0 auto;}'
       ].join('');
 
       function installStyles() {
@@ -1490,7 +1539,7 @@
               { className: 'dsa-modal-foot' },
               props.onCancel ? h(Btn, { variant: 'ghost', onClick: props.onCancel }, t('cancel')) : null,
               props.onConfirm
-                ? h(Btn, { variant: 'primary', disabled: props.busy || props.confirmDisabled, onClick: props.onConfirm }, props.busy ? t('saving') : props.confirmText || t('confirm'))
+                ? h(Btn, { variant: props.confirmVariant || 'primary', disabled: props.busy || props.confirmDisabled, onClick: props.onConfirm }, props.busy ? t('saving') : props.confirmText || t('confirm'))
                 : null
             )
           )
@@ -2281,7 +2330,18 @@
                             },
                             h('span', { className: 'dsa-mono', style: { fontSize: '11px' } }, p.path)
                           ),
-                          p.exists ? null : h('span', { className: 'dsa-tag err' }, '文件不见了')
+                          p.exists ? null : h('span', { className: 'dsa-tag err' }, '文件不见了'),
+                          // 目录没了的项目在这里也要能清掉：否则它会一直卡在「最近项目」里点不开
+                          h(
+                            'button',
+                            {
+                              type: 'button',
+                              className: 'dsa-link',
+                              title: '从列表移除（不删磁盘文件）',
+                              onClick: function () { setDialog({ kind: 'forget', project: p }); }
+                            },
+                            '移除'
+                          )
                         );
                       })
                     )
@@ -2303,11 +2363,12 @@
         var mat = (snap && snap.materials) || { sources: [], mounts: [], derived: [] };
         var matMounts = mat.mounts || [];
         var matBad = matMounts.filter(function (item) { return item.status !== 'ok'; }).length;
+        // 副标题要能塞进 52% 宽的 pill：挂载条数是用户要看的数，材料源个数只在不止一个时才提
         var matMeta = matBad
-          ? '⚠ ' + matBad + ' 条挂载失效'
+          ? '⚠ ' + matBad + ' 条失效'
           : matMounts.length
-            ? matMounts.length + ' 条挂载 · ' + ((mat.sources || []).length) + ' 个材料源'
-            : '未挂载材料（点开管理）';
+            ? matMounts.length + ' 条挂载' + ((mat.sources || []).length > 1 ? ' · ' + (mat.sources || []).length + ' 源' : '')
+            : '未挂载（点开管理）';
 
         var railProjects = (snap && snap.projects) || [];
         var rail = h(
@@ -2331,26 +2392,48 @@
               railProjects.map(function (p) {
                 var on = snap && snap.active && p.id === snap.active.id;
                 var label = p.name || p.path;
+                // 行主体和「移除」是两个并列按钮：button 不能套 button，
+                // 套进去浏览器会把内层按钮踢出 DOM，移除键就永远点不到。
                 return h(
-                  'button',
+                  'div',
                   {
                     key: p.path,
-                    type: 'button',
-                    className: 'dsa-proj' + (on ? ' sel' : ''),
-                    title: p.path + (p.exists === false ? '（目录不见了）' : ''),
-                    'aria-current': on ? 'true' : undefined,
-                    onClick: function () {
-                      if (on) return;
-                      action('/project/open', { dir: p.path });
-                    }
+                    className: 'dsa-proj' + (on ? ' sel' : '') + (p.exists === false ? ' orphan' : ''),
+                    title: p.path + (p.exists === false ? '（目录不见了）' : '')
                   },
                   h(
-                    'span',
-                    { className: 'dsa-proj-h' },
-                    h('span', { className: 'dsa-proj-av', 'aria-hidden': 'true' }, String(label).slice(0, 1)),
-                    h('span', { className: 'dsa-proj-name' }, label)
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsa-proj-main',
+                      'aria-current': on ? 'true' : undefined,
+                      onClick: function () {
+                        if (on) return;
+                        action('/project/open', { dir: p.path });
+                      }
+                    },
+                    h(
+                      'span',
+                      { className: 'dsa-proj-h' },
+                      h('span', { className: 'dsa-proj-av', 'aria-hidden': 'true' }, String(label).slice(0, 1)),
+                      h('span', { className: 'dsa-proj-name' }, label)
+                    ),
+                    h('span', { className: 'dsa-proj-path' }, p.exists === false ? p.path + ' · 目录不见了' : p.path)
                   ),
-                  h('span', { className: 'dsa-proj-path' }, p.exists === false ? p.path + ' · 目录不见了' : p.path)
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsa-proj-del',
+                      title: '从列表移除（不删磁盘文件）',
+                      'aria-label': '从列表移除 ' + label,
+                      onClick: function (e) {
+                        if (e && e.stopPropagation) e.stopPropagation();
+                        setDialog({ kind: 'forget', project: p });
+                      }
+                    },
+                    '×'
+                  )
                 );
               })
             ),
@@ -2529,8 +2612,8 @@
                     c.evidence
                       ? h(
                           'details',
-                          { style: { marginTop: '4px' } },
-                          h('summary', { className: 'dsa-hint', style: { cursor: 'pointer' } }, '证据'),
+                          { className: 'dsa-fold-sub', style: { marginTop: '4px' } },
+                          h('summary', null, '证据'),
                           h('pre', { className: 'dsa-code', style: { marginTop: '4px', whiteSpace: 'pre-wrap' } }, String(c.evidence))
                         )
                       : null
@@ -2553,7 +2636,7 @@
                     ),
                     h(
                       'div',
-                      { className: 'dsa-hint dsa-mono', style: { fontSize: '10.5px', marginTop: '3px' } },
+                      { className: 'dsa-hint dsa-mono', style: { fontSize: '11px', marginTop: '3px' } },
                       issue.where + (issue.fix_kind ? ' · ' + t(FIX_KIND_TEXT[issue.fix_kind] || issue.fix_kind) : '')
                     ),
                     h('div', { style: { marginTop: '4px' } }, issue.claim),
@@ -3138,44 +3221,45 @@
           hasScript
             ? h(
                 'details',
-                { className: 'dsa-fold' },
-                h('summary', null, '技术细节 · 命令'),
+                { className: 'dsa-fold dsa-fold-quiet' },
+                h('summary', null, '执行细节 · 命令'),
                 h(
                   'div',
-                  { className: 'dsa-inline', style: { justifyContent: 'space-between', margin: '0 0 6px' } },
-                  h('span', { className: 'dsa-hint' }, '在工作台外执行也行，闸门只认产物'),
+                  { className: 'dsa-fold-body' },
                   h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'dsa-chat-btn',
-                      onClick: function () {
-                        try {
-                          if (navigator.clipboard && navigator.clipboard.writeText) {
-                            void navigator.clipboard.writeText(cmdText);
-                            setCmdCopied(true);
-                            setTimeout(function () { setCmdCopied(false); }, 1500);
-                          }
-                        } catch (e) { void e; }
-                      }
-                    },
-                    cmdCopied ? t('copied') : t('copyCmd')
-                  )
-                ),
-                h('div', { className: 'dsa-code' }, cmdText)
+                    'div',
+                    { className: 'dsa-inline', style: { justifyContent: 'space-between', margin: '0 0 6px' } },
+                    h('span', { className: 'dsa-hint' }, '在工作台外执行也行，闸门只认产物'),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dsa-chat-btn',
+                        onClick: function () {
+                          try {
+                            if (navigator.clipboard && navigator.clipboard.writeText) {
+                              void navigator.clipboard.writeText(cmdText);
+                              setCmdCopied(true);
+                              setTimeout(function () { setCmdCopied(false); }, 1500);
+                            }
+                          } catch (e) { void e; }
+                        }
+                      },
+                      cmdCopied ? t('copied') : t('copyCmd')
+                    )
+                  ),
+                  h('div', { className: 'dsa-code' }, cmdText)
+                )
               )
             : h('div', { className: 'dsa-hint', style: { margin: '8px 0 0' } }, t('noScript')),
           h(
             'div',
             { className: 'dsa-section' },
             h('h3', null, '判读'),
-            h(
-              'span',
-              { className: 'count' },
-              openGates.length
-                ? openGates.length + ' 项待处理 · 已通过 ' + passedGates.length + ' 项'
-                : '全部通过 ' + passedGates.length + ' 项'
-            )
+            // 全部通过时这一行不再复述「已通过 N 项」——折叠行里已经写了，同一句话出现两遍只是噪音
+            openGates.length
+              ? h('span', { className: 'count' }, openGates.length + ' 项待处理 · 已通过 ' + passedGates.length + ' 项')
+              : null
           ),
           gateList,
           recheckView,
@@ -3202,7 +3286,7 @@
             { className: 'dsa-side-h' },
             h('b', null, t('logs')),
             h('span', { className: 'dsa-spacer' }),
-            runId ? h('span', { className: 'dsa-hint dsa-mono', style: { fontSize: '10.5px' } }, runId) : null,
+            runId ? h('span', { className: 'dsa-hint dsa-mono', style: { fontSize: '11px' } }, runId) : null,
             h(Btn, { variant: 'ghost', onClick: function () { setDrawer(false); } }, t('closeDrawer'))
           ),
           h(
@@ -3434,6 +3518,22 @@
               onConfirm: function () { doApply(d.issue.id); }
             });
           }
+          if (d.kind === 'forget') {
+            return h(ForgetDialog, {
+              busy: busy,
+              error: error,
+              project: d.project,
+              onCancel: function () { setDialog(null); },
+              onConfirm: function (id) {
+                action('/project/forget', { id: id }).then(function (json) {
+                  if (!json || !json.ok) return;
+                  setDialog(null);
+                  // 移除的是当前项目时，选中的阶段也一起归零：否则还停在一个已经不存在的项目里
+                  setSelected(null);
+                });
+              }
+            });
+          }
           return null;
         }
       }
@@ -3525,6 +3625,55 @@
                   })
                 )
               : null
+          )
+        );
+      }
+
+      function ForgetDialog(props) {
+        var project = props.project || {};
+        var ackState = useState(false);
+        var ack = ackState[0];
+        var setAck = ackState[1];
+        return h(
+          Modal,
+          {
+            title: '移除项目',
+            desc: '只从工作台的项目列表里移除登记，磁盘上的文件一个都不会删。',
+            busy: props.busy,
+            error: props.error,
+            confirmText: '移除',
+            confirmVariant: 'danger',
+            // 二次确认：勾上这一句才让按钮可用，避免手快点掉一个项目
+            confirmDisabled: !ack,
+            onCancel: props.onCancel,
+            onConfirm: function () { props.onConfirm(project.id); }
+          },
+          h(
+            'div',
+            { className: 'dsa-form' },
+            h(
+              'div',
+              { className: 'dsa-field' },
+              h('label', null, '项目'),
+              h('div', { className: 'dsa-forget-name' }, project.name || project.path || '（未命名）'),
+              h('div', { className: 'dsa-forget-path' }, project.path || '')
+            ),
+            h(
+              'div',
+              { className: 'dsa-forget-facts' },
+              h('div', null, '会一起清掉：这个项目的运行记录、人工裁定、复核链。'),
+              h('div', null, '不会动：项目目录、data/、output/、scripts/，以及材料源本身。')
+            ),
+            h(
+              'label',
+              { className: 'dsa-ack' },
+              h('input', {
+                type: 'checkbox',
+                checked: ack,
+                onChange: function (e) { setAck(Boolean(e.target.checked)); }
+              }),
+              h('span', null, '我明白这是移除登记，文件还在原来的目录里')
+            )
           )
         );
       }

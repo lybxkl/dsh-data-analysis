@@ -439,6 +439,48 @@ section('九、pruneMirror：清断链、清空目录、保留标记文件');
   await removeTree(root);
 }
 
+/* ------------------------ 十、移除项目：只删登记，不碰磁盘 ------------------------ */
+
+section('十、移除项目：只删登记，不碰磁盘');
+{
+  const bench = makeBench('dsa-t10-');
+  const other = path.join(bench.root, 'proj2');
+  fs.mkdirSync(path.join(other, 'data'), { recursive: true });
+  fs.writeFileSync(
+    path.join(other, 'project.json'),
+    JSON.stringify({ name: '第二个项目', root: other, dataDir: 'data' }, null, 2),
+  );
+  fs.writeFileSync(path.join(other, 'data', 'x.csv'), 'a,b\n1,2\n');
+  bench.ledger.projects.push({ id: 'p2', path: other, name: '第二个项目' });
+  bench.ledger.runs.push({ id: 'r1', projectId: 'p2', stageId: 'audit', status: 'ok', startedAt: new Date().toISOString() });
+  bench.ledger.runs.push({ id: 'r2', projectId: 'test', stageId: 'scope', status: 'ok', startedAt: new Date().toISOString() });
+  bench.ledger.adjudications.p2 = { 'qa-signoff': { status: 'pass', at: new Date().toISOString() } };
+  bench.ledger.recheckChains = bench.ledger.recheckChains || {};
+  bench.ledger.recheckChains.p2 = { projectId: 'p2', status: 'done', steps: [] };
+
+  const result = bench.wb.forgetProject('p2');
+  check('移除成功', result.ok === true, result.error || '');
+  check('明确回报磁盘没动', result.diskKept === true);
+  check('台账里不再有 p2', !(bench.ledger.projects || []).some((p) => p.id === 'p2'));
+  check('这个项目的运行记录清了', !(bench.ledger.runs || []).some((r) => r.projectId === 'p2'));
+  check('别的项目的运行记录还在', (bench.ledger.runs || []).some((r) => r.projectId === 'test'));
+  check('这个项目的裁定清了', !bench.ledger.adjudications.p2);
+  check('这个项目的复核链清了', !bench.ledger.recheckChains.p2);
+  check('磁盘上的项目文件全在', fs.existsSync(path.join(other, 'data', 'x.csv')) && fs.existsSync(path.join(other, 'project.json')));
+
+  const again = bench.wb.forgetProject('p2');
+  check('重复移除报错而不是静默成功', again.ok === false, again.error || '');
+
+  // 移除当前项目 = 回到「没选项目」，不许偷偷切到另一个项目
+  const activeId = bench.ledger.activeProjectId;
+  const current = bench.wb.forgetProject(activeId);
+  check('移除当前项目成功', current.ok === true && current.active === true);
+  check('活动项目清空', bench.ledger.activeProjectId === '' && bench.ledger.activeProjectPath === '');
+  check('active() 不再报 ok', bench.wb.active().ok === false);
+  check('当前项目的目录也还在', fs.existsSync(bench.proj) && fs.existsSync(path.join(bench.proj, 'project.json')));
+  await removeTree(bench.root);
+}
+
 /* -------------------------------- 收尾 -------------------------------- */
 
 console.log(`\n${failed ? `✗ ${failed} 项未通过` : '✓ 全部通过'}`);

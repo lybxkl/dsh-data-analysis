@@ -449,6 +449,7 @@ const dialogFixtures = {
       patch: { path: 'scripts/make_dataset.py', baseHash: 'sha256:abcdef0123456789', content: 'import pandas as pd\nprint(1)\n' },
     },
   },
+  forget: { kind: 'forget', project: { id: 'p1', name: '环境资源犯罪裁判文书实证分析', path: 'F:\\测试文件\\spss_analysis' } },
 };
 
 for (const [kind, fixture] of Object.entries(dialogFixtures)) {
@@ -457,6 +458,19 @@ for (const [kind, fixture] of Object.entries(dialogFixtures)) {
     check(hasClass(tree, 'dsa-body') || textOf(tree).includes('环境还没就绪'), '弹窗开着时底层仍在');
   });
 }
+
+/* 6a. 移除项目：必须二次确认（勾选之后「移除」才可点） */
+scenario('弹窗：移除项目要二次确认', { dialog: dialogFixtures.forget }, (tree, text) => {
+  check(Boolean(findByClass(tree, 'dsa-modal')), '移除弹窗渲染出来了');
+  check(text.includes('一个都不会删'), '说清磁盘上的文件不动');
+  check(Boolean(findByClass(tree, 'dsa-ack')), '有勾选确认那一行');
+  const danger = findAllByClass(tree, 'dsa-btn').filter((node) => node.props && node.props.disabled);
+  check(danger.length > 0, '没勾选时确认键是禁用的');
+  const confirms = findAllByClass(tree, 'dsa-btn').filter((node) =>
+    (node.children || []).some((child) => child && child.text === '移除'),
+  );
+  check(confirms.length === 1, '按钮文案就叫「移除」，不用「确认」混淆');
+});
 
 /* 6b. 弹窗数据过期（闸门/问题已不存在）时不许崩 */
 scenario('弹窗：拍板数据过期', { dialog: { kind: 'adjudicate' } }, (tree, text) => {

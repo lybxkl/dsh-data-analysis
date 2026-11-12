@@ -692,6 +692,55 @@ const PROBE = `(() => {
       if (!el) return false;
       return getComputedStyle(el).display !== 'none';
     })(),
+    // 细节体检：折叠行是否卡中卡、正文是否只写了一半、字号是否碎成一片
+    folds: [...document.querySelectorAll('details')].map((el) => {
+      const cs = getComputedStyle(el);
+      const sum = el.querySelector(':scope > summary');
+      const scs = sum ? getComputedStyle(sum) : null;
+      const r = el.getBoundingClientRect();
+      return {
+        cls: el.className || '(none)',
+        parent: (el.parentElement && el.parentElement.className) || '',
+        nestedInCard: !!el.closest('.dsa-card'),
+        open: el.open,
+        w: Math.round(r.width),
+        h: Math.round(r.height),
+        border: cs.borderTopWidth + ' ' + cs.borderTopStyle + ' ' + cs.borderTopColor,
+        // 卡里的折叠允许留一条顶部分隔线，但不该有左右/下边框（那是「又一个卡片」的标志）
+        borderSides: [cs.borderLeftWidth, cs.borderRightWidth, cs.borderBottomWidth].join(' '),
+        shadow: cs.boxShadow,
+        radius: parseFloat(cs.borderTopLeftRadius) || 0,
+        summaryPad: scs ? scs.padding : '',
+        summarySize: scs ? parseFloat(scs.fontSize) : 0,
+      };
+    }),
+    mainGaps: (() => {
+      const main = document.querySelector('.dsa-main');
+      if (!main) return [];
+      const kids = [...main.children];
+      const out = [];
+      for (let i = 1; i < kids.length; i += 1) {
+        const prev = kids[i - 1].getBoundingClientRect();
+        const cur = kids[i].getBoundingClientRect();
+        out.push({
+          cls: (kids[i].className || kids[i].tagName) + '',
+          gap: Math.round(cur.top - prev.bottom),
+        });
+      }
+      return out;
+    })(),
+    smallText: [...document.querySelectorAll('.dsa-main *, .dsa-rail *')]
+      .filter((el) => {
+        const own = [...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim());
+        if (!own) return false;
+        const size = parseFloat(getComputedStyle(el).fontSize) || 0;
+        return size > 0 && size < 11;
+      })
+      .map((el) => ({
+        cls: (el.className || el.tagName) + '',
+        size: parseFloat(getComputedStyle(el).fontSize),
+        text: el.textContent.trim().slice(0, 24),
+      })),
     overflow,
     contrast: {
       hint: pair('.dsa-hint'),
@@ -799,6 +848,14 @@ async function main() {
     if (variant.widthClass === 'wide') {
       check(probe.sideVisible, tag + ' 宽屏右栏不见了（那就再没有入口能看运行记录与日志）');
     }
+
+    // 折叠行不能「卡中卡」：details 自带边框/圆角/阴影，塞进 .dsa-card 就是双重边框加内阴影
+    for (const fold of probe.folds.filter((item) => item.nestedInCard)) {
+      check(fold.borderSides === '0px 0px 0px', tag + ' 卡里的折叠行还带着左右/下边框：' + fold.cls + ' → ' + fold.borderSides);
+      check(fold.shadow === 'none', tag + ' 卡里的折叠行还自带阴影：' + fold.cls);
+      check(fold.radius === 0, tag + ' 卡里的折叠行还自带圆角：' + fold.cls + ' → ' + fold.radius);
+    }
+    check(probe.smallText.length === 0, tag + ' 有 ' + probe.smallText.length + ' 处小于 11px 的字：' + JSON.stringify(probe.smallText.slice(0, 3)));
   }
 
   /* ---------------- 报告 ---------------- */
@@ -816,6 +873,14 @@ async function main() {
       .map(([k, v]) => k + ' ' + v.ratio)
       .join(' · ');
     line('对比度', contrast);
+    line(
+      '折叠',
+      probe.folds.length
+        ? probe.folds.map((f) => (f.cls || 'details') + ' ' + f.h + 'px' + (f.nestedInCard ? '（卡内）' : '')).join(' · ')
+        : '—'
+    );
+    line('块间距', probe.mainGaps.map((g) => g.cls + ':' + g.gap).join(' · '));
+    if (probe.smallText.length) line('小字', JSON.stringify(probe.smallText.slice(0, 6)));
     console.log('');
   }
 

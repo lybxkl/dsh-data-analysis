@@ -156,6 +156,26 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
       },
     },
     {
+      path: `${basePath}/api/project/forget`,
+      method: 'POST',
+      handler: (body) => {
+        const result = workbench.forgetProject(String(body?.id || ''));
+        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
+        return {
+          ok: true,
+          id: result.id,
+          name: result.name,
+          path: result.path,
+          active: result.active,
+          cancelled: result.cancelled,
+          removed: result.removed,
+          // 明确告诉面板「磁盘没动」：这条不改，用户会以为点的是删文件
+          diskKept: true,
+          state: result.state,
+        };
+      },
+    },
+    {
       path: `${basePath}/api/project/session`,
       method: 'POST',
       handler: (body) => {
