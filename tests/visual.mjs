@@ -550,6 +550,33 @@ function snapshot(projectCount) {
       derived: [],
       entries: [],
     },
+    registry: {
+      version: 2,
+      legacy: false,
+      counts: { datasets: 2, models: 4, artifacts: 46, claims: 3, errors: 1, warnings: 6 },
+      datasets: [
+        { id: 'analysis', title: '分析宽表', unit: 'defendant', rows: 388, columns: 50, inAnalysis: 381, confirmed: false },
+        { id: 'coding', title: '编码宽表', unit: 'document', rows: 223, columns: 21, inAnalysis: null, confirmed: false },
+      ],
+      models: [
+        { id: 'M1', estimator: 'ols', outcome: 'prison_months', n: 361, clusters: 82 },
+        { id: 'M2', estimator: 'logit', outcome: 'suspended', n: 361, clusters: 82 },
+        { id: 'M3', estimator: 'ols', outcome: 'fine_log', n: 267, clusters: 66 },
+        { id: 'M4', estimator: 'ols', outcome: 'prison_log', n: 361, clusters: 82 },
+      ],
+      artifacts: [],
+      claims: [],
+      sweep: { outcomes: 6, estimated: 4, undecided: 1 },
+      cells: { counts: { pass: 357, noise: 24, missing: 0 } },
+      issues: [
+        { severity: 'warn', message: '46 张图没有图题（题注只有「注：」）' },
+        { severity: 'warn', message: '32 张图正文从未引用' },
+        { severity: 'error', message: '1 条注册错误：模型 all 缺 estimator' },
+      ],
+      hints: [],
+      files: {},
+      missingFiles: [],
+    },
     layout: { width: 'wide' },
   };
 }

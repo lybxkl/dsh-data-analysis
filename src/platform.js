@@ -93,6 +93,56 @@ export function runPowerShell(script, { timeoutMs = 60000, cwd } = {}) {
   });
 }
 
+/**
+ * 跑一个普通进程（python 适配器用），返回 { ok, code, stdout, stderr }，不抛异常。
+ * 和 runPowerShell 同样的三件套：逐 chunk 解码、超时杀进程树、只留尾部输出。
+ */
+export function runProcess(command, args, { timeoutMs = 180000, cwd } = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(command, args, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (error) {
+      resolve({ ok: false, code: null, stdout: '', stderr: String(error?.message || error) });
+      return;
+    }
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const outDecoder = new StringDecoder('utf8');
+    const errDecoder = new StringDecoder('utf8');
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      killChildTree(child);
+      resolve({ ok: false, code: null, timeout: true, stdout, stderr: `${stderr}\n超时（${timeoutMs}ms）`.trim() });
+    }, timeoutMs);
+
+    child.stdout.on('data', (chunk) => {
+      stdout += outDecoder.write(chunk);
+      if (stdout.length > 200000) stdout = stdout.slice(-200000);
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += errDecoder.write(chunk);
+      if (stderr.length > 200000) stderr = stderr.slice(-200000);
+    });
+    child.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ok: false, code: null, stdout, stderr: String(error?.message || error) });
+    });
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      stdout += outDecoder.end();
+      stderr += errDecoder.end();
+      resolve({ ok: code === 0, code, stdout, stderr });
+    });
+  });
+}
+
 function psQuote(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }

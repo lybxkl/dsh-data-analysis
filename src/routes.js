@@ -5,8 +5,32 @@
  * 面板是「浏览与操作」的另一个入口，不是第二套规则。
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
+
 const MAX_BODY = 128 * 1024;
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]', '::1', '0:0:0:0:0:0:0:1']);
+
+/** 产物中心的二进制直出：只按扩展名给 content-type，不做内容嗅探。 */
+const MIME = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.tif': 'image/tiff',
+  '.tiff': 'image/tiff',
+  '.pdf': 'application/pdf',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.csv': 'text/csv; charset=utf-8',
+  '.tsv': 'text/tab-separated-values; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.jsonl': 'application/x-ndjson; charset=utf-8',
+  '.md': 'text/markdown; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
+  '.log': 'text/plain; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+};
 
 function hostIsLoopback(hostHeader) {
   if (!hostHeader) return true;
@@ -109,6 +133,41 @@ function send(res, status, payload) {
   res.end(body);
 }
 
+/**
+ * 二进制直出（图片 / docx / pdf）。
+ * 只允许工作台已经解析过、且确认落在项目内的绝对路径——路由层不再自己拼路径。
+ */
+function sendFile(res, file, { type = 'application/octet-stream', download = false, name = '' } = {}) {
+  if (res.headersSent) return;
+  let stat;
+  try {
+    stat = fs.statSync(file);
+  } catch {
+    return send(res, 404, { ok: false, error: '文件不存在' });
+  }
+  if (!stat.isFile()) return send(res, 404, { ok: false, error: '不是文件' });
+  const headers = {
+    'content-type': type,
+    'content-length': stat.size,
+    'cache-control': 'private, max-age=60',
+    'x-content-type-options': 'nosniff',
+  };
+  if (download) {
+    const label = encodeURIComponent(name || path.basename(file));
+    headers['content-disposition'] = `attachment; filename="${label}"; filename*=UTF-8''${label}`;
+  }
+  res.writeHead(200, headers);
+  const stream = fs.createReadStream(file);
+  stream.on('error', () => {
+    try {
+      res.destroy();
+    } catch {
+      /* ignore */
+    }
+  });
+  stream.pipe(res);
+}
+
 function headerValue(req, name) {
   const value = req.headers?.[name];
   return Array.isArray(value) ? value[0] : value;
@@ -182,6 +241,94 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
         const result = workbench.bindSession(String(body?.sessionId || ''));
         if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
         return { ok: true, sessionId: result.sessionId, state: workbench.snapshot() };
+      },
+    },
+    {
+      /* ------------------------------ v2 契约 ------------------------------ */
+      path: `${basePath}/api/registry`,
+      method: 'GET',
+      handler: () => workbench.registrySnapshot(),
+    },
+    {
+      path: `${basePath}/api/registry/save`,
+      method: 'POST',
+      handler: (body) => {
+        const result = workbench.registrySave({ kind: body?.kind, data: body?.data });
+        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error, warnings: result.warnings || [] } };
+        return result;
+      },
+    },
+    {
+      path: `${basePath}/api/registry/remove`,
+      method: 'POST',
+      handler: (body) => {
+        const result = workbench.registryRemove({ kind: body?.kind, id: body?.id });
+        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
+        return result;
+      },
+    },
+    {
+      path: `${basePath}/api/registry/confirm`,
+      method: 'POST',
+      handler: (body) => {
+        const result = workbench.registryConfirm({ kind: body?.kind, id: body?.id });
+        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
+        return result;
+      },
+    },
+    {
+      path: `${basePath}/api/registry/adopt`,
+      method: 'POST',
+      handler: (body) => {
+        const result = workbench.registryAdopt({ overwrite: isTrue(body?.overwrite) });
+        if (!result.ok) return { status: 409, payload: { ok: false, error: result.error } };
+        return result;
+      },
+    },
+    {
+      /* ------------------------------ 产物中心 ------------------------------ */
+      path: `${basePath}/api/artifacts/tree`,
+      method: 'GET',
+      handler: (_body, query) => workbench.artifactTree({ limit: Number(query?.limit) || 800 }),
+    },
+    {
+      path: `${basePath}/api/artifacts/file`,
+      method: 'GET',
+      handler: (_body, query) => {
+        const result = workbench.artifactRead(String(query?.path || ''), { limit: Number(query?.limit) || 200 });
+        if (!result.ok) return { status: 404, payload: { ok: false, error: result.error } };
+        return result;
+      },
+    },
+    {
+      path: `${basePath}/api/artifacts/raw`,
+      method: 'GET',
+      handler: (_body, query) => {
+        const result = workbench.artifactResolve(String(query?.path || ''));
+        if (!result.ok) {
+          const error = new Error(result.error);
+          error.status = 404;
+          throw error;
+        }
+        return {
+          __file: result.abs,
+          __type: MIME[result.ext] || 'application/octet-stream',
+          __download: isTrue(query?.download),
+          __name: path.basename(result.abs),
+        };
+      },
+    },
+    {
+      path: `${basePath}/api/artifacts/thumb`,
+      method: 'GET',
+      handler: async (_body, query) => {
+        const result = await workbench.artifactThumb(String(query?.path || ''), { width: Number(query?.w) || 320 });
+        if (!result.ok) {
+          const error = new Error(result.error);
+          error.status = 404;
+          throw error;
+        }
+        return { __file: result.abs, __type: 'image/png' };
       },
     },
     {
@@ -556,6 +703,14 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
           }
           const query = Object.fromEntries(url.searchParams.entries());
           const result = await route.handler(body || {}, query);
+          // 产物中心要直出图片/文档：handler 只回路径与类型，真正发字节在这里
+          if (result && result.__file) {
+            return sendFile(res, result.__file, {
+              type: result.__type || 'application/octet-stream',
+              download: result.__download === true,
+              name: result.__name || '',
+            });
+          }
           if (result && result.status && result.payload) return send(res, result.status, result.payload);
           return send(res, 200, result);
         } catch (error) {

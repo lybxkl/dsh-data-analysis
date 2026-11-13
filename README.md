@@ -141,7 +141,7 @@ pip3 install -r SPSS-Style-Charting-Skill/requirements.txt
 只留「让 AI 装好环境｜手动配置｜重新检查」和一屏检查结果——九个阶段都靠这份环境跑，缺了它点进去也是白点。
 
 ```
-[研] 实证研究工作台 · <项目名>        [技能包就位 · v]  AI 接手▾  材料  设置  项目▾  刷新
+[研] 实证研究工作台 · <项目名>        [技能包就位 · v]  AI 接手▾  材料  产物  设置  项目▾  刷新
 ────────────────────────────────────────────────────────────────────────────────────────
 项目 14          ← 左栏上部：项目列表【自己滚】，多到 14 个也不挤走下面
  ▣ 环境资源犯罪裁判文书实证分析        ×   ← 悬停出现 ×：从列表移除（二次确认）
@@ -170,9 +170,9 @@ pip3 install -r SPSS-Style-Charting-Skill/requirements.txt
 五个区域：
 
 - **顶栏（58px）**：品牌标 + 项目名 + 技能包指纹（SKILL.md 与项目记录不一致时标 ⚠）、`AI 接手▾`（起草 /
-  在对话里做这一步 / 复核）、`🗂 材料`（材料库：把项目外的资料挂进来）、`⚙ 设置`（技能目录 · Python ·
-  台账位置 · 模型）、`项目▾`（打开 · 新建）、刷新。材料与设置是**常驻入口**——它们是配置动作，不是项目动作，
-  藏在菜单里等于让人找不到；窄屏下只留图标。
+  在对话里做这一步 / 复核）、`🗂 材料`（材料库：把项目外的资料挂进来）、`▦ 产物`（产物中心：图库 / 表格 /
+  文档，只读）、`⚙ 设置`（技能目录 · Python · 台账位置 · 模型）、`项目▾`（打开 · 新建）、刷新。
+  材料、产物与设置是**常驻入口**——它们是配置/查看动作，不是项目动作，藏在菜单里等于让人找不到；窄屏下只留图标。
 - **左栏**：分三区，从上到下是「你在哪儿干活 → 喂给它什么 → 它跑到哪」：
   - **项目**：全部已登记项目，当前那个是白卡片（带首字方块），点一下直接切；顶部显示总数，底部
     `+ 新建` / `打开…`。**列表自己滚**：项目再多也只占左栏上部（最多 46%），
@@ -184,13 +184,14 @@ pip3 install -r SPSS-Style-Charting-Skill/requirements.txt
   - **阶段 1–9**：圆号 + 名称 + 右侧状态徽章（`完成` / `拦住` / `待裁定` / `待办`）。
     还没轮到的阶段退成灰字，但不透明到看不清。
 - **中栏**：hero 卡（阶段名 + 一句话目的 + 最近一次运行 + 主按钮）→ KPI 条（有效语料 / 总体积 /
-  阶段完成 / 待裁定 / 闸门未过）→「下一步」条 → 闸门卡（未过的排在前面，通过的折叠成一行）→ 产物清单；
+  阶段完成 / 待裁定 / 闸门未过）→**契约卡**（数据集 / 模型 / 产物 / 结论的计数与待核项，
+  没有 v2 契约时给「采纳现有产物」入口）→「下一步」条 → 闸门卡（未过的排在前面，通过的折叠成一行）→ 产物清单；
   命令收在「执行细节 · 命令」里，平时只是一行可点的说明（展开才长边框），日志与覆盖表在右栏 /
   复核区。闸门全部通过时，标题行不再复述「已通过 N 项」——同一句话只在折叠行说一次。
 - **右栏（运行台）**：运行记录卡片（阶段 / 状态 / 开始时间 / 退出码）+ 选中那条的命令与日志，
   日志是固定深色的终端卡，运行中自动滚到底。**宽屏常驻**；≤1240 起收成抽屉（顶栏「运行台」打开）。
   `运行本阶段` 只负责启动——**退出码 0 不等于阶段完成**，完成与否看中间那排闸门。
-- **弹窗**：设置、打开项目、新建项目、移除项目（二次确认）、AI 起草、人工裁定、材料库、补丁预览（共 8 种）。
+- **弹窗**：设置、打开项目、新建项目、移除项目（二次确认）、AI 起草、人工裁定、材料库、产物中心、补丁预览（共 9 种）。
   全部自绘，Esc 关闭，打开时焦点进弹窗、Tab 圈在里面、关掉回到原来的位置。
   复核区（第 9 阶段）不是弹窗，它长在中栏里。
 - **选文件夹**：凡是让你填目录的地方（新建项目、打开项目、设置里的技能包目录、材料库登记材料源），
@@ -296,6 +297,65 @@ data_analysis_status
   （目标文件、基线哈希、内容前 24 行），覆盖前自动备份到 `output/recheck/diffs`。
 - **窄屏**：面板宽度 ≤1240 时右栏收成抽屉（顶栏「运行台」打开）；≤860 时左栏也收起，改用顶栏的
   阶段下拉切换。切项目、关弹窗都不会留下上一个项目的状态。
+
+## v2 契约层：让闸门读「登记」，不再读「约定路径」
+
+v1 的闸门认的是固定路径（`output/dataset/analysis.csv`、`coef_*.csv`、`chart_manifest.csv`）。
+于是第二份数据集、第二种估计量、自己画的图，对闸门**完全不可见**——全绿，但什么都没查。
+v2 把这些变成**数据**：
+
+| 文件 | 一行是什么 | 谁写 |
+|---|---|---|
+| `output/datasets/index.json` | 一份数据集：`unit`（document/case/defendant/court…）、`grainKeys`、`file`、`rows`、`columns[].missingKind`、`inAnalysis.n`、`provenance` | `data_analysis_register`（save/adopt） |
+| `output/models/index.json` | 一个模型：`estimator` / `family` / `outcome` / `n` / `events` / `clusters` / `dropped` / `dropReasons` / `coef` | 同上 |
+| `output/models/sweep.json` | 一个结局 × 一个族：`estimated` / `available` / `blocked`（必须写 why）/ `not_needed` | `data_analysis_sweep` |
+| `output/artifacts/index.json` | 一件产物：`fig:1` / `tbl:1` / `doc:main`、`title` / `note` / `dpi` / `minFont` / `presentation.columns` | register（adopt 会按手稿顺序编号） |
+| `output/datasets/<id>/extract.jsonl` | 一格：`值 + 文件 + 页 + 字符区间 + 原句` | `data_analysis_verify_source` |
+| `output/datasets/<id>/extract.meta.json` | 每个字段的回源覆盖率 | 同上 |
+| `output/verify/cell_checks.csv` | 人可读的对账单：`pass` / `noise` / `missing` | 同上 |
+| `output/claims/claims.jsonl` | 一句结论：`text` + 声明式 `assert` + `evidence[]` | register（kind=claim） |
+| `output/artifacts/measure.json` | 每张图实测的 `minFont` / `dpi` / `pxWidth` | `data_analysis_figure_check` |
+
+**三条硬规矩**：
+
+1. 注册表是**声明**，不是证据：声明了没产出 → `artifacts-declared` fail；声明与实物行数不一致 → `datasets-index` fail。
+2. 读不懂的注册表不许当空表：解析失败直接 fail，宁可红也不假绿。
+3. 迁移生成的条目带 `confidence: "inferred"` + `confirmedByHuman: false`：机器猜的结构可以参与校验，
+   但在人确认（`data_analysis_register` action=confirm）之前不许冒充「已核实」。
+
+### 新闸门（第一版一律 warn 级，灰度两轮再升级）
+
+| 闸门 | 判什么 | 判不了时 |
+|---|---|---|
+| `datasets-index` | 每份数据集文件在、行列数与声明一致、注册无 error | 没有 v2 注册表 → unjudged + 迁移指引 |
+| `models-index` | 系数表在、模型 N 与「数据集纳入量 − 剔除量」一致 | 同上 |
+| `models-sweep` | 每个结局至少两个族表态、`blocked` 有 why、没有 `unknown` | 没跑普查 → unjudged |
+| `fig-title` | 每张图的题注不是只有「注：」 | 没有可解析的 manuscript.json |
+| `fig-cited` | 正文引用了每一张图（按图块顺序，`图 N`） | 同上 |
+| `tbl-present` | 表的列数 ≤ 12，或用 `presentation.columns` 选过列 | 同上 |
+| `manuscript-body` | 正文体量撑得起图集（每图 ≥ 80 字） | 同上 |
+| `provenance-cells` | 证据账覆盖整份数据集、回源率 ≥ 98%、没有 missing | 没跑回源 → unjudged |
+| `provenance-claims` | 每条结论的 `assert` 为真 | 没有 claims.jsonl / 没有 assert |
+| `artifacts-declared` | `project.json` 里 `stages.<id>.outputs` 声明的产物都在 | 一个都没声明 |
+
+`assert` 只支持声明式比较（`gt/lt/gte/lte/eq/ne/abs_gt/in_range`），两边可以是常量、模型引用
+（`M1.coef.multi_charge.beta`）、数据集元数据（`dataset:analysis.rows`）或条件计数
+（`dataset:analysis.count[year=2024]`）——**不执行任意表达式**。
+
+### 三个适配器（`assets/`，可选，不改技能包）
+
+| 脚本 | 补的缺口 |
+|---|---|
+| `sweep_models.py` | 技能只认 logit/ols → 这里只做**可行性诊断**（分布/零值/事件数/过度离散），不估参数 |
+| `verify_source.py` | 技能不产逐格证据 → 按 `provenance.sourceColumn/quoteColumn` 回源，页眉差异记 `noise` |
+| `figure_check.py` | 清单常缺 `min_fontsize` → 从 PDF 里实测，写 `measure.json`，`readFigures` 自动合并 |
+| `thumb.py` | 产物中心的缩略图（服务端生成，缓存 `output/.thumbs/`） |
+
+### 旧项目
+
+没有注册表的老项目照样能跑：所有 v2 闸门判 `unjudged` 并给出迁移指引，
+其余闸门与以前完全一致。迁移只有一步：面板契约卡点「采纳现有产物」
+（或 `data_analysis_register` action=adopt），然后逐条 `confirm` 复核列类型、单位、缺失原因、模型族。
 
 ## 材料库：用户资料留在原地
 
@@ -431,25 +491,29 @@ data_analysis_status
   `manuscript-fresh` 判「判不了」——闸门只查 docx 存在，没有这条就会拿旧 docx 报 done，属于静默交付旧稿。
 - **多步阶段**：终检是 `qa_outputs.py → verify_numbers.py` 两步；面板显示两步脚本名，参数在任务卡与运行日志里。
 
-## 模型工具（18 个）
+## 模型工具（23 个）
 
 `data_analysis_status`（状态与闸门）、`doctor`（环境自检）、`list_stages`、`figures`、`create_project`、`open_project`、
 `run_stage`、`run_log`、`cancel_stage`、`adjudicate`、`configure`、`draft`（起草文本）、`recheck`（复核）、`issue`（写问题）、
 `materials`（材料库：登记/挂载/摘下/修复）、`vision`（识图：计划/跑/核对）、`migrate`（旧副本换联接）、
-`manuscript`（手稿骨架：scaffold / brief / status）。
+`manuscript`（手稿骨架：scaffold / brief / status）、
+`register`（登记数据集/模型/产物/结论）、`artifacts`（产物树与内容）、`sweep`（模型族普查）、
+`verify_source`（逐格回源）、`figure_check`（实测字号与 dpi）。
 没有「转码」工具：doc/xls/ppt 交给会话或用户去转，工作台只负责分类与记账。
 状态类工具只回摘要与闸门，不回整份产物快照（避免一次读进 60 张图的全部列）。
 
 ## 测试
 
 ```bash
-npm test                          # 下面七套全跑，一条命令（e2e 单独跑，见最后一行）
+npm test                          # 下面九套全跑，一条命令（e2e 单独跑，见最后一行）
 node tests/materials.test.mjs     # 通道分类、挂载、迁移、识图全流程、来源账、移除项目（全在临时目录里造数据）
 node tests/runner.test.mjs        # 运行器视图与阶段命令：跑着的 run 有 status、可选 --config/--spec、并发阶段守卫、手稿骨架与改稿说明
 node tests/gates.test.mjs         # 闸门三态：pass / fail / unjudged 的边界，用合成项目逐条打
+node tests/registry.test.mjs      # 契约层：注册表 schema、引用解析、assert 求值、adopt 推断、九个新闸门的联动
+node tests/provenance.test.mjs    # 逐格回源：pass / noise / missing 三态、改一个数字必须判 missing、插一段页眉算 noise
 node tests/recheck.test.mjs       # 复核与补丁：baseHash、越界、目录联接穿透、备份命名、12 项复算口径
-node tests/consistency.test.mjs   # 静态对账：文案键 / CSS 类 / 接口路径 / 工具名 / 快照字段
-node tests/client-smoke.test.mjs  # 不开浏览器，用假 React 把面板渲染成树：环境闸门 / 主界面 / 八个弹窗 / 选文件夹入口 / 24 轮 fuzz
+node tests/consistency.test.mjs   # 静态对账：文案键 / CSS 类 / 接口路径 / 工具名 / 快照字段 / README 计数
+node tests/client-smoke.test.mjs  # 不开浏览器，用假 React 把面板渲染成树：环境闸门 / 主界面 / 九个弹窗 / 产物中心 / 24 轮 fuzz
 node tests/visual.mjs             # 视觉回归：渲成真 HTML + 真 CSS，用无头 Chrome 量尺寸与对比度
 node tests/e2e-corpus.test.mjs    # 真实语料端到端（有材料包才跑；用 DSA_PROJECT / DSA_SOURCE 指定路径）
 ```
@@ -562,9 +626,15 @@ dsh-data-analysis/
   src/taskcard.js     阶段任务卡（投递到原生会话的那段文字）
   src/tools.js        data_analysis_* 模型工具
   src/routes.js       /data-analysis/api/* 面板通道
+  src/registry.js     v2 契约层：三份注册表 + 结论账 + 引用解析 + assert 求值
+  src/adopt.js        从既有产物推断注册表（旧项目迁移用）
   src/prompt.js       注入系统提示的使用规则
   assets/render_pages.py  数页 / 渲染页图 / 图片转 PNG（PyMuPDF + Pillow）
-  tests/              8 套回归：materials / runner / gates / recheck / consistency / client-smoke / visual / e2e-corpus
+  assets/verify_source.py 逐格回源（引文 → 原文页码与字符区间）
+  assets/sweep_models.py  模型普查（每个结局给出该考虑的族，只表态不代拟合）
+  assets/figure_check.py  图表实测（min_fontsize / dpi / 像素宽）
+  assets/thumb.py         缩略图
+  tests/              10 套回归：materials / runner / gates / registry / provenance / recheck / consistency / client-smoke / visual / e2e-corpus
 ```
 
 ## 两个 Node 的坑（Windows）

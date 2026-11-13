@@ -191,7 +191,7 @@ for (const match of client.matchAll(/\bsnap\.([A-Za-z0-9_]+)\b/g)) clientSnapRea
 const knownSnapshotFields = new Set([
   'ok', 'config', 'skill', 'python', 'projects', 'active', 'error', 'preflight', 'stages', 'summary',
   'totals', 'artifacts', 'runs', 'adjudications', 'activeRuns', 'materials', 'platform', 'isWindows',
-  'layout', 'recheck', 'deadline',
+  'layout', 'recheck', 'deadline', 'registry',
 ]);
 const unknownSnapFields = [...clientSnapReads].filter((key) => !knownSnapshotFields.has(key)).sort();
 report('面板只读快照里有的字段', unknownSnapFields.length === 0, unknownSnapFields.length ? unknownSnapFields.join('、') : `${clientSnapReads.size} 个字段`);

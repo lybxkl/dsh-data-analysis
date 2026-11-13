@@ -7,6 +7,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 
 import {
   DEFAULT_CONFIG,
@@ -21,6 +23,16 @@ import { evaluateProject, summarizeStages, gateTotals } from './gates.js';
 import { createProject, projectId, readProject, writeProject, runsDir } from './projects.js';
 import { fingerprint, resolveSkillRoot, resolveStageScript, listScripts } from './skill.js';
 import { clearCorpusScan, readFigures, readManuscriptSpec, scanArtifacts } from './audit.js';
+import { adoptLegacy } from './adopt.js';
+import {
+  addClaim,
+  confirmRow,
+  projectPath as registryPath,
+  readRegistry,
+  removeRow,
+  summarizeRegistry,
+  upsert,
+} from './registry.js';
 import { runPreflight } from './preflight.js';
 import { buildTaskCard } from './taskcard.js';
 import { applyPatch, buildEvidence, fileHash, readIssues, recheckSummary, writeIssues } from './recheck.js';
@@ -53,7 +65,17 @@ import {
   markVerified as markVisionVerified,
   visionSummary,
 } from './vision.js';
-import { isLink, readMountMarker, removeTree } from './platform.js';
+import { isLink, readMountMarker, removeTree, runProcess } from './platform.js';
+
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const ASSETS_DIR = path.join(MODULE_DIR, '..', 'assets');
+
+/** 产物中心允许直接打开/下载的扩展名（白名单，防止把任意文件端出去）。 */
+const ARTIFACT_EXTS = new Set([
+  '.png', '.jpg', '.jpeg', '.webp', '.gif', '.tif', '.tiff', '.pdf',
+  '.docx', '.csv', '.tsv', '.json', '.jsonl', '.md', '.txt', '.log', '.html',
+]);
+const ARTIFACT_MAX_BYTES = 32 * 1024 * 1024;
 
 const EMPTY_SKILL = { ok: false, reason: '未配置 skillRoot', root: '', packageDir: '', version: '', sha256: '', scripts: [] };
 
@@ -98,6 +120,21 @@ function csvHasRows(file) {
  * 谎报「脚本不存在」会把排查引向错误方向：文件明明躺在磁盘上，问题在路径写法。
  * 所以区分两种失败——落在受保护范围之外（读得到，但不准读）与两处都没有这个文件。
  */
+/**
+ * 扫产物 + 读 v2 注册表。注册表读失败不能让整个面板黑掉：
+ * 把错误挂到 artifacts.registryError，闸门据此判「判不了」。
+ */
+function scanAll(projectRoot) {
+  const artifacts = scanArtifacts(projectRoot);
+  try {
+    artifacts.registry = readRegistry(projectRoot);
+  } catch (error) {
+    artifacts.registry = null;
+    artifacts.registryError = String(error && error.message ? error.message : error).slice(0, 200);
+  }
+  return artifacts;
+}
+
 function scriptErrorMessage(stage, scriptRel, found, projectRoot, skill) {
   const scope = `项目 ${projectRoot}${skill?.ok ? ` / 技能包 ${skill.packageDir}` : '（技能包未配置）'}`;
   if (found.code === 'outside') {
@@ -374,7 +411,7 @@ export class Workbench {
     const active = this.active();
     if (!active.ok) return { ok: false, error: active.error };
 
-    const artifacts = scanArtifacts(active.path);
+    const artifacts = scanAll(active.path);
     const stages = evaluateProject({
       projectRoot: active.path,
       project: active.project,
@@ -1086,10 +1123,11 @@ export class Workbench {
         runs: this.recentRuns(8),
         adjudications: {},
         materials: this.publicMaterials(null),
+        registry: null,
       };
     }
 
-    const artifacts = scanArtifacts(active.path);
+    const artifacts = scanAll(active.path);
     const adjudications = this.adjudicationsFor(active.id);
     const activeRuns = this.runner.activeFor(active.id);
     const stages = evaluateProject({
@@ -1130,6 +1168,7 @@ export class Workbench {
       adjudications,
       activeRuns,
       materials: this.publicMaterials(active),
+      registry: this.publicRegistry(artifacts.registry || readRegistry(active.path), active.path),
     };
   }
 
@@ -1149,7 +1188,7 @@ export class Workbench {
     if (!running && cache && cache.id === active.id && now - cache.at < 2000) {
       return JSON.parse(JSON.stringify(cache.value));
     }
-    const artifacts = scanArtifacts(active.path);
+    const artifacts = scanAll(active.path);
     const stages = evaluateProject({
       projectRoot: active.path,
       project: active.project,
@@ -1246,6 +1285,372 @@ export class Workbench {
     };
   }
 
+  /* ---------------------------- v2 契约层 ---------------------------- */
+
+  /** 面板要的注册表视图：摘要 + 列表（列表都裁过，不会把整张表搬过去）。 */
+  publicRegistry(registry, projectRoot) {
+    const summary = summarizeRegistry(registry, projectRoot);
+    return {
+      ...summary,
+      datasets: registry.datasets.rows.map((item) => ({
+        id: item.id,
+        title: item.title,
+        unit: item.unit,
+        file: item.file,
+        rows: item.rows,
+        columns: item.columns.length,
+        inAnalysis: item.inAnalysis.n,
+        inAnalysisColumn: item.inAnalysis.column,
+        confirmed: item.confirmedByHuman,
+        confidence: item.confidence,
+        missingKinds: item.columns.reduce((acc, column) => {
+          if (column.missing) acc[column.missingKind || 'unknown'] = (acc[column.missingKind || 'unknown'] || 0) + 1;
+          return acc;
+        }, {}),
+      })),
+      models: registry.models.rows.map((item) => ({
+        id: item.id,
+        estimator: item.estimator,
+        family: item.family,
+        outcome: item.outcome,
+        dataset: item.dataset,
+        n: item.n,
+        events: item.events,
+        clusters: item.clusters,
+        dropped: item.dropped,
+        dropReasons: item.dropReasons,
+        terms: item.terms.length,
+        flags: item.flags,
+      })),
+      artifacts: registry.artifacts.rows.slice(0, 200).map((item) => ({
+        id: item.id,
+        kind: item.kind,
+        path: item.path,
+        title: item.title,
+        note: item.note,
+        n: item.n,
+        dpi: item.dpi,
+        minFont: item.minFont,
+        section: item.section,
+        rows: item.rows,
+        cols: item.cols,
+      })),
+      claims: registry.claims.rows.slice(0, 60).map((item) => ({
+        id: item.id,
+        text: item.text,
+        where: item.where,
+        status: item.status,
+        assert: item.assert ? `${item.assert.left} ${item.assert.op} ${item.assert.right}` : '',
+        evidence: item.evidence,
+      })),
+      sweep: registry.sweep.value,
+      cells: registry.cells,
+    };
+  }
+
+  registrySnapshot() {
+    const active = this.active();
+    if (!active.ok) return { ok: false, error: active.error };
+    const registry = readRegistry(active.path);
+    return { ok: true, summary: summarizeRegistry(registry, active.path), registry: this.publicRegistry(registry, active.path) };
+  }
+
+  /** 登记一条数据集/模型/产物/结论。kind 接受单数或复数。 */
+  registrySave({ kind, data } = {}) {
+    const active = this.active();
+    if (!active.ok) return { ok: false, error: active.error };
+    const map = { dataset: 'datasets', datasets: 'datasets', model: 'models', models: 'models', artifact: 'artifacts', artifacts: 'artifacts', claim: 'claims', claims: 'claims', sweep: 'sweep' };
+    const target = map[String(kind || '').trim()];
+    if (!target) return { ok: false, error: `kind 只能是 dataset / model / artifact / claim / sweep（收到 ${kind || '空'}）` };
+    let parsed = data;
+    if (typeof parsed === 'string') {
+      try {
+        parsed = JSON.parse(parsed);
+      } catch (error) {
+        return { ok: false, error: `data 不是合法 JSON：${String(error?.message || error).slice(0, 120)}` };
+      }
+    }
+    if (!parsed || typeof parsed !== 'object') return { ok: false, error: '缺 data（对象或 JSON 字符串）' };
+    let result;
+    if (target === 'claims') result = addClaim(active.path, parsed);
+    else if (target === 'sweep') {
+      result = { ok: false, error: 'sweep 由 data_analysis_sweep 生成，不接受手工登记' };
+    } else result = upsert(active.path, target, parsed);
+    this.invalidateSummary();
+    clearCorpusScan();
+    if (!result.ok) {
+      return {
+        ok: false,
+        error: (result.errors || []).map((item) => `${item.where}: ${item.message}`).join('；') || result.error || '登记失败',
+        warnings: result.warnings || [],
+      };
+    }
+    const registry = readRegistry(active.path);
+    return {
+      ok: true,
+      file: result.file,
+      row: result.row || result.claim,
+      warnings: (result.warnings || []).map((item) => `${item.where}: ${item.message}`),
+      summary: summarizeRegistry(registry, active.path),
+      registry: this.publicRegistry(registry, active.path),
+    };
+  }
+
+  registryRemove({ kind, id } = {}) {
+    const active = this.active();
+    if (!active.ok) return { ok: false, error: active.error };
+    const map = { dataset: 'datasets', datasets: 'datasets', model: 'models', models: 'models', artifact: 'artifacts', artifacts: 'artifacts', claim: 'claims', claims: 'claims' };
+    const target = map[String(kind || '').trim()];
+    if (!target) return { ok: false, error: 'kind 只能是 dataset / model / artifact / claim' };
+    const result = removeRow(active.path, target, String(id || '').trim());
+    this.invalidateSummary();
+    if (!result.ok) return result;
+    const registry = readRegistry(active.path);
+    return { ok: true, file: result.file, summary: summarizeRegistry(registry, active.path), registry: this.publicRegistry(registry, active.path) };
+  }
+
+  /** 人确认「这条推断出来的结构是对的」。机器不能替人确认。 */
+  registryConfirm({ kind, id } = {}) {
+    const active = this.active();
+    if (!active.ok) return { ok: false, error: active.error };
+    const map = { dataset: 'datasets', datasets: 'datasets', model: 'models', models: 'models', artifact: 'artifacts', artifacts: 'artifacts' };
+    const target = map[String(kind || '').trim()];
+    if (!target) return { ok: false, error: 'kind 只能是 dataset / model / artifact' };
+    const result = confirmRow(active.path, target, String(id || '').trim());
+    this.invalidateSummary();
+    if (!result.ok) return result;
+    const registry = readRegistry(active.path);
+    return { ok: true, file: result.file, summary: summarizeRegistry(registry, active.path), registry: this.publicRegistry(registry, active.path) };
+  }
+
+  registryAdopt({ overwrite = false } = {}) {
+    const active = this.active();
+    if (!active.ok) return { ok: false, error: active.error };
+    const result = adoptLegacy(active.path, { overwrite: overwrite === true });
+    this.invalidateSummary();
+    clearCorpusScan();
+    if (!result.ok) return result;
+    const registry = readRegistry(active.path);
+    return { ...result, summary: summarizeRegistry(registry, active.path), registry: this.publicRegistry(registry, active.path), state: this.snapshot() };
+  }
+
+  /* ----------------------------- 产物中心 ----------------------------- */
+
+  /** 路径解析：词法越界、真实路径越界、扩展名白名单、大小上限，四道都要过。 */
+  artifactResolve(rel) {
+    const active = this.active();
+    if (!active.ok) return { ok: false, error: active.error };
+    const wanted = String(rel || '').trim();
+    if (!wanted) return { ok: false, error: '缺 path' };
+    const root = path.resolve(active.path);
+    const abs = path.resolve(root, wanted);
+    const relToRoot = path.relative(root, abs);
+    if (relToRoot.startsWith('..') || path.isAbsolute(relToRoot)) return { ok: false, error: '路径不在项目里' };
+    let stat;
+    try {
+      stat = fs.statSync(abs);
+    } catch {
+      return { ok: false, error: `文件不存在：${relToRoot}` };
+    }
+    if (!stat.isFile()) return { ok: false, error: '不是文件' };
+    let real = abs;
+    let realRoot = root;
+    try {
+      real = fs.realpathSync(abs);
+    } catch {
+      /* 用词法路径 */
+    }
+    try {
+      realRoot = fs.realpathSync(root);
+    } catch {
+      /* 用词法路径 */
+    }
+    if (!isInsidePath(realRoot, real)) return { ok: false, error: '这个路径指向项目外（材料挂载/联接不对外开）' };
+    const ext = path.extname(real).toLowerCase();
+    if (!ARTIFACT_EXTS.has(ext)) return { ok: false, error: `不支持的扩展名 ${ext || '(无)'}` };
+    if (stat.size > ARTIFACT_MAX_BYTES) return { ok: false, error: `文件太大（${Math.round(stat.size / 1048576)} MB > 32 MB）` };
+    return { ok: true, abs: real, rel: path.relative(root, abs).replace(/\\/g, '/'), size: stat.size, ext, mtimeMs: stat.mtimeMs };
+  }
+
+  /** output/ 下的文件树（深度 3、条目上限）；面板据此画产物目录。 */
+  artifactTree({ limit = 800 } = {}) {
+    const active = this.active();
+    if (!active.ok) return { ok: false, error: active.error };
+    const root = active.path;
+    const base = path.join(root, 'output');
+    if (!fs.existsSync(base)) return { ok: true, root: 'output', entries: [], truncated: false, totalFiles: 0, totalBytes: 0 };
+    const entries = [];
+    let truncated = false;
+    let totalFiles = 0;
+    let totalBytes = 0;
+    const max = Math.min(2000, Math.max(20, Number(limit) || 800));
+    const walk = (dir, depth) => {
+      if (truncated || depth > 3) return;
+      let items = [];
+      try {
+        items = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      items.sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
+      for (const item of items) {
+        if (item.name.startsWith('.')) continue;
+        const abs = path.join(dir, item.name);
+        let stat;
+        try {
+          stat = fs.statSync(abs);
+        } catch {
+          continue;
+        }
+        const rel = path.relative(root, abs).replace(/\\/g, '/');
+        if (stat.isDirectory()) {
+          entries.push({ kind: 'dir', rel, name: item.name, size: 0, mtimeMs: stat.mtimeMs });
+          walk(abs, depth + 1);
+        } else if (stat.isFile()) {
+          const ext = path.extname(item.name).toLowerCase();
+          totalFiles += 1;
+          totalBytes += stat.size;
+          entries.push({
+            kind: 'file',
+            rel,
+            name: item.name,
+            ext,
+            size: stat.size,
+            mtimeMs: stat.mtimeMs,
+            viewable: ARTIFACT_EXTS.has(ext) && stat.size <= ARTIFACT_MAX_BYTES,
+            image: /^\.(png|jpe?g|webp|gif|tiff?)$/.test(ext),
+          });
+        }
+        if (entries.length >= max) {
+          truncated = true;
+          return;
+        }
+      }
+    };
+    walk(base, 0);
+    return { ok: true, root: 'output', entries, truncated, totalFiles, totalBytes };
+  }
+
+  /** 读一个产物的内容：表格回前 N 行，文本回前 N 字，图片/文档只回元信息。 */
+  artifactRead(rel, { limit = 200 } = {}) {
+    const resolved = this.artifactResolve(rel);
+    if (!resolved.ok) return resolved;
+    const maxRows = Math.min(2000, Math.max(5, Number(limit) || 200));
+    const ext = resolved.ext;
+    const base = { ok: true, rel: resolved.rel, size: resolved.size, ext, mtimeMs: resolved.mtimeMs };
+    if (/^\.(png|jpe?g|webp|gif|tiff?)$/.test(ext)) return { ...base, kind: 'image' };
+    if (ext === '.pdf') return { ...base, kind: 'pdf' };
+    if (ext === '.docx') return { ...base, kind: 'document' };
+    if (ext === '.csv' || ext === '.tsv') {
+      const csv = readCsv(resolved.abs);
+      if (!csv) return { ok: false, error: 'CSV 解析失败' };
+      return {
+        ...base,
+        kind: 'table',
+        header: csv.header,
+        rows: csv.rows.slice(0, maxRows).map((row) => csv.header.map((name) => row[name] ?? '')),
+        totalRows: csv.rows.length,
+        truncated: csv.rows.length > maxRows,
+      };
+    }
+    if (ext === '.json' || ext === '.jsonl') {
+      const text = fs.readFileSync(resolved.abs, 'utf8').replace(/^\uFEFF/, '');
+      if (ext === '.json') {
+        try {
+          const value = JSON.parse(text);
+          const pretty = JSON.stringify(value, null, 2);
+          return { ...base, kind: 'json', text: pretty.length > 200000 ? `${pretty.slice(0, 200000)}\n…（已截断）` : pretty };
+        } catch {
+          return { ...base, kind: 'text', text: text.slice(0, 200000) };
+        }
+      }
+      const lines = text.split(/\r?\n/).filter(Boolean);
+      return { ...base, kind: 'text', text: lines.slice(0, maxRows).join('\n'), totalRows: lines.length, truncated: lines.length > maxRows };
+    }
+    const text = fs.readFileSync(resolved.abs, 'utf8');
+    return { ...base, kind: 'text', text: text.length > 200000 ? `${text.slice(0, 200000)}\n…（已截断）` : text };
+  }
+
+  /** 缩略图：python + Pillow 生成一次，缓存到 output/.thumbs（键含尺寸与 mtime）。 */
+  async artifactThumb(rel, { width = 320 } = {}) {
+    const active = this.active();
+    if (!active.ok) return { ok: false, error: active.error };
+    const resolved = this.artifactResolve(rel);
+    if (!resolved.ok) return resolved;
+    if (!/^\.(png|jpe?g|webp|gif|tiff?)$/.test(resolved.ext)) return { ok: false, error: '只有图片能生成缩略图' };
+    const px = Math.min(960, Math.max(80, Number(width) || 320));
+    const cacheDir = path.join(active.path, 'output', '.thumbs');
+    const key = `${createHash('sha1').update(`${resolved.rel}|${resolved.size}|${resolved.mtimeMs}|${px}`).digest('hex').slice(0, 16)}.png`;
+    const out = path.join(cacheDir, key);
+    if (fs.existsSync(out)) return { ok: true, abs: out, rel: path.relative(active.path, out).replace(/\\/g, '/'), cached: true };
+    fs.mkdirSync(cacheDir, { recursive: true });
+    const python = this.getConfig().pythonPath || DEFAULT_PYTHON;
+    const result = await runProcess(python, [path.join(ASSETS_DIR, 'thumb.py'), '--src', resolved.abs, '--out', out, '--width', String(px)], { timeoutMs: 60000 });
+    if (!result.ok || !fs.existsSync(out)) {
+      return { ok: false, error: `缩略图生成失败：${(result.stderr || result.stdout || '').slice(-300) || '未知错误'}` };
+    }
+    return { ok: true, abs: out, rel: path.relative(active.path, out).replace(/\\/g, '/'), cached: false };
+  }
+
+  /* ---------------------------- 研究适配器 ---------------------------- */
+
+  /**
+   * 跑 assets/<name>.py：这些脚本只读项目、只写 output/ 下的登记文件。
+   * 统一契约：--root <项目> --out <结果 JSON>，退出码 0 且结果文件可解析才算成功。
+   */
+  async runAdapter(name, { timeoutMs = 900000, args = [] } = {}) {
+    const active = this.active();
+    if (!active.ok) return { ok: false, error: active.error };
+    const script = path.join(ASSETS_DIR, `${name}.py`);
+    if (!fs.existsSync(script)) return { ok: false, error: `缺适配器脚本 assets/${name}.py` };
+    const outDir = path.join(active.path, 'output', '.adapter');
+    fs.mkdirSync(outDir, { recursive: true });
+    const out = path.join(outDir, `${name}.json`);
+    try {
+      fs.rmSync(out, { force: true });
+    } catch {
+      /* ignore */
+    }
+    const python = this.getConfig().pythonPath || DEFAULT_PYTHON;
+    const result = await runProcess(python, [script, '--root', active.path, '--out', out, ...args], {
+      timeoutMs,
+      cwd: active.path,
+    });
+    let payload = null;
+    let parseError = '';
+    try {
+      payload = JSON.parse(fs.readFileSync(out, 'utf8').replace(/^\uFEFF/, ''));
+    } catch (error) {
+      parseError = String(error?.message || error).slice(0, 160);
+    }
+    this.invalidateSummary();
+    clearCorpusScan();
+    const tail = `${result.stdout || ''}\n${result.stderr || ''}`.trim().split(/\r?\n/).slice(-12).join('\n');
+    if (!result.ok || !payload) {
+      return {
+        ok: false,
+        error: payload?.error || `适配器失败（退出码 ${result.code ?? '—'}）${parseError ? `：结果文件读不出（${parseError}）` : ''}`,
+        log: tail,
+        adapter: name,
+      };
+    }
+    return { ok: true, adapter: name, result: payload, log: tail, state: this.snapshot() };
+  }
+
+  runSweep() {
+    return this.runAdapter('sweep_models');
+  }
+
+  runVerifySource({ mode = 'build', datasetId = '' } = {}) {
+    const args = ['--mode', mode === 'verify' ? 'verify' : 'build'];
+    if (datasetId) args.push('--dataset', String(datasetId));
+    return this.runAdapter('verify_source', { args, timeoutMs: 1800000 });
+  }
+
+  runFigureCheck() {
+    return this.runAdapter('figure_check');
+  }
+
   recentRuns(limit, forProjectId) {
     const state = this.store.get();
     const pool = (state.runs || []).filter((run) => !forProjectId || run.projectId === forProjectId);
@@ -1339,7 +1744,7 @@ export class Workbench {
 
   /** 前置闸门：前面阶段不许留着 blocked / 未裁定的人工项。 */
   blockers(projectRoot, project, stageId, adjudications) {
-    const artifacts = scanArtifacts(projectRoot);
+    const artifacts = scanAll(projectRoot);
     const stages = evaluateProject({
       projectRoot,
       project,

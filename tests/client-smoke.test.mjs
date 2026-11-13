@@ -503,6 +503,7 @@ const dialogFixtures = {
     },
   },
   forget: { kind: 'forget', project: { id: 'p1', name: '环境资源犯罪裁判文书实证分析', path: 'F:\\测试文件\\spss_analysis' } },
+  artifacts: { kind: 'artifacts' },
 };
 
 for (const [kind, fixture] of Object.entries(dialogFixtures)) {
@@ -539,6 +540,50 @@ for (const [kind, label] of [
     check(text.includes('项目目录') || text.includes('材料目录'), '路径字段的标签还在');
   });
 }
+
+/* 6b. 产物中心：弹窗打开时先给「正在读」，不是白屏 */
+scenario('弹窗：产物中心', { dialog: { kind: 'artifacts' } }, (tree, text) => {
+  check(Boolean(findByClass(tree, 'dsa-modal')), '产物中心渲染出来了');
+  check(text.includes('产物中心'), '标题就是「产物中心」');
+  check(text.includes('正在读') || text.includes('还没有产物'), '先给一句话，不留白屏');
+});
+
+/* 6c. 契约卡：有注册表看计数，没有注册表给迁移入口 */
+const REGISTRY_CARD = {
+  legacy: false,
+  counts: { datasets: 2, models: 4, artifacts: 46, claims: 3, errors: 0, warnings: 2 },
+  datasets: [{ id: 'analysis', rows: 388, columns: 50, inAnalysis: 381, confirmed: false, unit: 'defendant', title: '分析宽表' }],
+  models: [{ id: 'M1', estimator: 'ols', outcome: 'prison_months', n: 361 }],
+  artifacts: [],
+  claims: [],
+  sweep: { outcomes: 4, estimated: 4, undecided: 0 },
+  issues: [{ severity: 'warn', message: '2 张表直接贴了原表' }],
+  files: {},
+  cells: { counts: { pass: 0, noise: 0, missing: 0 } },
+  hints: [],
+};
+
+scenario('契约卡：有注册表', { snap: Object.assign({}, SNAP, { registry: REGISTRY_CARD }) }, (tree, text) => {
+  check(Boolean(findByClass(tree, 'dsa-reg-card')), '契约卡渲染出来了');
+  check(text.includes('analysis') && text.includes('M1'), '数据集与模型都列了名字');
+  check(text.includes('待核 2'), '把待核项数摆出来');
+  check(text.includes('产物中心'), '有产物中心入口');
+  check(text.includes('2 张表直接贴了原表'), '把第一条问题原样说出来');
+});
+
+scenario(
+  '契约卡：还没有 v2 注册表',
+  {
+    snap: Object.assign({}, SNAP, {
+      registry: { legacy: true, counts: { datasets: 0, models: 0, artifacts: 0, claims: 0, errors: 0, warnings: 0 }, datasets: [], models: [], artifacts: [], claims: [], sweep: null, issues: [], hints: [] },
+    }),
+  },
+  (tree, text) => {
+    check(Boolean(findByClass(tree, 'dsa-reg-card')), '老项目也有契约卡');
+    check(text.includes('采纳现有产物'), '给「采纳现有产物」入口，而不是空白');
+    check(text.includes('判不了'), '说清「没确认之前闸门只判判不了」');
+  },
+);
 
 /* 6b. 弹窗数据过期（闸门/问题已不存在）时不许崩 */
 scenario('弹窗：拍板数据过期', { dialog: { kind: 'adjudicate' } }, (tree, text) => {

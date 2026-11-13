@@ -69,6 +69,16 @@ const LINES = [
   "- 「我的资料怎么进来」→ 用户给的是**项目外**的目录：`data_analysis_materials`（action=add）登记，再 action=mount 挂到 data/ 下，不复制。别让用户先把文件拷进项目。",
   "- 「扫描件/照片能分析吗」→ 能，走识图：`data_analysis_vision` 先 plan 看要多少页，再 run。识别稿必须人工核对后才算数。",
   "- 「doc/xls 读不了」→ 转换不是工作台的事：让用户在 Office/WPS 里另存为 docx/xlsx 再重扫；工作台只负责告诉你哪些文件是「待转换」。",
+  "",
+  "### v2 契约层（注册表 + 证据账）",
+  "- 数据集、模型、产物、结论都先**登记**再谈结论：`data_analysis_register`（action=list/save/confirm/remove/adopt）。注册表落在 `output/datasets/index.json`、`output/models/index.json`、`output/artifacts/index.json`、`output/claims/claims.jsonl`。",
+  "- 旧项目先 action=adopt 从既有产物推断一份（`generatedBy:\"adapter\"`、`confidence:\"inferred\"`、`confirmedByHuman:false`），再逐条 confirm；**推断出来的口径没人工确认前，闸门不会当通过**。",
+  "- 一个项目可以有**任意多个数据集**（长表/宽表/court 级/被告人级都行），不要硬塞进 `output/dataset/analysis.csv`；注册时写清 unit、grainKeys、inAnalysis 规则与 provenance 列。",
+  "- 每个结局都要表态：`data_analysis_sweep` 会按结局类型列出该考虑的族（logit/probit/poisson/negbin/ols/quantile/…），`blocked` 必须写为什么不可估（例如没有随访时间、没有分母）。**只要求表态，不要求都拟合**；不表态或只表态一个族，`models-sweep` 会 unjudged。",
+  "- 数字必须能回源到原文：`data_analysis_verify_source` 逐格比对引文与 PDF/TXT 原文，写 `output/verify/cell_checks.csv`。`missing` 就是「这句话原文里没有」，不许当成格式差异；页眉/页码/标点差异会被记成 `noise`（可解释，不算造假）。",
+  "- 图表尺寸自己量：`data_analysis_figure_check` 把实测 min_fontsize / dpi / 像素宽写进 `output/artifacts/measure.json`；清单里没有 `min_fontsize` 时 `fig-font` 只能 unjudged。",
+  "- 结论要可核验：`claims.jsonl` 里每条结论带 `assert`（`{\"ref\":\"M1.coef.multi_charge.p\",\"op\":\"lt\",\"value\":0.05}` 这种声明式断言，**不执行任意表达式**）。`provenance-claims` 会对 refuted 直接判 fail。",
+  "- 交付物登记：`data_analysis_artifacts`（tree/read）列出项目里能点的图片/表格/文档；面板的「产物」就是读它。声明了却找不到的产物，`artifacts-declared` 判 fail。",
 ];
 
 export const PROMPT = LINES.join("\n");

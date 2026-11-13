@@ -252,6 +252,10 @@ export function readFigures(projectRoot) {
     const csv = readCsv(abs);
     if (!csv || !csv.rows.length) continue;
     const baseDir = path.dirname(abs);
+    // 实测值（output/artifacts/measure.json，由 figure_check.py 从 PDF 里量出来）优先于清单声明：
+    // 清单常常没有 min_fontsize，而闸门不能因为「清单没写」就永远判不了。
+    const measured = readJson(path.join(projectRoot, 'output', 'artifacts', 'measure.json')) || {};
+    const byPng = measured && measured.byPng && typeof measured.byPng === 'object' ? measured.byPng : {};
     const rows = csv.rows.map((row) => {
       const pngRel = pick(row, ['png', 'file']);
       const pngAbs = pngRel
@@ -268,6 +272,11 @@ export function readFigures(projectRoot) {
       const effectiveDpi = pxWidth ? pxWidth / PLOT_INCHES : null;
       const nText = pick(row, ['n']);
       const n = parseNumber(nText);
+      const measureKey = pngRel ? String(pngRel).replace(/\\/g, '/') : '';
+      const hit = byPng[measureKey] || byPng[pngName] || null;
+      const minFontMeasured = hit ? parseNumber(hit.minFont) : null;
+      const dpiMeasured = hit ? parseNumber(hit.dpi) : null;
+      const pxWidthMeasured = hit ? parseNumber(hit.pxWidth) : null;
       return {
         id: pick(row, ['id']) || pngName,
         question: pick(row, ['question', 'title']),
@@ -284,9 +293,11 @@ export function readFigures(projectRoot) {
         status: pick(row, ['status']),
         palette: pick(row, ['palette']),
         declaredDpi,
-        pxWidth,
-        effectiveDpi,
-        minFontsize: fontMatch ? Number(fontMatch[1]) : null,
+        pxWidth: pxWidth ?? pxWidthMeasured,
+        effectiveDpi: effectiveDpi ?? (pxWidthMeasured ? pxWidthMeasured / PLOT_INCHES : null),
+        minFontsize: fontMatch ? Number(fontMatch[1]) : minFontMeasured,
+        minFontMeasured: minFontMeasured !== null,
+        measuredDpi: dpiMeasured,
         dataHash: pick(row, ['data_hash']),
       };
     });
@@ -692,6 +703,39 @@ export function readManuscriptSpec(projectRoot) {
   const isPlaceholder = (block) =>
     typeOf(block) === 'para' && (block.placeholder === true || /^待补[:：]/.test(String(block.text || '').trim()));
   const figureBlocks = blocks.filter((block) => typeOf(block) === 'figure');
+  const tableBlocks = blocks.filter((block) => typeOf(block) === 'table');
+  const paraBlocks = blocks.filter((block) => typeOf(block) === 'para');
+  const bodyText = blocks
+    .filter((block) => ['para', 'heading', 'note'].includes(typeOf(block)))
+    .map((block) => String((block && block.text) || ''))
+    .join('\n');
+  // 「图 N 被引用了吗」：正文里的图号是块顺序，不是文件名。
+  // 只认「图 N」且 N 后面不能再跟数字，否则「图 1」会把「图 10」也算成引用过。
+  const citedFigures = [];
+  const uncitedFigures = [];
+  const titlesMissing = [];
+  figureBlocks.forEach((block, index) => {
+    const n = index + 1;
+    const pattern = new RegExp(`(?:图|figure|fig\\.?)\\s*${n}(?![0-9])`, 'i');
+    if (pattern.test(bodyText)) citedFigures.push(n);
+    else uncitedFigures.push(n);
+    const caption = String((block && block.caption) || '').trim();
+    // 技能生成的题注常常只有「注：N=…」——读者看不到这张图在讲什么
+    if (!caption || /^注[:：]/.test(caption)) titlesMissing.push(n);
+  });
+  const tableWidths = tableBlocks.map((block, index) => {
+    const rel = String((block && block.csv) || '').trim();
+    const csv = rel ? readCsv(path.isAbsolute(rel) ? rel : path.join(projectRoot, rel)) : null;
+    const cols = csv ? csv.header.length : 0;
+    const presentation = block && block.presentation && Array.isArray(block.presentation.columns) && block.presentation.columns.length
+      ? block.presentation.columns.length
+      : 0;
+    return { n: index + 1, cols, presentation, csv: rel };
+  });
+  const paraChars = paraBlocks.reduce((acc, block) => {
+    const textValue = String((block && block.text) || '').trim();
+    return isPlaceholder(block) ? acc : acc + textValue.length;
+  }, 0);
   // 图块的 png 找不到时 assemble_manuscript 会直接 SpecError——提前报出来，
   // 别让用户以为是文稿内容的问题
   const missingPng = figureBlocks.filter((block) => {
@@ -731,6 +775,13 @@ export function readManuscriptSpec(projectRoot) {
     invalidBlocks,
     tables: blocks.filter((block) => typeOf(block) === 'table').length,
     placeholders: blocks.filter(isPlaceholder).length,
+    // 引用与呈现：三个新闸门（fig-cited / fig-title / tbl-present）都读这几个字段
+    paras: paraBlocks.length,
+    paraChars,
+    citedFigures,
+    uncitedFigures,
+    titlesMissing,
+    tableWidths,
   };
 }
 

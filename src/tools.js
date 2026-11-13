@@ -808,6 +808,208 @@ export function registerTools(ctx, workbench, helpers = {}) {
   }));
 
   register(defineTool({
+    name: 'data_analysis_register',
+    description:
+      '登记 v2 契约（数据集 / 模型 / 产物 / 结论）。登记是「声明」，不是「证据」：'
+      + '声明了没产出会被 artifacts-declared 抓，声明与实物不一致会被 datasets-index / models-index 抓。'
+      + 'action=list 看现状；save 写一条（同 id 覆盖；data 传 JSON 字符串）；confirm 由人确认「推断出来的结构是对的」；'
+      + 'remove 删一条；adopt 按现有产物推断生成三份 index（条目带 inferred 标记，需人 confirm）。'
+      + 'dataset 必需字段：id/file/rows；model 必需：id/estimator/outcome；artifact 必需：id/kind/path；'
+      + 'claim 建议：{id,text,assert:{op,left,right},evidence:[]}——assert 用声明式比较引用模型/数据集/图，例如 '
+      + '{"op":"lt","left":"dataset:analysis.count[year=2024]","right":"dataset:analysis.count[year=2022]"}，'
+      + '或 {"op":"gt","left":"M1.coef.multi_charge.beta","right":0}。',
+    parameters: {
+      action: { type: 'string', required: true, description: 'list | save | confirm | remove | adopt' },
+      kind: { type: 'string', description: 'dataset | model | artifact | claim（save/confirm/remove 用）' },
+      id: { type: 'string', description: '记录 id（confirm/remove 用）' },
+      data: { type: 'string', description: 'save：一条记录的 JSON 字符串' },
+      overwrite: { type: 'boolean', description: 'adopt：覆盖已有的 index.json' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '注册表已更新') },
+    async execute(args) {
+      const action = String(args?.action || 'list');
+      if (action === 'list') {
+        const result = workbench.registrySnapshot();
+        if (!result.ok) return { ok: false, error: result.error, text: `读不到注册表：${result.error}` };
+        const counts = result.summary.counts;
+        const lines = [
+          `注册表：数据集 ${counts.datasets} · 模型 ${counts.models} · 产物 ${counts.artifacts} · 结论 ${counts.claims}（error ${counts.errors} / warning ${counts.warnings}）`,
+          result.summary.legacy ? '还没有 v2 注册表：跑 action=adopt 按现状生成。' : '',
+        ].filter(Boolean);
+        for (const dataset of result.registry.datasets.slice(0, 8)) {
+          lines.push(`数据集 ${dataset.id}：${dataset.rows} 行 / ${dataset.columns} 列 · 单位 ${dataset.unit}${dataset.inAnalysis ? ` · 纳入 ${dataset.inAnalysis}` : ''}${dataset.confirmed ? ' · 已确认' : ' · 待确认'}`);
+        }
+        for (const model of result.registry.models.slice(0, 8)) {
+          lines.push(`模型 ${model.id}：${model.estimator || '?'} / ${model.outcome || '?'} · N=${model.n ?? '?'}${model.clusters ? ` · 聚类 ${model.clusters}` : ''}`);
+        }
+        if (result.summary.hints?.length) lines.push(...result.summary.hints);
+        return { ok: true, text: lines.join('\n'), summary: result.summary, registry: result.registry };
+      }
+      if (action === 'save') {
+        const result = workbench.registrySave({ kind: args?.kind, data: args?.data });
+        if (!result.ok) return { ok: false, error: result.error, text: `没写进去：${result.error}` };
+        return {
+          ok: true,
+          text: [`已登记：${result.row?.id || ''} → ${result.file}`, ...(result.warnings || []).map((w) => `注意：${w}`)].join('\n'),
+          warnings: result.warnings || [],
+          row: result.row,
+          summary: result.summary,
+        };
+      }
+      if (action === 'confirm') {
+        const result = workbench.registryConfirm({ kind: args?.kind, id: args?.id });
+        if (!result.ok) return { ok: false, error: result.error, text: `没确认：${result.error}` };
+        return { ok: true, text: `已确认 ${args?.kind} ${args?.id}（人确认过，闸门才会把它当已核实）`, summary: result.summary };
+      }
+      if (action === 'remove') {
+        const result = workbench.registryRemove({ kind: args?.kind, id: args?.id });
+        if (!result.ok) return { ok: false, error: result.error, text: `没删掉：${result.error}` };
+        return { ok: true, text: `已从注册表移除 ${args?.kind} ${args?.id}`, summary: result.summary };
+      }
+      if (action === 'adopt') {
+        const result = workbench.registryAdopt({ overwrite: isTrue(args?.overwrite) });
+        if (!result.ok) return { ok: false, error: result.error, text: `没有采纳：${result.error}` };
+        const c = result.counts;
+        return {
+          ok: true,
+          text: [
+            `已按现有产物生成注册表：数据集 ${c.datasets} / 模型 ${c.models} / 产物 ${c.artifacts}`,
+            ...(result.warnings || []).map((w) => `注意：${w}`),
+            result.note || '',
+          ].filter(Boolean).join('\n'),
+          counts: c,
+          warnings: result.warnings || [],
+          summary: result.summary,
+        };
+      }
+      return { ok: false, text: `不认识的 action：${action}（list|save|confirm|remove|adopt）` };
+    },
+  }));
+
+  register(defineTool({
+    name: 'data_analysis_artifacts',
+    description:
+      '看项目里的产物：action=tree 列 output/ 下的文件树（深度 3、条目上限 800）；'
+      + 'action=read 读一个文件（CSV 回前 N 行表格、JSON 回解析结果、文本回前 20 万字、图片/文档只回元信息）。'
+      + '路径一律是项目相对路径（如 output/chart_pack/figures/fig01.png）；只能读项目内的文件。',
+    parameters: {
+      action: { type: 'string', required: true, description: 'tree | read' },
+      path: { type: 'string', description: 'read：项目相对路径' },
+      limit: { type: 'number', description: 'tree 的条目上限（默认 800）/ read 的行数上限（默认 200）' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '已读取产物') },
+    async execute(args) {
+      const action = String(args?.action || 'tree');
+      if (action === 'tree') {
+        const result = workbench.artifactTree({ limit: args?.limit || 800 });
+        if (!result.ok) return { ok: false, error: result.error, text: `读不到产物目录：${result.error}` };
+        const files = result.entries.filter((item) => item.kind === 'file');
+        const lines = [
+          `output/：${files.length} 个文件 / ${(result.totalBytes / 1048576).toFixed(1)} MB${result.truncated ? '（截断）' : ''}`,
+          ...files.slice(0, 40).map((item) => `  ${item.rel}${item.size ? ` · ${item.size < 1024 ? `${item.size} B` : `${Math.round(item.size / 1024)} KB`}` : ''}`),
+          files.length > 40 ? `  …还有 ${files.length - 40} 个` : '',
+        ].filter(Boolean);
+        return { ok: true, text: lines.join('\n'), tree: result };
+      }
+      if (action === 'read') {
+        const result = workbench.artifactRead(args?.path, { limit: args?.limit || 200 });
+        if (!result.ok) return { ok: false, error: result.error, text: `读不到 ${args?.path || ''}：${result.error}` };
+        if (result.kind === 'table') {
+          const head = result.header.join(' | ');
+          const sample = result.rows.slice(0, 12).map((row) => row.join(' | ')).join('\n');
+          return {
+            ok: true,
+            text: `${result.rel}（${result.totalRows} 行 / ${result.header.length} 列${result.truncated ? `，只回前 ${result.rows.length} 行` : ''}）\n${head}\n${sample}`,
+            file: result,
+          };
+        }
+        if (result.kind === 'text' || result.kind === 'json') {
+          return { ok: true, text: `${result.rel}（${result.text.length} 字）\n${result.text.slice(0, 4000)}`, file: { rel: result.rel, kind: result.kind } };
+        }
+        return { ok: true, text: `${result.rel}：${result.kind}（${Math.round((result.size || 0) / 1024)} KB）——用面板的产物中心打开或下载`, file: { rel: result.rel, kind: result.kind } };
+      }
+      return { ok: false, text: `不认识的 action：${action}（tree|read）` };
+    },
+  }));
+
+  register(defineTool({
+    name: 'data_analysis_sweep',
+    description:
+      '模型族普查（不估参数）：读数据集注册表里的结局变量，逐个判断「哪些族估了 / 可估 / 估不了（缺什么）」，'
+      + '写 output/models/sweep.json。闸门 models-sweep 只要求每个族表态，不要求都估——但 blocked 必须写 why。'
+      + '拿到结果后按 available/blocked 决定补哪些模型，再用 data_analysis_register 登记 model。',
+    parameters: {},
+    output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '普查完成') },
+    async execute() {
+      const result = await workbench.runSweep();
+      if (!result.ok) return { ok: false, error: result.error, text: `普查失败：${result.error}\n${result.log || ''}`.trim() };
+      const payload = result.result || {};
+      const lines = [`普查完成：${payload.written || 'output/models/sweep.json'}`];
+      for (const dataset of Array.isArray(payload.datasets) ? payload.datasets : []) {
+        lines.push(`数据集 ${dataset.id}（${dataset.rows} 行）`);
+        for (const outcome of dataset.outcomes || []) {
+          const families = (outcome.families || []).map((family) => `${family.family}=${family.status}${family.why ? `（${family.why}）` : ''}`);
+          lines.push(`  ${outcome.name} [${outcome.type}] N=${outcome.n}：${families.join(' · ')}`);
+        }
+      }
+      for (const warning of payload.warnings || []) lines.push(`注意：${warning}`);
+      return { ok: true, text: lines.join('\n'), result: payload };
+    },
+  }));
+
+  register(defineTool({
+    name: 'data_analysis_verify_source',
+    description:
+      '逐格回源：把数据集里每一行指定的引文列（默认 raw_item）回查到源文件，记录「页 + 字符区间 + 原句」，'
+      + '写 output/datasets/<id>/extract.jsonl 与 extract.meta.json，并生成 output/verify/cell_checks.csv。'
+      + 'mode=build 生成台账；mode=verify 只复核（引文还在不在）。'
+      + '页眉页脚造成的差异记为 noise（不算造假），真的找不到记为 missing——missing 会让闸门 provenance-cells 变红。'
+      + '源文件按数据集注册的 provenance.sourceRoot + sourceColumn 定位（目录联接也能读）。',
+    parameters: {
+      mode: { type: 'string', description: 'build（默认）| verify' },
+      datasetId: { type: 'string', description: '只跑某一份数据集；留空=全部' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '回源完成') },
+    async execute(args) {
+      const result = await workbench.runVerifySource({ mode: args?.mode || 'build', datasetId: args?.datasetId || '' });
+      if (!result.ok) return { ok: false, error: result.error, text: `回源失败：${result.error}\n${result.log || ''}`.trim() };
+      const payload = result.result || {};
+      const lines = [`回源完成（${payload.mode || 'build'}）`];
+      for (const dataset of payload.datasets || []) {
+        lines.push(`数据集 ${dataset.id}：${dataset.rows} 行 → ${dataset.ledger || ''}`);
+        for (const field of dataset.fields || []) {
+          lines.push(`  ${field.name}：覆盖 ${field.covered}/${field.cells} · 页眉差异 ${field.noise} · 找不到 ${field.missing}`);
+        }
+      }
+      if (payload.cells) lines.push(`cell_checks：pass ${payload.cells.pass} / noise ${payload.cells.noise} / missing ${payload.cells.missing}`);
+      for (const warning of payload.warnings || []) lines.push(`注意：${warning}`);
+      return { ok: true, text: lines.join('\n'), result: payload };
+    },
+  }));
+
+  register(defineTool({
+    name: 'data_analysis_figure_check',
+    description:
+      '实测图表合规：从每张图的 PDF 里量最小字号与版面宽度（清单常常不写 min_fontsize，闸门因此永远判不了），'
+      + '结果写 output/artifacts/measure.json，readFigures 会自动合并这些实测值。'
+      + '不改技能产物（chart_manifest.csv 一个字节都不动）。',
+    parameters: {},
+    output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '测量完成') },
+    async execute() {
+      const result = await workbench.runFigureCheck();
+      if (!result.ok) return { ok: false, error: result.error, text: `测量失败：${result.error}\n${result.log || ''}`.trim() };
+      const payload = result.result || {};
+      const lines = [
+        `已实测 ${payload.measured ?? 0}/${payload.figures ?? 0} 张图 → ${payload.written || 'output/artifacts/measure.json'}`,
+        payload.minFont ? `全局最小字号 ${payload.minFont}pt` : '',
+        payload.missingPdf ? `${payload.missingPdf} 张图没有 PDF，量不到字号` : '',
+        ...(payload.warnings || []).map((w) => `注意：${w}`),
+      ].filter(Boolean);
+      return { ok: true, text: lines.join('\n'), result: payload };
+    },
+  }));
+
+  register(defineTool({
     name: 'data_analysis_vision',
     description:
       '扫描件识图：把审计判为 image_only 的 PDF 与图片交给多模态模型转写成文本，产物挂回 data/ 作为可直读材料。'

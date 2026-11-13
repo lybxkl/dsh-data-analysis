@@ -15,6 +15,7 @@ import path from 'node:path';
 import { analysisFile, assessPalette, readCsv, statOf } from './audit.js';
 import { STAGE_DEFS } from './defaults.js';
 import { recheckSummary } from './recheck.js';
+import { evaluateAssert } from './registry.js';
 import { verifyMounts } from './sources.js';
 import { readVisionLog } from './vision.js';
 
@@ -36,6 +37,44 @@ function shortTime(iso) {
   if (Number.isNaN(date.getTime())) return text;
   const pad = (n) => String(n).padStart(2, '0');
   return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/** 逐格证据账：output/datasets/<id>/extract.meta.json（由 verify_source.py 写）。 */
+function readLedgerMetas(projectRoot) {
+  const base = path.join(projectRoot, 'output', 'datasets');
+  let entries = [];
+  try {
+    entries = fs.readdirSync(base, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const metas = [];
+  for (const entry of entries) {
+    const rel = `output/datasets/${entry.name}/extract.meta.json`;
+    const info = statOf(path.join(projectRoot, rel));
+    if (!info.exists) continue;
+    try {
+      const value = JSON.parse(fs.readFileSync(path.join(projectRoot, rel), 'utf8').replace(/^\uFEFF/, ''));
+      metas.push({ dataset: entry.name, file: rel, ...value });
+    } catch (error) {
+      metas.push({ dataset: entry.name, file: rel, error: String(error && error.message ? error.message : error).slice(0, 160) });
+    }
+  }
+  return metas;
+}
+
+/**
+ * 阶段声明的产物（project.json 的 stages[].outputs）：声明了没产出 → fail；
+ * 没声明但阶段目录里有新产物 → warn（不许悄悄产出用户不知道的东西）。
+ */
+function declaredOutputs(project) {
+  const list = [];
+  for (const [stageId, stage] of Object.entries(project?.stages || {})) {
+    for (const rel of Array.isArray(stage?.outputs) ? stage.outputs : []) {
+      if (typeof rel === 'string' && rel.trim()) list.push({ stageId, rel: rel.trim() });
+    }
+  }
+  return list;
 }
 
 function fileGate(id, label, file, { level = 'error', requireRows = false } = {}) {
@@ -382,6 +421,58 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
       } else {
         gates.push(gate('dataset-flag', '分析样本标记 in_analysis', 'warn', 'unjudged', '没有宽表可检查'));
       }
+
+      // v2 契约：先看注册表在不在，再看「声明」和「实物」对不对得上。
+      // 没有注册表不是错，而是「判不了」——迁移前的老项目照样能跑，只是这条闸门永远不绿。
+      const registry = artifacts.registry || null;
+      if (!registry) {
+        gates.push(gate('datasets-index', '数据集注册表', 'warn', 'unjudged', '服务没有提供注册表视图：重启 DSH 后再看'));
+      } else if (registry.datasets.error) {
+        gates.push(
+          gate('datasets-index', '数据集注册表', 'error', 'fail', `output/datasets/index.json 读不懂：${registry.datasets.error}`, {
+            source: 'output/datasets/index.json',
+          }),
+        );
+      } else if (!registry.datasets.exists) {
+        gates.push(
+          gate(
+            'datasets-index',
+            '数据集注册表',
+            'warn',
+            'unjudged',
+            '还没有 output/datasets/index.json：在面板点「采纳现有产物」按现状生成，或用 data_analysis_register 登记（多数据集、多粒度都靠它）',
+            { source: 'output/datasets' },
+          ),
+        );
+      } else {
+        const rows = registry.datasets.rows;
+        const hard = registry.datasets.issues.filter((item) => item.severity !== 'warn');
+        const missing = rows.filter((item) => item.file && !statOf(path.join(root, item.file)).exists);
+        const mismatch = [];
+        for (const item of rows) {
+          if (!item.file) continue;
+          const csv = readCsv(path.join(root, item.file));
+          if (csv && item.rows && csv.rows.length !== item.rows) {
+            mismatch.push(`${item.id} 声明 ${item.rows} 行 / 实际 ${csv.rows.length} 行`);
+          }
+        }
+        gates.push(
+          hard.length
+            ? gate('datasets-index', '数据集注册表', 'error', 'fail', `${hard.length} 条注册错误：${hard[0].where} —— ${hard[0].message}`, { source: 'output/datasets/index.json' })
+            : missing.length
+              ? gate('datasets-index', '数据集注册表', 'error', 'fail', `${missing.length} 份数据集文件不存在：${missing.slice(0, 3).map((item) => item.file).join('、')}`, { source: 'output/datasets/index.json' })
+              : mismatch.length
+                ? gate('datasets-index', '数据集注册表', 'error', 'fail', `声明与实物不一致：${mismatch.slice(0, 3).join('；')}`, { source: 'output/datasets/index.json' })
+                : gate(
+                    'datasets-index',
+                    '数据集注册表',
+                    'error',
+                    'pass',
+                    `${rows.length} 份数据集（${rows.slice(0, 3).map((item) => `${item.id} ${item.rows} 行/${item.columns.length} 列`).join('，')}${rows.length > 3 ? '…' : ''}）`,
+                    { source: 'output/datasets/index.json' },
+                  ),
+        );
+      }
     }
 
     if (def.id === 'stats') {
@@ -430,6 +521,83 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
         );
       } else {
         gates.push(gate('stats-flow', '模型 N 与漏斗一致', 'warn', 'unjudged', '缺 model_meta.json 的 flow_checks'));
+      }
+
+      // v2：模型注册表 + 普查表。老项目没有这两样，判「判不了」，不拦。
+      const registry = artifacts.registry || null;
+      if (!registry) {
+        gates.push(gate('models-index', '模型注册表', 'warn', 'unjudged', '服务没有提供注册表视图：重启 DSH 后再看'));
+        gates.push(gate('models-sweep', '模型族普查', 'warn', 'unjudged', '服务没有提供注册表视图：重启 DSH 后再看'));
+      } else {
+        if (registry.models.error) {
+          gates.push(gate('models-index', '模型注册表', 'error', 'fail', `output/models/index.json 读不懂：${registry.models.error}`));
+        } else if (!registry.models.exists) {
+          gates.push(
+            gate('models-index', '模型注册表', 'warn', 'unjudged', '还没有 output/models/index.json：在面板点「采纳现有产物」，或用 data_analysis_register 登记（估计量/族/N/剔除原因）', { source: 'output/models' }),
+          );
+        } else {
+          const rows = registry.models.rows;
+          const hard = registry.models.issues.filter((item) => item.severity !== 'warn');
+          const missingCoef = rows.filter((item) => item.coef && !statOf(path.join(root, item.coef)).exists);
+          const badN = rows.filter((item) => item.n !== null && item.dropped !== null && item.n < 0);
+          const inconsistent = [];
+          for (const item of rows) {
+            if (!item.dataset) continue;
+            const dataset = registry.datasets.rows.find((entry) => entry.id === item.dataset);
+            const base = dataset?.inAnalysis?.n;
+            if (Number.isFinite(base) && Number.isFinite(item.n) && Number.isFinite(item.dropped) && base - item.dropped !== item.n) {
+              inconsistent.push(`${item.id}: ${base} - ${item.dropped} ≠ ${item.n}`);
+            }
+          }
+          gates.push(
+            hard.length
+              ? gate('models-index', '模型注册表', 'error', 'fail', `${hard.length} 条注册错误：${hard[0].where} —— ${hard[0].message}`, { source: 'output/models/index.json' })
+              : missingCoef.length
+                ? gate('models-index', '模型注册表', 'error', 'fail', `${missingCoef.length} 个模型的系数表不存在：${missingCoef.slice(0, 3).map((item) => item.coef).join('、')}`, { source: 'output/models/index.json' })
+                : badN.length
+                  ? gate('models-index', '模型注册表', 'error', 'fail', `${badN.length} 个模型 N 为负：${badN.map((item) => item.id).join('、')}`, { source: 'output/models/index.json' })
+                  : inconsistent.length
+                    ? gate('models-index', '模型注册表', 'error', 'fail', `模型 N 与数据集对不上：${inconsistent.slice(0, 3).join('；')}`, { source: 'output/models/index.json' })
+                    : gate(
+                        'models-index',
+                        '模型注册表',
+                        'error',
+                        'pass',
+                        `${rows.length} 个模型（${rows.slice(0, 4).map((item) => `${item.id} ${item.estimator || '?'} N=${item.n ?? '?'}`).join('，')}${rows.length > 4 ? '…' : ''}）`,
+                        { source: 'output/models/index.json' },
+                      ),
+          );
+        }
+
+        if (registry.sweep.error) {
+          gates.push(gate('models-sweep', '模型族普查', 'error', 'fail', `output/models/sweep.json 读不懂：${registry.sweep.error}`));
+        } else if (!registry.sweep.exists) {
+          gates.push(
+            gate('models-sweep', '模型族普查', 'warn', 'unjudged', '还没有 output/models/sweep.json：跑 data_analysis_sweep，让每个结局把「哪些族估了/可估/估不了」都表态', { source: 'output/models' }),
+          );
+        } else {
+          const sweep = registry.sweep.value;
+          const hard = registry.sweep.issues.filter((item) => item.severity !== 'warn');
+          const thin = sweep.outcomes.filter((item) => item.families.length < 2);
+          const unknown = sweep.outcomes.flatMap((item) => item.families.filter((f) => f.status === 'unknown').map((f) => `${item.name}.${f.family}`));
+          const blocked = sweep.outcomes.flatMap((item) => item.families.filter((f) => f.status === 'blocked'));
+          gates.push(
+            hard.length
+              ? gate('models-sweep', '模型族普查', 'error', 'fail', `${hard.length} 条普查错误：${hard[0].message}`, { source: 'output/models/sweep.json' })
+              : thin.length
+                ? gate('models-sweep', '模型族普查', 'warn', 'unjudged', `${thin.length} 个结局只表态了 1 个族（${thin.map((item) => item.name).join('、')}）：至少要说明「另一个族为什么不用」`, { source: 'output/models/sweep.json' })
+                : unknown.length
+                  ? gate('models-sweep', '模型族普查', 'warn', 'unjudged', `${unknown.length} 个族状态还是 unknown：${unknown.slice(0, 4).join('、')}`, { source: 'output/models/sweep.json' })
+                  : gate(
+                      'models-sweep',
+                      '模型族普查',
+                      'warn',
+                      'pass',
+                      `${sweep.outcomes.length} 个结局、${sweep.outcomes.reduce((acc, item) => acc + item.families.length, 0)} 个族已表态${blocked.length ? `（${blocked.length} 个 blocked 已写原因）` : ''}`,
+                      { source: 'output/models/sweep.json' },
+                    ),
+          );
+        }
       }
     }
 
@@ -506,6 +674,26 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
           );
         }
       }
+      // v2：图题。技能生成的题注常常只有「注：N=…」——读者看不到这张图画的是什么，
+      // 而「有没有标题」是机器能判的，不该留给人肉看图。
+      const spec = artifacts.manuscript?.spec || null;
+      if (spec && spec.exists && !spec.error) {
+        const missing = Array.isArray(spec.titlesMissing) ? spec.titlesMissing : [];
+        gates.push(
+          missing.length
+            ? gate(
+                'fig-title',
+                '每张图有图题',
+                'warn',
+                'unjudged',
+                `${missing.length}/${spec.figures} 张图没有图题（题注只有「注：」）：${missing.slice(0, 6).map((n) => `图 ${n}`).join('、')}${missing.length > 6 ? '…' : ''}；在 manuscript.json 的 caption 前补一句标题`,
+                { source: 'manuscript.json' },
+              )
+            : gate('fig-title', '每张图有图题', 'warn', 'pass', `${spec.figures} 张图都有图题`),
+        );
+      } else {
+        gates.push(gate('fig-title', '每张图有图题', 'warn', 'unjudged', '还没有可解析的 manuscript.json：图题判不了'));
+      }
     }
 
     if (def.id === 'manuscript') {
@@ -524,6 +712,68 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
             `manuscript.json 比 output/manuscript.docx 新（${shortTime(new Date(specStat.mtimeMs).toISOString())} > ${shortTime(new Date(docxStat.mtimeMs).toISOString())}）——改完稿必须重跑第 7 阶段，否则交付的是旧稿`,
             { source: 'manuscript.json / output/manuscript.docx' },
           ),
+        );
+      }
+
+      // v2 三件：图被引用了吗、表是不是原表直贴、正文够不够撑起这些图。
+      // 这三条都从 manuscript.json 直接算——不靠人读稿，也不靠「文件存在」蒙混。
+      const spec = artifacts.manuscript?.spec || null;
+      if (!spec || !spec.exists || spec.error) {
+        gates.push(
+          gate('fig-cited', '每张图在正文被引用', 'warn', 'unjudged', '还没有可解析的 manuscript.json：引用关系判不了'),
+          gate('tbl-present', '表格经过编排', 'warn', 'unjudged', '还没有可解析的 manuscript.json：表格判不了'),
+          gate('manuscript-body', '正文撑得起图集', 'warn', 'unjudged', '还没有可解析的 manuscript.json：正文体量判不了'),
+        );
+      } else {
+        const total = Number(spec.figures) || 0;
+        const uncited = Array.isArray(spec.uncitedFigures) ? spec.uncitedFigures : [];
+        gates.push(
+          !total
+            ? gate('fig-cited', '每张图在正文被引用', 'warn', 'unjudged', '文稿里还没有图块：先跑图表阶段再组装')
+            : uncited.length
+              ? gate(
+                  'fig-cited',
+                  '每张图在正文被引用',
+                  'warn',
+                  'unjudged',
+                  `${uncited.length}/${total} 张图正文从未引用：${uncited.slice(0, 8).map((n) => `图 ${n}`).join('、')}${uncited.length > 8 ? '…' : ''}；图集不是论文，正文至少要说明它们在讲什么`,
+                  { source: 'manuscript.json' },
+                )
+              : gate('fig-cited', '每张图在正文被引用', 'warn', 'pass', `${total} 张图都在正文被引用`),
+        );
+
+        const widths = Array.isArray(spec.tableWidths) ? spec.tableWidths : [];
+        const wide = widths.filter((item) => item.cols > 12 && !item.presentation);
+        gates.push(
+          !widths.length
+            ? gate('tbl-present', '表格经过编排', 'warn', 'unjudged', '文稿里还没有表块')
+            : wide.length
+              ? gate(
+                  'tbl-present',
+                  '表格经过编排',
+                  'warn',
+                  'unjudged',
+                  `${wide.length} 张表直接贴了原表（${wide.map((item) => `表 ${item.n}：${item.cols} 列`).join('，')}）：给 table 块加 presentation.columns 选列，或先在 output/tables 里整理成论文表`,
+                  { source: 'manuscript.json' },
+                )
+              : gate('tbl-present', '表格经过编排', 'warn', 'pass', `${widths.length} 张表都做过选列/编排`),
+        );
+
+        const chars = Number(spec.paraChars) || 0;
+        const perFigure = total ? Math.round((chars / total) * 10) / 10 : null;
+        gates.push(
+          !total
+            ? gate('manuscript-body', '正文撑得起图集', 'warn', 'unjudged', '文稿里还没有图块')
+            : chars < total * 80
+              ? gate(
+                  'manuscript-body',
+                  '正文撑得起图集',
+                  'warn',
+                  'unjudged',
+                  `正文 ${chars} 字 / ${total} 张图 = 每图约 ${perFigure} 字（低于 80）：这是图集，不是论文；把每张图在讲什么写进正文章节`,
+                  { source: 'manuscript.json' },
+                )
+              : gate('manuscript-body', '正文撑得起图集', 'warn', 'pass', `正文 ${chars} 字 / ${total} 张图 = 每图约 ${perFigure} 字`),
         );
       }
     }
@@ -638,6 +888,143 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
           );
         }
       }
+      const registry = artifacts.registry || null;
+
+      // 逐格回源：数据集的每个关键格，能不能在原文里找到那句话。
+      // 没有证据账不是错，是「判不了」——但只要有账，缺格就必须显形。
+      const ledgers = readLedgerMetas(root);
+      if (!ledgers.length) {
+        gates.push(
+          gate(
+            'provenance-cells',
+            '逐格回源',
+            'warn',
+            'unjudged',
+            '还没有逐格证据账：跑 data_analysis_verify_source（mode=build），把「值 → 原文引文 + 页 + 字符区间」写进 output/datasets/<id>/extract.jsonl',
+            { source: 'output/datasets' },
+          ),
+        );
+      } else {
+        const broken = ledgers.filter((meta) => meta.error);
+        const thin = [];
+        let cells = 0;
+        let covered = 0;
+        for (const meta of ledgers) {
+          for (const field of Array.isArray(meta.fields) ? meta.fields : []) {
+            const total = Number(field.cells) || 0;
+            const hit = Number(field.covered) || 0;
+            cells += total;
+            covered += hit;
+            if (total && hit / total < 0.98) thin.push(`${meta.dataset}.${field.name} ${hit}/${total}`);
+          }
+        }
+        // 只回源了一部分行（试跑用了 --limit）不能算通过：证据账要覆盖整份数据集
+        const partial = [];
+        for (const meta of ledgers) {
+          const dataset = registry?.datasets?.rows?.find((item) => item.id === meta.dataset);
+          const total = Number(dataset?.rows) || 0;
+          const done = Number(meta.rows) || 0;
+          if (total && done < total) partial.push(`${meta.dataset} ${done}/${total} 行`);
+        }
+        const missingCells = registry?.cells?.counts?.missing || 0;
+        gates.push(
+          broken.length
+            ? gate('provenance-cells', '逐格回源', 'warn', 'fail', `${broken.length} 份证据账读不懂：${broken[0].file} —— ${broken[0].error}`, { source: broken[0].file })
+            : partial.length
+              ? gate(
+                  'provenance-cells',
+                  '逐格回源',
+                  'warn',
+                  'unjudged',
+                  `证据账只覆盖了部分行：${partial.join('，')}——去掉 --limit 重跑 data_analysis_verify_source，否则没回源的行等于没核`,
+                  { source: 'output/datasets' },
+                )
+              : thin.length
+                ? gate(
+                    'provenance-cells',
+                    '逐格回源',
+                    'warn',
+                    'fail',
+                    `${thin.length} 个字段回源率低于 98%：${thin.slice(0, 4).join('，')}——这些格子没有原文支撑，等于让模型自己说数`,
+                    { source: 'output/datasets' },
+                  )
+                : missingCells
+                  ? gate('provenance-cells', '逐格回源', 'warn', 'fail', `cell_checks.csv 里有 ${missingCells} 条 missing：引文在原文里找不到`, { source: registry?.cells?.file || 'output/verify/cell_checks.csv' })
+                  : gate('provenance-cells', '逐格回源', 'warn', 'pass', `${ledgers.length} 份证据账、${covered}/${cells} 格可回源（> 98%）`, { source: 'output/datasets' }),
+        );
+      }
+
+      // 结论断言：每句结论绑证据，并且能机检真假。
+      if (!registry) {
+        gates.push(gate('provenance-claims', '结论与证据一致', 'warn', 'unjudged', '服务没有提供注册表视图：重启 DSH 后再看'));
+      } else if (registry.claims.error) {
+        gates.push(gate('provenance-claims', '结论与证据一致', 'warn', 'fail', `output/claims/claims.jsonl 读不懂：${registry.claims.error}`));
+      } else if (!registry.claims.exists) {
+        gates.push(
+          gate(
+            'provenance-claims',
+            '结论与证据一致',
+            'warn',
+            'unjudged',
+            '还没有 output/claims/claims.jsonl：把正文的关键结论登记成 {id, text, assert, evidence}，闸门才能机检「这句话和数据一致吗」',
+            { source: 'output/claims' },
+          ),
+        );
+      } else {
+        const claims = registry.claims.rows;
+        if (!claims.length) {
+          gates.push(gate('provenance-claims', '结论与证据一致', 'warn', 'unjudged', 'claims.jsonl 是空文件'));
+        } else {
+          let supported = 0;
+          let waived = 0;
+          const refuted = [];
+          const unknown = [];
+          for (const claim of claims) {
+            if (claim.status === 'waived') {
+              waived += 1;
+              continue;
+            }
+            if (!claim.assert) {
+              unknown.push(claim.id);
+              continue;
+            }
+            const result = evaluateAssert(claim.assert, registry, { projectRoot: root });
+            if (!result.ok) unknown.push(`${claim.id}（${result.error}）`);
+            else if (result.pass) supported += 1;
+            else refuted.push(`${claim.id}：${claim.text || claim.assert.left} → ${result.left} ${result.op} ${result.right} 不成立`);
+          }
+          gates.push(
+            refuted.length
+              ? gate('provenance-claims', '结论与证据一致', 'error', 'fail', `${refuted.length} 条结论与数据矛盾：${refuted.slice(0, 3).join('；')}`, { source: 'output/claims/claims.jsonl' })
+              : unknown.length
+                ? gate('provenance-claims', '结论与证据一致', 'warn', 'unjudged', `${unknown.length} 条结论没有可机检的 assert：${unknown.slice(0, 4).join('、')}（只能人工读）`, { source: 'output/claims/claims.jsonl' })
+                : gate('provenance-claims', '结论与证据一致', 'warn', 'pass', `${supported} 条结论全部被数据支持${waived ? `（${waived} 条人工豁免）` : ''}`, { source: 'output/claims/claims.jsonl' }),
+          );
+        }
+      }
+
+      // 阶段声明了哪些产物：声明了没产出 → fail；这是「产物路径不再写死」的落地方式。
+      const declared = declaredOutputs(project);
+      if (!declared.length) {
+        gates.push(
+          gate('artifacts-declared', '阶段产物声明', 'warn', 'unjudged', '没有任何阶段声明 outputs：在 project.json 的 stages.<id>.outputs 里写清这个阶段该交什么，闸门才能按声明验收', { source: 'project.json' }),
+        );
+      } else {
+        const missingDeclared = declared.filter((item) => !statOf(path.join(root, item.rel)).exists);
+        gates.push(
+          missingDeclared.length
+            ? gate(
+                'artifacts-declared',
+                '阶段产物声明',
+                'warn',
+                'fail',
+                `${missingDeclared.length} 个已声明产物没有产出：${missingDeclared.slice(0, 4).map((item) => `${item.stageId} → ${item.rel}`).join('，')}`,
+                { source: 'project.json' },
+              )
+            : gate('artifacts-declared', '阶段产物声明', 'warn', 'pass', `${declared.length} 个声明产物都在`),
+        );
+      }
+
       gates.push(manual('qa-signoff', '交付清单人工确认', '终检交付清单需要人确认（脚本只负责列出未过项）'));
     }
 

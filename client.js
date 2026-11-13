@@ -1429,7 +1429,54 @@
         /* 弹窗内的二次确认条：破坏性动作不走 window.confirm */
         '.dsa-ask{display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:8px 10px;',
         '  border:1px solid var(--dsa-line2);border-radius:var(--dsa-r2);background:var(--dsa-warnsoft);}',
-        '.dsa-ask-t{flex:1 1 auto;font-size:12.5px;line-height:1.5;color:var(--dsa-ink);}'
+        '.dsa-ask-t{flex:1 1 auto;font-size:12.5px;line-height:1.5;color:var(--dsa-ink);}',
+
+        // ---- 产物中心
+        '.dsa-art-bar{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;}',
+        '.dsa-tabs{display:inline-flex;gap:4px;padding:3px;border-radius:999px;background:var(--dsa-card2);',
+        '  border:1px solid var(--dsa-line);}',
+        '.dsa-tab{padding:5px 12px;border:0;border-radius:999px;background:transparent;color:var(--dsa-ink2);',
+        '  font:inherit;font-size:12px;cursor:pointer;}',
+        '.dsa-tab:hover{background:var(--dsa-hover);color:var(--dsa-ink);}',
+        '.dsa-tab.sel{background:var(--dsa-panel);color:var(--dsa-ink);font-weight:600;box-shadow:var(--dsa-shadow);}',
+        '.dsa-art-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:10px;}',
+        '.dsa-art-card{display:flex;flex-direction:column;gap:4px;padding:6px;border:1px solid var(--dsa-line);',
+        '  border-radius:var(--dsa-r2);background:var(--dsa-card);cursor:pointer;text-align:left;min-width:0;}',
+        '.dsa-art-card:hover{border-color:var(--dsa-line2);box-shadow:var(--dsa-shadow2);}',
+        '.dsa-art-card.sel{border-color:var(--dsa-accent);box-shadow:0 0 0 2px var(--dsa-soft);}',
+        '.dsa-art-thumb{width:100%;height:96px;object-fit:contain;background:var(--dsa-card2);border-radius:6px;}',
+        '.dsa-art-ext{display:flex;align-items:center;justify-content:center;height:96px;border-radius:6px;',
+        '  background:var(--dsa-soft);color:var(--dsa-accent);font-family:var(--dsa-mono);font-size:13px;}',
+        '.dsa-art-name{font-size:11.5px;color:var(--dsa-ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+        '.dsa-art-meta{font-size:11px;color:var(--dsa-ink3);}',
+        '.dsa-art-detail{margin-top:12px;padding:12px;border:1px solid var(--dsa-line);border-radius:var(--dsa-r2);',
+        '  background:var(--dsa-card);}',
+        '.dsa-art-detail-h{display:flex;align-items:center;gap:10px;margin-bottom:10px;font-size:12px;',
+        '  font-family:var(--dsa-mono);color:var(--dsa-ink2);overflow:hidden;}',
+        '.dsa-art-detail-h b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;}',
+        '.dsa-art-full{display:block;max-width:100%;max-height:60vh;margin:0 auto;border-radius:6px;}',
+        '.dsa-art-tablewrap{max-height:52vh;overflow:auto;border:1px solid var(--dsa-line);border-radius:6px;}',
+        '.dsa-art-table{border-collapse:collapse;font-size:11.5px;white-space:nowrap;}',
+        '.dsa-art-table th,.dsa-art-table td{padding:4px 8px;border-bottom:1px solid var(--dsa-line);text-align:left;}',
+        '.dsa-art-table th{position:sticky;top:0;background:var(--dsa-card2);font-weight:600;color:var(--dsa-ink2);}',
+        '.dsa-art-pre{margin:0;padding:10px;max-height:52vh;overflow:auto;border-radius:6px;background:var(--dsa-card2);',
+        '  font-family:var(--dsa-mono);font-size:11.5px;line-height:1.6;color:var(--dsa-ink);white-space:pre-wrap;}',
+
+        // ---- 契约卡
+        '.dsa-reg-section{margin-top:14px;}',
+        '.dsa-reg-card{margin-top:8px;}',
+        '.dsa-reg-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}',
+        '.dsa-reg-pill{display:inline-flex;align-items:baseline;gap:5px;padding:3px 10px;border-radius:999px;',
+        '  background:var(--dsa-card2);border:1px solid var(--dsa-line);font-size:11px;color:var(--dsa-ink2);}',
+        '.dsa-reg-pill b{font-size:13px;color:var(--dsa-ink);}',
+        '.dsa-reg-pill.muted{opacity:.6;}',
+        '.dsa-reg-lists{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin-top:12px;}',
+        '.dsa-reg-list{min-width:0;}',
+        '.dsa-reg-h{margin-bottom:4px;font-size:11px;letter-spacing:.04em;color:var(--dsa-ink3);text-transform:uppercase;}',
+        '.dsa-reg-item{font-size:12px;color:var(--dsa-ink);line-height:1.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+        '.dsa-reg-item b{font-family:var(--dsa-mono);font-weight:600;}',
+        '.dsa-reg-issues{margin-top:10px;padding-top:8px;border-top:1px solid var(--dsa-line);',
+        '  font-size:11.5px;line-height:1.6;color:var(--dsa-ink2);}'
       ].join('');
 
       function installStyles() {
@@ -1892,6 +1939,13 @@
         var manAskState = useState(false);
         var manAsk = manAskState[0];
         var setManAsk = manAskState[1];
+        // v2 契约：采纳现有产物是一次批量推断，按钮转圈、结果写一行说明
+        var regBusyState = useState(false);
+        var regBusy = regBusyState[0];
+        var setRegBusy = regBusyState[1];
+        var regNoteState = useState('');
+        var regNote = regNoteState[0];
+        var setRegNote = regNoteState[1];
 
         var measureRoot = useCallback(function () {
           var el = rootRef.current;
@@ -2191,6 +2245,32 @@
             })
             .then(function (json) {
               if (activeIdRef.current === startKey) setManBusy('');
+              return json;
+            });
+        }, [load]);
+
+        var doAdopt = useCallback(function (overwrite) {
+          var startKey = activeIdRef.current;
+          setRegBusy(true);
+          setRegNote('');
+          return request('POST', '/registry/adopt', { overwrite: Boolean(overwrite) })
+            .then(function (json) {
+              if (activeIdRef.current !== startKey) return json;
+              if (!json || !json.ok) {
+                setError((json && json.error) || t('actionFail'));
+                return json;
+              }
+              var c = json.counts || {};
+              var warn = Array.isArray(json.warnings) && json.warnings.length ? '；注意：' + json.warnings[0] : '';
+              setRegNote('已生成注册表：数据集 ' + (c.datasets || 0) + ' / 模型 ' + (c.models || 0) + ' / 产物 ' + (c.artifacts || 0) + warn);
+              return load(true).then(function () { return json; });
+            })
+            .catch(function (error) {
+              if (activeIdRef.current === startKey) setError(String((error && error.message) || error));
+              return { ok: false };
+            })
+            .then(function (json) {
+              if (activeIdRef.current === startKey) setRegBusy(false);
               return json;
             });
         }, [load]);
@@ -2497,6 +2577,20 @@
             h('span', { className: 'dsa-ico', 'aria-hidden': 'true' }, '🗂'),
             h('span', { className: 'dsa-settings-label' }, '材料')
           ),
+          // 产物中心：图、表、docx 都在 output/ 里，以前面板一个都打不开
+          snap && snap.active
+            ? h(
+                Btn,
+                {
+                  className: 'dsa-settings-btn',
+                  variant: 'ghost',
+                  title: '产物中心：看图、表格与文档（只读）',
+                  onClick: function () { setDialog({ kind: 'artifacts' }); }
+                },
+                h('span', { className: 'dsa-ico', 'aria-hidden': 'true' }, '▦'),
+                h('span', { className: 'dsa-settings-label' }, '产物')
+              )
+            : null,
           // 设置是「配置入口」，不是项目动作：常驻在顶栏右上角，别塞进「项目」菜单里让人翻。
           // 窄屏只留图标（标题与无障碍名仍在），不给顶栏添负担。
           h(
@@ -3422,6 +3516,14 @@
         );
 
         // 手稿骨架：第 7 阶段的输入文件脚本造不出来，给它一条明确的入口，别让人猜
+        // 契约卡：项目级信息（数据集/模型/产物/结论），与当前选中阶段无关，所以放在 KPI 下面
+        var registryCard = h(RegistryCard, {
+          registry: snap && snap.registry,
+          busy: regBusy,
+          onOpen: function () { setDialog({ kind: 'artifacts' }); },
+          onAdopt: function () { doAdopt(false); }
+        });
+
         var manuscriptBlock = null;
         if (current && current.id === 'manuscript') {
           var spec = snap && snap.artifacts ? snap.artifacts.manuscriptSpec : null;
@@ -3601,6 +3703,8 @@
             )
           ),
           kpiStrip,
+          registryCard,
+          regNote ? h('div', { className: 'dsa-hint', role: 'status' }, regNote) : null,
           manuscriptBlock,
           nextView,
           error ? h('div', { className: 'dsa-error', role: 'alert', style: { margin: '10px 0' } }, error) : null,
@@ -3885,6 +3989,9 @@
               onChanged: function () { void load(true); },
               onCancel: function () { setDialog(null); }
             });
+          }
+          if (d.kind === 'artifacts') {
+            return h(ArtifactsDialog, { onCancel: function () { setDialog(null); } });
           }
           if (d.kind === 'adjudicate') {
             return h(AdjudicateDialog, {
@@ -4304,6 +4411,317 @@
                   meta.usage ? h('span', null, 'in ' + meta.usage.inputTokens + ' · out ' + meta.usage.outputTokens) : null,
                   h('span', null, (meta.elapsedMs / 1000).toFixed(1) + 's'),
                   meta.missing && meta.missing.length ? h('span', null, '未提供：' + meta.missing.join('、')) : null
+                )
+              : null
+          )
+        );
+      }
+
+      /* ------------------------------------------------------------------ *
+       * 产物中心（v2）
+       * 面板以前只能看数字：46 张 600dpi 的图、5 张表、5.6MB 的 docx 一个都打不开。
+       * 这里把 output/ 当成可浏览的产物库：缩略图（服务端生成）、CSV 表格、文档下载。
+       * ------------------------------------------------------------------ */
+
+      var ARTIFACT_TABS = [
+        { id: 'figures', label: '图', test: function (entry) { return /^\.(png|jpe?g|webp|gif|tiff?)$/.test(entry.ext); } },
+        { id: 'tables', label: '表', test: function (entry) { return entry.ext === '.csv' || entry.ext === '.tsv'; } },
+        {
+          id: 'docs',
+          label: '文档',
+          test: function (entry) {
+            return ['.docx', '.pdf', '.md', '.txt', '.json', '.jsonl', '.html', '.log'].indexOf(entry.ext) >= 0;
+          }
+        },
+        { id: 'all', label: '全部', test: function () { return true; } }
+      ];
+
+      function artifactRawUrl(rel, download) {
+        return API + '/artifacts/raw?path=' + encodeURIComponent(rel) + (download ? '&download=1' : '');
+      }
+
+      function artifactThumbUrl(rel, width) {
+        return API + '/artifacts/thumb?path=' + encodeURIComponent(rel) + '&w=' + (width || 320);
+      }
+
+      function ArtifactsDialog(props) {
+        var treeState = useState({ loading: true, ok: false, entries: [], error: '', totalFiles: 0, totalBytes: 0 });
+        var tree = treeState[0];
+        var setTree = treeState[1];
+        var tabState = useState('figures');
+        var tab = tabState[0];
+        var setTab = tabState[1];
+        var selState = useState('');
+        var sel = selState[0];
+        var setSel = selState[1];
+        var detailState = useState({ loading: false, ok: false, error: '', data: null });
+        var detail = detailState[0];
+        var setDetail = detailState[1];
+        var aliveRef = useRef(true);
+
+        useEffect(function () {
+          aliveRef.current = true;
+          return function () { aliveRef.current = false; };
+        }, []);
+
+        var load = function () {
+          return request('GET', '/artifacts/tree').then(function (json) {
+            if (!aliveRef.current) return;
+            if (!json || !json.ok) {
+              setTree({ loading: false, ok: false, entries: [], error: (json && json.error) || '读不到产物目录', totalFiles: 0, totalBytes: 0 });
+              return;
+            }
+            setTree({
+              loading: false,
+              ok: true,
+              error: '',
+              entries: Array.isArray(json.entries) ? json.entries : [],
+              totalFiles: Number(json.totalFiles) || 0,
+              totalBytes: Number(json.totalBytes) || 0
+            });
+          }).catch(function (error) {
+            if (!aliveRef.current) return;
+            setTree({ loading: false, ok: false, entries: [], error: String((error && error.message) || error), totalFiles: 0, totalBytes: 0 });
+          });
+        };
+
+        useEffect(function () { void load(); }, []);
+
+        var open = function (rel) {
+          setSel(rel);
+          setDetail({ loading: true, ok: false, error: '', data: null });
+          request('GET', '/artifacts/file?path=' + encodeURIComponent(rel) + '&limit=200').then(function (json) {
+            if (!aliveRef.current) return;
+            if (!json || !json.ok) {
+              setDetail({ loading: false, ok: false, error: (json && json.error) || '读不出来', data: null });
+              return;
+            }
+            setDetail({ loading: false, ok: true, error: '', data: json });
+          }).catch(function (error) {
+            if (!aliveRef.current) return;
+            setDetail({ loading: false, ok: false, error: String((error && error.message) || error), data: null });
+          });
+        };
+
+        var files = (tree.entries || []).filter(function (entry) { return entry.kind === 'file'; });
+        var activeTab = ARTIFACT_TABS.filter(function (item) { return item.id === tab; })[0] || ARTIFACT_TABS[0];
+        var visible = files.filter(activeTab.test).sort(function (a, b) { return String(a.rel).localeCompare(String(b.rel)); });
+
+        var body = tree.loading
+          ? h('div', { className: 'dsa-hint' }, '正在读 output/…')
+          : !tree.ok
+            ? h('div', { className: 'dsa-error', role: 'alert' }, tree.error || '读不到产物目录')
+            : !files.length
+              ? h('div', { className: 'dsa-hint' }, 'output/ 里还没有产物：先把阶段跑起来。')
+              : h(
+                  'div',
+                  null,
+                  h(
+                    'div',
+                    { className: 'dsa-art-bar' },
+                    h(
+                      'div',
+                      { className: 'dsa-tabs', role: 'tablist' },
+                      ARTIFACT_TABS.map(function (item) {
+                        var count = files.filter(item.test).length;
+                        return h(
+                          'button',
+                          {
+                            key: item.id,
+                            type: 'button',
+                            role: 'tab',
+                            'aria-selected': tab === item.id ? 'true' : 'false',
+                            className: 'dsa-tab' + (tab === item.id ? ' sel' : ''),
+                            onClick: function () { setTab(item.id); }
+                          },
+                          item.label + ' ' + count
+                        );
+                      })
+                    ),
+                    h('span', { className: 'dsa-spacer' }),
+                    h('span', { className: 'dsa-hint' }, tree.totalFiles + ' 个文件 · ' + sizeText(tree.totalBytes))
+                  ),
+                  h(
+                    'div',
+                    { className: 'dsa-art-grid' },
+                    visible.slice(0, 120).map(function (entry) {
+                      var isImage = /^\.(png|jpe?g|webp|gif|tiff?)$/.test(entry.ext);
+                      return h(
+                        'button',
+                        {
+                          key: entry.rel,
+                          type: 'button',
+                          className: 'dsa-art-card' + (sel === entry.rel ? ' sel' : ''),
+                          title: entry.rel,
+                          onClick: function () { open(entry.rel); }
+                        },
+                        isImage
+                          ? h('img', {
+                              className: 'dsa-art-thumb',
+                              src: artifactThumbUrl(entry.rel, 320),
+                              alt: entry.name,
+                              loading: 'lazy',
+                              // 缩略图失败时退回原图：总比一张破图好
+                              onError: function (event) {
+                                try { event.target.src = artifactRawUrl(entry.rel); } catch (error) { /* ignore */ }
+                              }
+                            })
+                          : h('span', { className: 'dsa-art-ext' }, (entry.ext || '?').replace('.', '').toUpperCase() || '?'),
+                        h('span', { className: 'dsa-art-name' }, entry.name),
+                        h('span', { className: 'dsa-art-meta' }, sizeText(entry.size))
+                      );
+                    })
+                  ),
+                  visible.length > 120 ? h('div', { className: 'dsa-hint' }, '只列前 120 个；用「全部」或用工具按路径读取其余文件。') : null,
+                  sel
+                    ? h(
+                        'div',
+                        { className: 'dsa-art-detail' },
+                        h(
+                          'div',
+                          { className: 'dsa-art-detail-h' },
+                          h('b', { title: sel }, sel),
+                          h('span', { className: 'dsa-spacer' }),
+                          h('a', { className: 'dsa-link', href: artifactRawUrl(sel, false), target: '_blank', rel: 'noreferrer' }, '新窗口打开'),
+                          h('a', { className: 'dsa-link', href: artifactRawUrl(sel, true) }, '下载')
+                        ),
+                        detail.loading
+                          ? h('div', { className: 'dsa-hint' }, '读取中…')
+                          : !detail.ok
+                            ? h('div', { className: 'dsa-error', role: 'alert' }, detail.error || '读不出来')
+                            : detail.data.kind === 'image'
+                              ? h('img', { className: 'dsa-art-full', src: artifactRawUrl(sel), alt: sel })
+                              : detail.data.kind === 'table'
+                                ? h(
+                                    'div',
+                                    { className: 'dsa-art-tablewrap' },
+                                    h('div', { className: 'dsa-hint' }, detail.data.totalRows + ' 行 × ' + detail.data.header.length + ' 列' + (detail.data.truncated ? '（只显示前 200 行）' : '')),
+                                    h(
+                                      'table',
+                                      { className: 'dsa-art-table' },
+                                      h('thead', null, h('tr', null, detail.data.header.map(function (name) { return h('th', { key: name }, name); }))),
+                                      h('tbody', null, detail.data.rows.map(function (row, index) {
+                                        return h('tr', { key: index }, row.map(function (cell, cellIndex) { return h('td', { key: cellIndex }, String(cell)); }));
+                                      }))
+                                    )
+                                  )
+                                : detail.data.kind === 'text' || detail.data.kind === 'json'
+                                  ? h('pre', { className: 'dsa-art-pre' }, String(detail.data.text || '').slice(0, 20000))
+                                  : h(
+                                      'div',
+                                      { className: 'dsa-hint' },
+                                      detail.data.kind === 'document' ? '这是 Word 文档：点上面的「下载」用 Word/WPS 打开。' : '这是 PDF：点「新窗口打开」看。'
+                                    )
+                      )
+                    : h('div', { className: 'dsa-hint' }, '点一张图/一个文件看详情。')
+                );
+
+        return h(
+          Modal,
+          {
+            title: '产物中心',
+            desc: 'output/ 里的图、表与文档。缩略图由工作台生成，原图点开看；只读，不改文件。',
+            onCancel: props.onCancel
+          },
+          body
+        );
+      }
+
+      /* ------------------------------------------------------------------ *
+       * 契约卡（数据集 / 模型 / 产物 / 结论）
+       * ------------------------------------------------------------------ */
+
+      function RegistryCard(props) {
+        var reg = props.registry;
+        if (!reg) return null;
+        var counts = reg.counts || {};
+        var issues = (reg.issues || []).filter(function (item) { return item && item.message; }).slice(0, 3);
+        var pill = function (label, value, tone) {
+          return h('span', { className: 'dsa-reg-pill' + (tone ? ' ' + tone : '') }, h('b', null, String(value == null ? 0 : value)), label);
+        };
+        var datasets = reg.datasets || [];
+        var models = reg.models || [];
+        var sweep = reg.sweep || null;
+        return h(
+          'div',
+          { className: 'dsa-section dsa-reg-section' },
+          h('h3', null, '契约与产物'),
+          h(
+            'div',
+            { className: 'dsa-card dsa-pad dsa-reg-card' },
+            h(
+              'div',
+              { className: 'dsa-reg-row' },
+              pill('数据集', counts.datasets, datasets.length ? '' : 'muted'),
+              pill('模型', counts.models),
+              pill('产物', counts.artifacts),
+              pill('结论', counts.claims),
+              counts.errors ? h(Chip, { tone: 'err', title: (issues[0] && issues[0].message) || '' }, '注册错误 ' + counts.errors) : null,
+              counts.warnings ? h(Chip, { tone: 'warn' }, '待核 ' + counts.warnings) : null,
+              h('span', { className: 'dsa-spacer' }),
+              h(Btn, { variant: 'ghost', onClick: props.onOpen }, '产物中心'),
+              reg.legacy
+                ? h(Btn, { variant: 'primary', disabled: props.busy, onClick: props.onAdopt }, props.busy ? '采纳中…' : '采纳现有产物')
+                : null
+            ),
+            reg.legacy
+              ? h(
+                  'div',
+                  { className: 'dsa-hint' },
+                  '还没有 v2 契约：点「采纳现有产物」按现状生成 datasets / models / artifacts 三份注册表。'
+                  + '推断出来的条目会标「待确认」，闸门在你确认或补齐之前只会判「判不了」，不会假绿。'
+                )
+              : h(
+                  'div',
+                  { className: 'dsa-reg-lists' },
+                  h(
+                    'div',
+                    { className: 'dsa-reg-list' },
+                    h('div', { className: 'dsa-reg-h' }, '数据集'),
+                    datasets.length
+                      ? datasets.slice(0, 4).map(function (item) {
+                          return h(
+                            'div',
+                            { key: item.id, className: 'dsa-reg-item' },
+                            h('b', null, item.id),
+                            ' · ' + (item.rows || 0) + ' 行 / ' + (item.columns || 0) + ' 列'
+                              + (item.inAnalysis != null ? ' · 纳入 ' + item.inAnalysis : '')
+                              + (item.confirmed ? '' : ' · 待确认')
+                          );
+                        })
+                      : h('div', { className: 'dsa-hint' }, '没有登记数据集')
+                  ),
+                  h(
+                    'div',
+                    { className: 'dsa-reg-list' },
+                    h('div', { className: 'dsa-reg-h' }, '模型'),
+                    models.length
+                      ? models.slice(0, 4).map(function (item) {
+                          return h(
+                            'div',
+                            { key: item.id, className: 'dsa-reg-item' },
+                            h('b', null, item.id),
+                            ' · ' + (item.estimator || '?') + (item.outcome ? ' → ' + item.outcome : '') + ' · N=' + (item.n == null ? '?' : item.n)
+                          );
+                        })
+                      : h('div', { className: 'dsa-hint' }, '没有登记模型')
+                  ),
+                  h(
+                    'div',
+                    { className: 'dsa-reg-list' },
+                    h('div', { className: 'dsa-reg-h' }, '普查'),
+                    sweep
+                      ? h('div', { className: 'dsa-reg-item' }, (sweep.outcomes || 0) + ' 个结局 · ' + (sweep.estimated || 0) + ' 个族已估 · ' + (sweep.undecided || 0) + ' 个未表态')
+                      : h('div', { className: 'dsa-hint' }, '还没跑模型族普查（让 AI 调 data_analysis_sweep）')
+                  )
+                ),
+            issues.length
+              ? h(
+                  'div',
+                  { className: 'dsa-reg-issues', role: 'status' },
+                  issues.map(function (item, index) {
+                    return h('div', { key: index }, (item.severity === 'warn' ? '· ' : '✗ ') + (item.message || '').slice(0, 160));
+                  })
                 )
               : null
           )
