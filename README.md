@@ -194,6 +194,9 @@ pip3 install -r SPSS-Style-Charting-Skill/requirements.txt
 - **弹窗**：设置、打开项目、新建项目、移除项目（二次确认）、AI 起草、人工裁定、材料库、产物中心、补丁预览（共 9 种）。
   全部自绘，Esc 关闭，打开时焦点进弹窗、Tab 圈在里面、关掉回到原来的位置。
   复核区（第 9 阶段）不是弹窗，它长在中栏里。
+- **产物中心**：图表 tab 是缩略图网格，**点一张图就地弹大图**（不全屏、不滚到底部找按钮），
+  顶栏给「新窗口打开 / 下载 / 关闭」，多张时按 `←`/`→` 翻页、`Esc` 只关大图（弹窗还开着）。
+  表格与文本仍在网格下方读前 200 行 / 前 4000 字的东西。
 - **选文件夹**：凡是让你填目录的地方（新建项目、打开项目、设置里的技能包目录、材料库登记材料源），
   路径框右边都有「选择…」，点它弹的是**系统原生文件夹选择框**，选完把绝对路径填回去——不用去资源管理器复制路径。
   桌面端走宿主的选择器桥，Web 端走宿主的 `directoryPicker/pick`（在 DSH 所在那台机器上弹框）；
@@ -520,7 +523,7 @@ node tests/provenance.test.mjs    # 逐格回源：pass / noise / missing / unre
 node tests/artifacts.test.mjs     # 产物中心：路径越界与符号链接、扩展名白名单、CSV 截断、文件树与 viewable 标记
 node tests/recheck.test.mjs       # 复核与补丁：baseHash、越界、目录联接穿透、备份命名、12 项复算口径
 node tests/consistency.test.mjs   # 静态对账：文案键 / CSS 类 / 接口路径 / 工具名 / 快照字段 / README 计数
-node tests/client-smoke.test.mjs  # 不开浏览器，用假 React 把面板渲染成树：环境闸门 / 主界面 / 九个弹窗 / 产物中心 / 24 轮 fuzz
+node tests/client-smoke.test.mjs  # 不开浏览器，用假 React 把面板渲染成树：环境闸门 / 主界面 / 九个弹窗 / 产物中心（含点图弹大图、翻页）/ 24 轮 fuzz
 node tests/visual.mjs             # 视觉回归：渲成真 HTML + 真 CSS，用无头 Chrome 量尺寸与对比度
 node tests/e2e-corpus.test.mjs    # 真实语料端到端（有材料包才跑；用 DSA_PROJECT / DSA_SOURCE 指定路径）
 ```

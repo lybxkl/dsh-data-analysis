@@ -1476,7 +1476,27 @@
         '.dsa-reg-item{font-size:12px;color:var(--dsa-ink);line-height:1.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
         '.dsa-reg-item b{font-family:var(--dsa-mono);font-weight:600;}',
         '.dsa-reg-issues{margin-top:10px;padding-top:8px;border-top:1px solid var(--dsa-line);',
-        '  font-size:11.5px;line-height:1.6;color:var(--dsa-ink2);}'
+        '  font-size:11.5px;line-height:1.6;color:var(--dsa-ink2);}',
+
+        // ---- 大图（点缩略图就地弹一层，不让人滚到底部找按钮）
+        '.dsa-lightbox{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;',
+        '  padding:24px;background:rgba(10,12,16,.78);}',
+        '.dsa-lightbox-card{position:relative;display:flex;flex-direction:column;gap:10px;max-width:min(1480px,94vw);',
+        '  max-height:92vh;padding:12px 14px 14px;border-radius:var(--dsa-r);background:var(--dsa-panel);',
+        '  border:1px solid var(--dsa-line2);box-shadow:0 18px 48px rgba(8,10,14,.45);}',
+        '.dsa-lightbox-bar{display:flex;align-items:center;gap:12px;font-size:12px;color:var(--dsa-ink2);min-width:0;}',
+        '.dsa-lightbox-name{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;',
+        '  font-family:var(--dsa-mono);font-size:11.5px;font-weight:600;color:var(--dsa-ink);}',
+        '.dsa-lightbox-img{display:block;max-width:100%;max-height:76vh;margin:0 auto;object-fit:contain;',
+        '  border-radius:var(--dsa-r2);background:var(--dsa-card2);}',
+        '.dsa-lightbox-navs{position:absolute;inset:44px 0 32px;display:flex;align-items:center;justify-content:space-between;',
+        '  pointer-events:none;}',
+        '.dsa-lightbox-nav{pointer-events:auto;width:38px;height:38px;border-radius:999px;border:1px solid var(--dsa-line2);',
+        '  background:var(--dsa-panel);color:var(--dsa-ink2);font-size:20px;line-height:1;cursor:pointer;',
+        '  box-shadow:var(--dsa-shadow2);}',
+        '.dsa-lightbox-nav:hover{color:var(--dsa-ink);border-color:var(--dsa-accent);}',
+        '.dsa-lightbox-nav.prev{margin-left:-19px;}',
+        '.dsa-lightbox-nav.next{margin-right:-19px;}'
       ].join('');
 
       function installStyles() {
@@ -1676,6 +1696,8 @@
         useEffect(function () {
           function onKey(e) {
             if (e.key !== 'Escape') return;
+            // 大图是弹窗里再弹的一层：Esc 先关它，别一次把弹窗也关掉
+            if (typeof document !== 'undefined' && document.querySelector && document.querySelector('.dsa-lightbox')) return;
             if (props.onCancel) props.onCancel();
             else if (props.onMask) props.onMask(e);
           }
@@ -4477,6 +4499,10 @@
         var detailState = useState({ loading: false, ok: false, error: '', data: null });
         var detail = detailState[0];
         var setDetail = detailState[1];
+        // 点图就直接看大图（弹一层），不要让人滚到底部找操作按钮
+        var bigState = useState('');
+        var big = bigState[0];
+        var setBig = bigState[1];
         var aliveRef = useRef(true);
 
         useEffect(function () {
@@ -4531,6 +4557,36 @@
         var files = (tree.entries || []).filter(function (entry) { return entry.kind === 'file'; });
         var activeTab = ARTIFACT_TABS.filter(function (item) { return item.id === tab; })[0] || ARTIFACT_TABS[0];
         var visible = files.filter(activeTab.test).sort(function (a, b) { return String(a.rel).localeCompare(String(b.rel)); });
+        // 大图里能左右翻的，就是当前 tab 里的图，顺序与网格一致
+        var imageList = visible
+          .filter(function (entry) { return entry.image === true || /^\.(png|jpe?g|webp|gif|tiff?)$/.test(entry.ext); })
+          .map(function (entry) { return entry.rel; });
+        var bigIndex = big ? imageList.indexOf(big) : -1;
+
+        var stepBig = function (delta) {
+          if (!imageList.length) return;
+          var next = bigIndex < 0 ? 0 : (bigIndex + delta + imageList.length) % imageList.length;
+          setBig(imageList[next]);
+        };
+
+        // 大图开着时接管键盘：Esc 只关大图（Modal 的 Esc 用 .dsa-lightbox 让路），左右翻页
+        useEffect(function () {
+          if (!big || typeof window === 'undefined' || !window.addEventListener) return;
+          function onKey(event) {
+            if (event.key === 'Escape') {
+              event.stopPropagation();
+              setBig('');
+            } else if (event.key === 'ArrowLeft') {
+              event.preventDefault();
+              stepBig(-1);
+            } else if (event.key === 'ArrowRight') {
+              event.preventDefault();
+              stepBig(1);
+            }
+          }
+          window.addEventListener('keydown', onKey);
+          return function () { window.removeEventListener('keydown', onKey); };
+        }, [big, imageList.join('|')]);
 
         var body = props.stale
           ? // 直接由 props 判，不走 state：不会先闪一下「正在读」再变成错误
@@ -4616,7 +4672,11 @@
                           type: 'button',
                           className: 'dsa-art-card' + (sel === entry.rel ? ' sel' : ''),
                           title: entry.rel,
-                          onClick: function () { open(entry.rel); }
+                          onClick: function () {
+                            // 图片就地弹大图；表格/文本仍在下面那块里看（它们本来就窄）
+                            if (isImage && canPreview) setBig(entry.rel);
+                            else open(entry.rel);
+                          }
                         },
                         isImage && canPreview
                           ? h('img', {
@@ -4684,17 +4744,57 @@
                                       detail.data.kind === 'document' ? '这是 Word 文档：点上面的「下载」用 Word/WPS 打开。' : '这是 PDF：点「新窗口打开」看。'
                                     )
                       )
-                    : h('div', { className: 'dsa-hint' }, '点一张图/一个文件看详情。')
+                    : h('div', { className: 'dsa-hint' }, '点图片直接看大图；点表格或文本看前几行。')
                 );
+
+        var lightbox = big
+          ? h(
+              'div',
+              {
+                className: 'dsa-lightbox',
+                role: 'dialog',
+                'aria-modal': 'true',
+                'aria-label': '大图：' + big,
+                onClick: function (event) {
+                  if (event.target === event.currentTarget) setBig('');
+                }
+              },
+              h(
+                'div',
+                { className: 'dsa-lightbox-card' },
+                h(
+                  'div',
+                  { className: 'dsa-lightbox-bar' },
+                  h('b', { className: 'dsa-lightbox-name', title: big }, big),
+                  h('span', { className: 'dsa-spacer' }),
+                  imageList.length > 1
+                    ? h('span', { className: 'dsa-hint' }, bigIndex + 1 + ' / ' + imageList.length)
+                    : null,
+                  h('a', { className: 'dsa-link', href: artifactRawUrl(big, false), target: '_blank', rel: 'noreferrer' }, '新窗口打开'),
+                  h('a', { className: 'dsa-link', href: artifactRawUrl(big, true) }, '下载'),
+                  h(Btn, { onClick: function () { setBig(''); }, title: '关闭（Esc）' }, '关闭')
+                ),
+                h('img', { className: 'dsa-lightbox-img', src: artifactRawUrl(big), alt: big }),
+                imageList.length > 1
+                  ? h(
+                      'div',
+                      { className: 'dsa-lightbox-navs' },
+                      h('button', { type: 'button', className: 'dsa-lightbox-nav prev', 'aria-label': '上一张（←）', onClick: function () { stepBig(-1); } }, '‹'),
+                      h('button', { type: 'button', className: 'dsa-lightbox-nav next', 'aria-label': '下一张（→）', onClick: function () { stepBig(1); } }, '›')
+                    )
+                  : null
+              )
+            )
+          : null;
 
         return h(
           Modal,
           {
             title: '产物中心',
-            desc: 'output/ 里的图、表与文档。缩略图由工作台生成，原图点开看；只读，不改文件。',
+            desc: 'output/ 里的图、表与文档。点图片直接看大图（←/→ 翻页，Esc 关闭）；只读，不改文件。',
             onCancel: props.onCancel
           },
-          body
+          h('div', null, body, lightbox)
         );
       }
 

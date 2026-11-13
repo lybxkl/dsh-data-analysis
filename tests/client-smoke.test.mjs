@@ -59,7 +59,16 @@ const React = {
     };
     return [store.get(key), setter];
   },
-  useEffect() {},
+  // 默认不跑 effect：绝大多数场景只看首屏排版，跑起来会真去 fetch。
+  // 需要测「挂载后拉数据」的交互（产物中心）时，把 globalThis.__DSA_EFFECTS__ 打开并自带 fetch 桩。
+  useEffect(fn) {
+    if (!globalThis.__DSA_EFFECTS__) return;
+    const { inst, index } = slot();
+    const key = 'fx:' + hookKey(inst, index);
+    if (store.has(key)) return;
+    store.set(key, true);
+    fn();
+  },
   useLayoutEffect() {},
   useMemo(fn) {
     slot();
@@ -136,11 +145,29 @@ function mountPanel(props = {}) {
   return {
     tree: () => tree,
     text: () => textOf(tree),
+    /** 异步数据回来后（flush 之后）重新渲染一次，拿到新树 */
+    render() {
+      for (let pass = 0; pass < 6; pass += 1) {
+        tree = step();
+        if (!dirty) break;
+      }
+      return tree;
+    },
     buttons: () => findAllByClass(tree, 'dsa-btn').map((item) => textOf(item).trim()).filter(Boolean),
     click(label) {
       const hit = findAllByClass(tree, 'dsa-btn').find((item) => textOf(item).trim() === label);
       if (!hit) return false;
       hit.props.onClick();
+      for (let pass = 0; pass < 6; pass += 1) {
+        tree = step();
+        if (!dirty) break;
+      }
+      return true;
+    },
+    /** 点任意节点（缩略图卡片、翻页按钮……）：click() 只管 .dsa-btn */
+    tap(node) {
+      if (!node || typeof node.props.onClick !== 'function') return false;
+      node.props.onClick();
       for (let pass = 0; pass < 6; pass += 1) {
         tree = step();
         if (!dirty) break;
@@ -211,15 +238,35 @@ function loadPanel() {
   for (const [from, to] of PATCHES) source = source.replace(from, to);
 
   let captured = null;
+  const noop = () => {};
   const windowStub = {
     __ModuleLoader__: {
       load(def) {
         captured = def;
       },
     },
+    innerWidth: 1440,
+    addEventListener: noop,
+    removeEventListener: noop,
+    setTimeout,
+    clearTimeout,
+    setInterval: () => 0,
+    clearInterval: noop,
+    matchMedia: () => ({ matches: false, addEventListener: noop, removeEventListener: noop }),
+  };
+  const documentStub = {
+    createElement: () => ({ style: {}, setAttribute: noop, appendChild: noop, remove: noop }),
+    createTextNode: () => ({}),
+    head: { appendChild: noop },
+    body: { appendChild: noop, classList: { add: noop, remove: noop } },
+    getElementById: () => null,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    addEventListener: noop,
+    removeEventListener: noop,
   };
   const sandbox = new Function('window', 'document', 'globalThis', source);
-  sandbox(windowStub, { createElement: () => ({ style: {} }) }, globalThis);
+  sandbox(windowStub, documentStub, globalThis);
   if (!captured || typeof captured.factory !== 'function') throw new Error('client.js 没有调用 __ModuleLoader__.load');
 
   const exported = captured.factory((name) => {
@@ -551,8 +598,7 @@ scenario('弹窗：产物中心', { dialog: { kind: 'artifacts' } }, (tree, text
   check(text.includes('正在读') || text.includes('还没有产物'), '先给一句话，不留白屏');
 });
 
-/* 6b-2. 宿主还没重启（快照里根本没有 registry 这个键）：不许发注定 404 的请求，也不许只报一句看不懂的错 */
-const STALE_SNAP = Object.assign({}, SNAP);
+/* 6b-2. 宿主还没重启（快照里根本没有 registry 这个键）：不许发注定 404 的请求，也不许只报一句看不懂的错 */const STALE_SNAP = Object.assign({}, SNAP);
 delete STALE_SNAP.registry;
 
 scenario('旧宿主：产物中心说清要重启', { snap: STALE_SNAP, dialog: { kind: 'artifacts' } }, (tree, text) => {
@@ -1170,9 +1216,106 @@ await composerScenario(
   },
 );
 
+/* 6d. 产物中心：点缩略图就地弹大图（←/→ 翻页、关闭回网格） */
+{
+  process.stdout.write('\n产物中心：点图弹大图\n');
+  const stub = stubFetch((url) => {
+    if (url.includes('/artifacts/tree')) {
+      return {
+        payload: {
+          ok: true,
+          totalFiles: 3,
+          totalBytes: 4096,
+          truncated: false,
+          entries: [
+            { rel: 'output/chart_pack/figures/a.png', name: 'a.png', ext: '.png', size: 1024, kind: 'file', image: true, viewable: true },
+            { rel: 'output/chart_pack/figures/b.png', name: 'b.png', ext: '.png', size: 2048, kind: 'file', image: true, viewable: true },
+            { rel: 'output/models/coef_all.csv', name: 'coef_all.csv', ext: '.csv', size: 512, kind: 'file', viewable: true },
+          ],
+        },
+      };
+    }
+    // /state、/preflight 之类：回同一份快照，否则面板会拿空快照把项目切换 effect 触发一遍（弹窗被关掉）
+    if (url.includes('/preflight')) return { payload: SNAP.preflight };
+    if (url.includes('/summary')) return { payload: SNAP.summary || {} };
+    if (url.includes('/state')) return { payload: SNAP };
+    return { payload: { ok: true } };
+  });
+  const realInterval = globalThis.setInterval;
+  try {
+    // 打开 effect 后面板会挂轮询定时器：把它们换成不落地的桩，否则脚本跑完不退出
+    globalThis.setInterval = () => 0;
+    globalThis.__DSA__ = Object.assign({}, globalThis.__DSA__, {
+      snap: SNAP,
+      pre: SNAP.preflight,
+      loading: false,
+      dialog: null,
+      width: 'wide',
+      theme: 'light',
+      selected: 'scope',
+    });
+    const view = mountPanel({});
+    await flush();
+    view.render();
+    globalThis.__DSA_EFFECTS__ = true;
+    // 先让挂载期 effect 跑完（含「项目一换就关弹窗」那条），再点入口，否则刚开的弹窗会被它关掉
+    view.render();
+    await flush();
+    view.render();
+    // 走真实动线：点顶栏「产物」，不是直接把 dialog 种进去
+    const entry = findAllByClass(view.tree(), 'dsa-settings-btn').find((item) => String(item.props.title || '').includes('产物'));
+    check(Boolean(entry), '顶栏有「产物」入口');
+    const tapped = view.tap(entry);
+    check(tapped, '「产物」点得动');
+    await flush();
+    await flush();
+    view.render();
+
+    const cards = findAllByClass(view.tree(), 'dsa-art-card');
+    check(cards.length === 2, '图表 tab 里两张图都在（表在「全部」里）');
+    const thumbs = cards.filter((card) => Boolean(findByClass(card, 'dsa-art-thumb')));
+    check(thumbs.length === 2, '只有图片带缩略图');
+    check(!findByClass(view.tree(), 'dsa-lightbox'), '没点之前不弹大图');
+
+    check(view.tap(thumbs[0]), '缩略图点得动');
+    const opened = view.tree();
+    check(Boolean(findByClass(opened, 'dsa-lightbox')), '就地弹出大图层');
+    const bigImg = findByClass(opened, 'dsa-lightbox-img');
+    check(Boolean(bigImg) && String(bigImg.props.src).includes('/artifacts/raw?path='), '大图直接用原图地址');
+    check(
+      Boolean(bigImg) && String(bigImg.props.src).includes(encodeURIComponent('output/chart_pack/figures/a.png')),
+      '大图指向被点的那一张',
+    );
+    check(textOf(findByClass(opened, 'dsa-lightbox-name')).includes('a.png'), '顶栏写着文件名');
+    check(textOf(findByClass(opened, 'dsa-lightbox-bar')).includes('1 / 2'), '标出「第 1 / 共 2 张」');
+    check(
+      !stub.calls.some((call) => call.url.includes('/artifacts/file')),
+      '点图不请求 /artifacts/file（不再为了看大图去拉详情）',
+    );
+
+    const next = findAllByClass(opened, 'dsa-lightbox-nav').find((item) => hasClass(item, 'next'));
+    check(Boolean(next), '多张图时有「下一张」');
+    view.tap(next);
+    const second = view.tree();
+    const secondImg = findByClass(second, 'dsa-lightbox-img');
+    check(
+      Boolean(secondImg) && String(secondImg.props.src).includes(encodeURIComponent('output/chart_pack/figures/b.png')),
+      '翻到第二张',
+    );
+    check(textOf(findByClass(second, 'dsa-lightbox-bar')).includes('2 / 2'), '页码跟着变');
+
+    check(view.click('关闭'), '有「关闭」按钮');
+    check(!findByClass(view.tree(), 'dsa-lightbox'), '关闭后回到网格');
+  } finally {
+    stub.restore();
+    globalThis.setInterval = realInterval;
+    globalThis.__DSA_EFFECTS__ = false;
+    globalThis.__DSA__ = Object.assign({}, globalThis.__DSA__, { dialog: null });
+  }
+}
+
 process.stdout.write('\n');
-if (failedCount) {
-  process.stdout.write('✗ ' + failedCount + ' 项失败\n');
+if (failedCount) {  process.stdout.write('✗ ' + failedCount + ' 项失败\n');
   process.exit(1);
 }
 process.stdout.write('✓ 全部通过\n');
