@@ -61,8 +61,9 @@ function inferColumns(header, rows) {
       type,
       unit: '',
       missing,
-      missingKind: missing ? 'unknown' : 'unknown',
-      note: index === header.length - 1 ? '' : '',
+      // 推断不出「为什么缺」：留 unknown，别猜成结构性缺失
+      missingKind: 'unknown',
+      note: '',
     };
   });
 }
@@ -89,6 +90,11 @@ function csvShape(projectRoot, rel) {
  */
 export function adoptLegacy(projectRoot, { overwrite = false } = {}) {
   const current = readRegistry(projectRoot);
+  // 读不懂的注册表不能当空表覆盖：宁可让用户先修 JSON（或显式 overwrite）
+  const broken = [current.datasets, current.models, current.artifacts].find((slot) => slot.exists && slot.error);
+  if (broken && !overwrite) {
+    return { ok: false, error: `注册表读不懂（${broken.error}）：先修好那份 JSON，或用 overwrite 明确重排` };
+  }
   const existing = current.datasets.rows.length + current.models.rows.length + current.artifacts.rows.length;
   if (existing && !overwrite) {
     return {
@@ -181,9 +187,11 @@ export function adoptLegacy(projectRoot, { overwrite = false } = {}) {
   const found = readModels(projectRoot);
   const analysisIn = datasets.find((item) => item.id === 'analysis');
   for (const model of found.models) {
-    // coef_all.csv 是多模型汇总表，不是模型：把它当模型登记会让 models-index 直接 fail
+    // coef_all.csv 是多模型汇总表，不是模型：把它当模型登记会让 models-index 直接 fail。
+    // main/pooled 只在「没有别的系数表」时才算一个模型——单模型项目本来就常叫 coef_main.csv。
     const stem = String(model.id || '').toLowerCase();
-    if (/^(all|combined|pooled|main)$/.test(stem)) continue;
+    if (/^(all|combined)$/.test(stem)) continue;
+    if (/^(main|pooled)$/.test(stem) && found.models.length > 1) continue;
     const coefRows = readCsv(path.join(projectRoot, model.file));
     const modelColumn = coefRows && coefRows.header.includes('model') ? coefRows.header.indexOf('model') : -1;
     if (modelColumn >= 0) {

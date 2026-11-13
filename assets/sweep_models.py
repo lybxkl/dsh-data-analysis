@@ -23,6 +23,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 from datetime import datetime
 
@@ -56,33 +57,54 @@ def family(entry: str, status: str, why: str = "", model: str = "") -> dict:
     return item
 
 
-def classify(series) -> tuple[str, dict]:
-    import pandas as pd  # noqa: F401
+DURATION_HINT = re.compile(r"month|duration|sentence|prison|term|days|years?|刑期|期限|时长|月数", re.I)
+AMOUNT_HINT = re.compile(r"fine|amount|money|compensation|income|fee|cost|罚金|金额|赔偿|数额", re.I)
+COUNT_HINT = re.compile(r"count|num|number|times|n_|次数|人数|个数|件数|被告人数", re.I)
+
+
+def classify(series, name: str = "") -> tuple[str, dict]:
+    """判结局的类型。
+
+    先看列名（刑期/罚金这类语义无法只靠分布判断），再看取值：
+    二值（0/1 或 1/2）→ binary；整数非负且取值多 → count；取值少 → category；其余 continuous。
+    连续变量方差天然远大于均值，不能拿「sd² > mean」当计数变量的判据。
+    """
+    import pandas as pd
 
     numeric = pd.to_numeric(series, errors="coerce")
     values = numeric.dropna()
-    text_values = series.dropna().astype(str).str.strip()
     stats = {
-        "n": int(values.shape[0]),
+        "n": int(series.notna().sum()),
+        "numeric": int(values.shape[0]),
         "zeros": int((values == 0).sum()),
         "min": float(values.min()) if len(values) else None,
         "max": float(values.max()) if len(values) else None,
         "mean": float(values.mean()) if len(values) else None,
         "sd": float(values.std()) if len(values) > 1 else None,
     }
-    unique_numeric = set(values.unique().tolist())
-    if values.shape[0] and unique_numeric.issubset({0.0, 1.0}) and len(unique_numeric) == 2:
-        stats["events"] = int(values.sum())
+    if not len(values):
+        # 纯文本列：只能当类别
+        text_n = int(series.dropna().astype(str).str.strip().replace("", pd.NA).dropna().shape[0])
+        stats["n"] = text_n
+        return "category", stats
+
+    unique = sorted(set(float(item) for item in values.unique().tolist()))
+    if len(unique) == 2 and set(unique) <= {0.0, 1.0}:
+        stats["events"] = int((values == 1).sum())
         return "binary", stats
-    if len(values) and stats["min"] is not None and stats["min"] >= 0 and values.nunique() > 10:
-        if stats["mean"] and stats["sd"] and stats["sd"] ** 2 > stats["mean"] * 1.2:
-            return "count", stats
-    if values.shape[0] and values.shape[0] >= 0.8 * max(1, len(series)):
-        unique_text = text_values.nunique()
-        if unique_text <= 12 and unique_text > 1 and not math.isnan(unique_text):
-            return "category", stats
-        return "continuous", stats
-    if text_values.nunique() and text_values.nunique() <= 12:
+    if len(unique) == 2 and set(unique) <= {1.0, 2.0}:
+        # 1/2 编码的二值变量：2 当事件
+        stats["events"] = int((values == 2).sum())
+        return "binary", stats
+
+    integral = bool((values % 1 == 0).all())
+    if DURATION_HINT.search(name or ""):
+        return "duration", stats
+    if AMOUNT_HINT.search(name or ""):
+        return "amount", stats
+    if integral and stats["min"] is not None and stats["min"] >= 0 and (len(unique) > 12 or COUNT_HINT.search(name or "")):
+        return "count", stats
+    if len(unique) <= 12:
         return "category", stats
     return "continuous", stats
 
@@ -101,12 +123,14 @@ def families_for(kind: str, stats: dict, outcome: str, models: list[dict]) -> li
 
     out: list[dict] = []
 
-    def add(name: str, aliases: list[str], why_blocked: str = "") -> None:
+    def add(name: str, aliases: list[str], why_blocked: str = "", why_not_needed: str = "") -> None:
         model = next((estimated[a] for a in aliases if a in estimated), "")
         if model:
             out.append(family(name, "estimated", model=model))
         elif why_blocked:
             out.append(family(name, "blocked", why_blocked))
+        elif why_not_needed:
+            out.append(family(name, "not_needed", why_not_needed))
         else:
             out.append(family(name, "available"))
 
@@ -115,41 +139,33 @@ def families_for(kind: str, stats: dict, outcome: str, models: list[dict]) -> li
         few_events = events < 10
         add("logit", ["logit"], "样本不足（N=%d）" % n if too_small else ("事件数太少（%d）" % events if few_events else ""))
         add("probit", ["probit"], "样本不足（N=%d）" % n if too_small else "")
-        add("cloglog", ["cloglog"], "")
-        out.append(
-            family("rare_events", "available" if events and events < 50 else "not_needed",
-                   "" if events and events < 50 else "事件数 %d，不需要稀有事件校正" % events)
-        )
+        add("cloglog", ["cloglog"])
+        add("rare_events", ["rare_events", "firth", "relogit"], "", "" if events and events < 50 else "事件数 %d，不需要稀有事件校正" % events)
     elif kind == "count":
         add("poisson", ["poisson"], "样本不足（N=%d）" % n if n < 30 else "")
         overdispersed = bool(stats.get("mean")) and bool(stats.get("sd")) and stats["sd"] > math.sqrt(max(stats["mean"], 1e-9))
-        out.append(
-            family("negbin", "available" if overdispersed else "not_needed",
-                   "" if overdispersed else "方差不大：泊松够用（sd %.2f / mean %.2f）" % (stats.get("sd") or 0, stats.get("mean") or 0))
-        )
+        add("negbin", ["negbin", "nbreg", "negative_binomial"], "", "" if overdispersed else "方差不大：泊松够用（sd %.2f / mean %.2f）" % (stats.get("sd") or 0, stats.get("mean") or 0))
         zero_share = zeros / n if n else 0
-        out.append(
-            family("zero_inflated", "available" if zero_share > 0.3 else "not_needed",
-                   "" if zero_share > 0.3 else "零值只占 %.0f%%" % (zero_share * 100))
-        )
+        add("zero_inflated", ["zero_inflated", "zip", "zinb"], "", "" if zero_share > 0.3 else "零值只占 %.0f%%" % (zero_share * 100))
     elif kind == "duration":
-        add("ols", ["ols"], "")
-        out.append(family("quantile", "available" if n >= 30 else "blocked", "" if n >= 30 else "样本不足（N=%d）" % n))
-        out.append(family("survival_cox", "blocked", "材料里没有随访时间/删失标记：刑期是「判多久」而不是「多久后发生」"))
+        add("ols", ["ols", "ols_level"], "")
+        add("quantile", ["quantile", "qreg"], "" if n >= 30 else "样本不足（N=%d）" % n)
+        add("survival_cox", ["survival_cox", "cox"], "材料里没有随访时间/删失标记：刑期是「判多久」而不是「多久后发生」")
         has_zero = stats.get("min") is not None and stats["min"] <= 0
-        out.append(family("tobit", "available" if has_zero else "not_needed", "" if has_zero else "没有 0 值，不需要左截断"))
+        add("tobit", ["tobit"], "", "" if has_zero else "没有 0 值，不需要左截断")
     elif kind == "amount":
-        add("ols_log", ["ols", "ols_log"], "")
+        add("ols", ["ols", "ols_level"], "")
+        add("ols_log", ["ols_log", "log_ols"], "")
         has_zero = zeros > 0
-        out.append(family("tobit", "available" if has_zero else "not_needed", "" if has_zero else "没有 0 值，不需要左截断"))
-        out.append(family("two_part", "available" if has_zero else "not_needed", "" if has_zero else "没有 0 值，两部分模型与 OLS 等价"))
+        add("tobit", ["tobit"], "", "" if has_zero else "没有 0 值，不需要左截断")
+        add("two_part", ["two_part", "hurdle"], "", "" if has_zero else "没有 0 值，两部分模型与 OLS 等价")
     elif kind == "category":
-        out.append(family("multinomial_logit", "available" if n >= 50 else "blocked", "" if n >= 50 else "样本不足（N=%d）" % n))
-        out.append(family("ordered_logit", "available"))
+        add("multinomial_logit", ["multinomial_logit", "mlogit", "multinom"], "" if n >= 50 else "样本不足（N=%d）" % n)
+        add("ordered_logit", ["ordered_logit", "ologit", "ordered"])
     else:
-        add("ols", ["ols"], "")
-        out.append(family("quantile", "available" if n >= 30 else "blocked", "" if n >= 30 else "样本不足（N=%d）" % n))
-        out.append(family("robust_regression", "available"))
+        add("ols", ["ols", "ols_level"], "")
+        add("quantile", ["quantile", "qreg"], "" if n >= 30 else "样本不足（N=%d）" % n)
+        add("robust_regression", ["robust_regression", "rlm", "huber"])
     return out
 
 
@@ -211,7 +227,7 @@ def main() -> int:
         outcomes = []
         for name in wanted:
             series = frame[name]
-            kind, stats = classify(series)
+            kind, stats = classify(series, name)
             item = {
                 "name": name,
                 "dataset": dataset.get("id") or "",

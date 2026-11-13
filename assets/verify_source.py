@@ -27,24 +27,33 @@ from __future__ import annotations
 import argparse
 import csv
 import difflib
+import io
 import json
 import os
 import re
 import sys
+import zipfile
 from datetime import datetime
 
 try:  # Windows 控制台默认 cp936，中文 JSON 会炸
     sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 except Exception:  # noqa: BLE001
     pass
+
+# 引文太短就没有定位价值：「有」「1」「。」在整篇里到处都是，命中不能证明什么
+MIN_QUOTE = 6
 
 WS = re.compile(r"\s+")
 # 页码/页眉是真实项目里最主要的「差异来源」：判决书 3/3 会被插进句子中间。
 # 这类差异不是造假，单独记 noise；但必须先证明「去掉页码后逐字符命中」。
-PAGE_NOISE = re.compile(r"(?:判决书|裁定书|调解书)?\s*\d+\s*/\s*\d+")
+# 数字上界必须有：`\d+` 后面没 `/` 时会把整段数字吃到底再回退，20k 位数字能拖到 2 秒/次。
+PAGE_NOISE = re.compile(r"(?:判决书|裁定书|调解书)?\s*\d{1,12}\s*/\s*\d{1,12}")
 # 标点/空白差异同样不是造假：数据集里的引文常被清洗过（全角变半角、去掉空格）。
 # 去掉标点后再做一次**连续**匹配，仍然要求整段连续出现，不是按覆盖率猜。
 LOOSE = re.compile(r"[，,。.；;：:！!？?（）()\[\]【】“”\"'‘’《》<>·\s、—–\-]+")
+# 像页眉/页脚的行：带页码、案号、书名号结尾，或「××人民法院」这种抬头
+HEADER_HINT = re.compile(r"\d{1,4}\s*/\s*\d{1,4}|第\s*\d+\s*页|[（(]\d{4}[)）]\s*\d+\s*号|人民法院$|判决书$|裁定书$|调解书$")
 
 
 def norm(text: str) -> str:
@@ -60,21 +69,22 @@ def loose(text: str) -> str:
 
 
 def header_candidates(pages: list[tuple[int, str]]) -> set[str]:
-    """在多页里重复出现的短行，基本就是页眉（判决书标题）/页脚。
+    """在多页里重复出现、且**像页眉**的短行。
 
-    真实项目里剩下的 15 条 miss 全是这一类：句子中间被插入了
-    「蒋云海非法捕捞水产品罪一审刑事」这种书名式页眉。
+    只按「重复」判会把正文段落（本院依法组成合议庭…）也删掉，删完还会把
+    上一页末行与下一页首行焊在一起——跨页拼接的伪引文就蒙混过关了。
+    所以再加一条形状约束：带页码/案号/法院抬头/文书名结尾。
     """
     counts: dict[str, int] = {}
     for _page_no, text in pages:
         seen = set()
         for line in (text or "").splitlines():
             item = line.strip()
-            if not item or len(item) > 60 or item in seen:
+            if not item or len(item) > 40 or item in seen:
                 continue
             seen.add(item)
             counts[item] = counts.get(item, 0) + 1
-    return {line for line, count in counts.items() if count >= 2}
+    return {line for line, count in counts.items() if count >= 2 and HEADER_HINT.search(line)}
 
 
 def strip_headers(text: str, headers: set[str]) -> str:
@@ -84,9 +94,9 @@ def strip_headers(text: str, headers: set[str]) -> str:
 
 
 def read_csv_rows(path: str) -> tuple[list[str], list[dict]]:
-    with open(path, "r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        return list(reader.fieldnames or []), list(reader)
+    text = read_text_any(path)
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    return list(reader.fieldnames or []), list(reader)
 
 
 def index_sources(root: str) -> tuple[dict, dict, dict]:
@@ -130,22 +140,56 @@ def resolve_source(by_rel: dict, by_tail: dict, by_name: dict, rel: str) -> tupl
     return "", "源文件找不到"
 
 
+def read_text_any(path: str) -> str:
+    """按 UTF-8 → GB18030 依次试：中文 Windows 上 Excel/记事本导出的 txt/csv 常是 GBK。
+
+    读不出就抛错（→ unreadable），不要用 errors="ignore" 读成一堆乱码再报「引文不存在」。
+    """
+    with open(path, "rb") as handle:
+        data = handle.read()
+    for encoding in ("utf-8-sig", "utf-8", "gb18030"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise ValueError(f"认不出编码（试过 utf-8 / gb18030）：{os.path.basename(path)}")
+
+
+def docx_text(path: str) -> str:
+    """.docx 是 zip：从 word/document.xml 抽文字，段落结束补换行。"""
+    with zipfile.ZipFile(path) as zf:
+        xml = zf.read("word/document.xml").decode("utf-8", "ignore")
+    xml = re.sub(r"</w:p>", "\n", xml)
+    xml = re.sub(r"<w:tab[^>]*/>", "\t", xml)
+    xml = re.sub(r"<[^>]+>", "", xml)
+    return xml
+
+
 def page_texts(path: str) -> list[tuple[int, str]]:
-    # 文本类材料直接读（测试与纯文本语料都走这条），PDF 才用 PyMuPDF 逐页取
-    if not path.lower().endswith(".pdf"):
-        with open(path, "r", encoding="utf-8", errors="ignore") as handle:
-            return [(1, handle.read())]
+    lower = path.lower()
+    if lower.endswith(".pdf"):
+        import fitz  # PyMuPDF
 
-    import fitz  # PyMuPDF
+        with fitz.open(path) as doc:
+            if doc.needs_pass:
+                raise ValueError("PDF 有口令，读不出文字")
+            pages: list[tuple[int, str]] = []
+            for index, page in enumerate(doc):
+                try:
+                    pages.append((index + 1, page.get_text("text")))
+                except Exception:  # noqa: BLE001
+                    pages.append((index + 1, ""))
+        # 没有文字层（扫描件）→ 交回空列表，由调用方判 unreadable，而不是判 missing
+        if not any((text or "").strip() for _no, text in pages):
+            return []
+        return pages
 
-    pages: list[tuple[int, str]] = []
-    with fitz.open(path) as doc:
-        for index, page in enumerate(doc):
-            try:
-                pages.append((index + 1, page.get_text("text")))
-            except Exception:  # noqa: BLE001
-                pages.append((index + 1, ""))
-    return pages
+    if lower.endswith(".docx"):
+        text = docx_text(path)
+        return [(1, text)] if text.strip() else []
+
+    text = read_text_any(path)
+    return [(1, text)] if text.strip() else []
 
 
 def bigram_coverage(quote: str, text: str) -> float:
@@ -186,36 +230,41 @@ def page_of(starts: list[tuple[int, int]], offset: int) -> int | None:
     return page_no
 
 
-def segmented_match(needle: str, hay: str, max_gap: int = 320) -> dict | None:
+def segmented_match(needle: str, hay: str, max_gap: int = 320, limit: int = 60) -> dict | None:
     """允许句子中间被插入一小段（页眉/当事人名单），但引文本身必须逐字命中。
 
     用最长匹配块对齐（不是贪心）：贪心遇到重复段落会跳错位置。
     硬条件：引文的**每一个字**都要按序出现在原文里（covered == len(needle)），
     只是原文里可以多出几段（总空隙 ≤ max_gap）。改一个数字就过不了——
     这就是「不许编」的那道线。
+
+    开头 8 字常在文档里出现多次（同一段话在不同被告人处重复），只试首现会把
+    真引文判成 missing，所以按出现位置逐个试，取空隙最小的那个。
     """
-    if not needle or not hay or len(needle) < 24:
+    if not needle or not hay or len(needle) < 12:
         return None
-    anchor = needle[:8]
+    anchor = needle[:12]
+    best = None
+    tried = 0
     start = hay.find(anchor)
-    if start < 0:
-        return None
-    window = hay[start : start + len(needle) + 900]
-    matcher = difflib.SequenceMatcher(None, needle, window, autojunk=False)
-    blocks = [item for item in matcher.get_matching_blocks() if item.size >= 4]
-    if not blocks:
-        return None
-    covered = sum(item.size for item in blocks)
-    if covered != len(needle):
-        return None
-    gap = 0
-    last = 0
-    for item in blocks:
-        gap += item.b - last
-        last = item.b + item.size
-    if gap > max_gap:
-        return None
-    return {"gaps": gap, "coverage": round(covered / float(len(needle)), 3), "at": start + blocks[0].b}
+    while start >= 0 and tried < limit:
+        tried += 1
+        window = hay[start : start + len(needle) + 900]
+        matcher = difflib.SequenceMatcher(None, needle, window, autojunk=False)
+        blocks = [item for item in matcher.get_matching_blocks() if item.size >= 4]
+        covered = sum(item.size for item in blocks)
+        if blocks and covered == len(needle):
+            gap = 0
+            last = 0
+            for item in blocks:
+                gap += item.b - last
+                last = item.b + item.size
+            if gap <= max_gap and (best is None or gap < best["gaps"]):
+                best = {"gaps": gap, "coverage": round(covered / float(len(needle)), 3), "at": start + blocks[0].b}
+                if gap == 0:
+                    break
+        start = hay.find(anchor, start + 1)
+    return best
 
 
 def locate(quote: str, pages: list[tuple[int, str]]) -> dict:
@@ -289,21 +338,22 @@ def locate(quote: str, pages: list[tuple[int, str]]) -> dict:
             "note": "原句只在去掉标点/空白后连续命中（引文被清洗过）",
         }
 
-    # 6) 页眉插进句子：先删掉「多页重复的短行」，再做同样的宽松匹配
+    # 6) 页眉插进句子：删掉「重复且像页眉」的行，再按 gap 上限对齐。
+    #    不能直接用 find：删行后上一页末行会和下一页首行焊在一起，跨页拼接的伪引文会假装命中。
     plain, plain_starts = combined, starts
     headers = header_candidates(pages)
-    combined, starts = combined_index(
+    stripped, stripped_starts = combined_index(
         pages, lambda text: loose(strip_noise(norm(strip_headers(text, headers))))
     )
-    at = combined.find(needle) if needle else -1
-    if at >= 0:
+    hit = segmented_match(needle, stripped, max_gap=160) if headers else None
+    if hit:
         return {
             "status": "noise",
-            "page": page_of(starts, at),
+            "page": page_of(stripped_starts, hit["at"]),
             "start": None,
             "end": None,
-            "coverage": 1.0,
-            "note": "原句被页眉/页脚打断，去掉重复行后连续命中",
+            "coverage": hit["coverage"],
+            "note": f"去掉页眉重复行后逐字命中（中间空 {hit['gaps']} 字；跨页拼接的引文也会落在这里，页眉两侧都是原文）",
         }
 
     # 7) 句子中间插了一小段（单页文档的当事人名单/案由，只出现一次）：分块对齐容错
@@ -382,18 +432,33 @@ def process_dataset(root: str, dataset: dict, mode: str, limit: int, warnings: l
     cache: dict[str, list[tuple[int, str]]] = {}
     ledger: list[dict] = []
     checks: list[dict] = []
-    fields = {quote_col: {"name": quote_col, "cells": 0, "covered": 0, "noise": 0, "missing": 0, "skipped": 0}}
+    fields = {quote_col: {"name": quote_col, "cells": 0, "covered": 0, "noise": 0, "missing": 0,
+                          "unreadable": 0, "skipped": 0}}
 
     total = rows if not limit else rows[:limit]
     for index, row in enumerate(total):
         quote = str(row.get(quote_col, "") or "").strip()
         rel = str(row.get(source_col, "") or "").strip().replace("\\", "/")
         if not quote:
-            fields[quote_col]["cells"] += 0
+            info["skipped"] += 1
+            continue
+        if not re.sub(LOOSE, "", quote):
+            # 只有标点：定位不到任何东西
             info["skipped"] += 1
             continue
         fields[quote_col]["cells"] += 1
         key = row_key(row, grain, index)
+
+        # 太短的引文（「有」「1」「。」）在整篇里到处都是，命中证明不了任何事
+        if len(quote) < MIN_QUOTE:
+            fields[quote_col]["cells"] -= 1
+            fields[quote_col].setdefault("short", 0)
+            fields[quote_col]["short"] += 1
+            note = f"引文只有 {len(quote)} 字（<{MIN_QUOTE}）：太短，定位到原句也证明不了什么"
+            checks.append({"dataset": dataset_id, "row": index + 1, "row_key": key, "field": quote_col,
+                           "status": "short", "page": "", "coverage": 0, "file": rel, "quote": quote[:80],
+                           "note": note})
+            continue
 
         if not rel:
             fields[quote_col]["missing"] += 1
@@ -416,6 +481,30 @@ def process_dataset(root: str, dataset: dict, mode: str, limit: int, warnings: l
             except Exception as error:  # noqa: BLE001
                 cache[abs_path] = []
                 warnings.append(f"读不了 {rel}：{error}")
+
+        # 读不出文字的源文件（扫描件/加密/损坏）不是「引文不存在」，单列 unreadable：
+        # 判不了就别判，否则会把「没文字层」误报成造假。
+        if not cache[abs_path]:
+            fields[quote_col]["unreadable"] += 1
+            note = "源文件读不出文字（扫描件没有文字层、加密或损坏）：先转成可读文本再回源"
+            ledger.append(
+                {
+                    "row": index + 1,
+                    "row_key": key,
+                    "field": quote_col,
+                    "value": quote,
+                    "src": {"file": rel, "page": None, "charStart": None, "charEnd": None, "quote": quote, "coverage": 0},
+                    "method": "none",
+                    "status": "unreadable",
+                    "extractor": {"name": "verify_source.py", "field": quote_col},
+                    "note": note,
+                }
+            )
+            checks.append({"dataset": dataset_id, "row": index + 1, "row_key": key, "field": quote_col,
+                           "status": "unreadable", "page": "", "coverage": 0, "file": rel, "quote": quote[:80],
+                           "note": note})
+            continue
+
         hit = locate(quote, cache[abs_path])
         status = hit["status"]
         if status == "pass":
@@ -426,6 +515,13 @@ def process_dataset(root: str, dataset: dict, mode: str, limit: int, warnings: l
         else:
             fields[quote_col]["missing"] += 1
 
+        # 账本要写「实际读的那份」：数据里声明的路径可能拼错，按同名回退到别的目录也能命中，
+        # 只写声明路径的话，第二条审计按图索骥必然找不到。
+        resolved_rel = os.path.relpath(abs_path, source_root).replace("\\", "/")
+        note = hit["note"]
+        if resolved_rel != rel:
+            note = (note + "；" if note else "") + f"按文件名回退到 {resolved_rel}（数据里写的是 {rel}）"
+
         ledger.append(
             {
                 "row": index + 1,
@@ -434,6 +530,7 @@ def process_dataset(root: str, dataset: dict, mode: str, limit: int, warnings: l
                 "value": quote,
                 "src": {
                     "file": rel,
+                    "resolved": resolved_rel,
                     "page": hit["page"],
                     "charStart": hit["start"],
                     "charEnd": hit["end"],
@@ -443,12 +540,12 @@ def process_dataset(root: str, dataset: dict, mode: str, limit: int, warnings: l
                 "method": "verbatim" if status == "pass" else ("normalized" if status == "noise" else "none"),
                 "status": status,
                 "extractor": {"name": "verify_source.py", "field": quote_col},
-                "note": hit["note"],
+                "note": note,
             }
         )
         checks.append({"dataset": dataset_id, "row": index + 1, "row_key": key, "field": quote_col,
                        "status": status, "page": hit["page"] or "", "coverage": hit["coverage"],
-                       "file": rel, "quote": quote[:80], "note": hit["note"]})
+                       "file": resolved_rel, "quote": quote[:80], "note": note})
 
     info["rows"] = len(total)
     info["fields"] = list(fields.values())
@@ -490,7 +587,7 @@ def main() -> int:
     args = parser.parse_args()
 
     root = os.path.abspath(args.root)
-    result = {"ok": False, "mode": args.mode, "datasets": [], "cells": {"pass": 0, "noise": 0, "missing": 0}, "warnings": []}
+    result = {"ok": False, "mode": args.mode, "datasets": [], "cells": {"pass": 0, "noise": 0, "missing": 0, "unreadable": 0, "short": 0}, "warnings": []}
 
     index_path = os.path.join(root, "output", "datasets", "index.json")
     if not os.path.exists(index_path):
@@ -507,14 +604,26 @@ def main() -> int:
     datasets = [item for item in index.get("datasets", []) if isinstance(item, dict)]
     if args.dataset:
         datasets = [item for item in datasets if item.get("id") == args.dataset]
+        if not datasets:
+            result["error"] = f"注册表里没有 id={args.dataset} 的数据集：先 data_analysis_register(action=list) 看有哪些 id"
+            write_out(args.out, result)
+            return 4
     if not datasets:
         result["error"] = "注册表里没有可回源的数据集（需要 provenance.sourceColumn 与 quoteColumn）"
         write_out(args.out, result)
         return 4
 
     all_checks: list[dict] = []
+    exit_code = 0
     for dataset in datasets:
-        info = process_dataset(root, dataset, args.mode, args.limit, result["warnings"])
+        try:
+            info = process_dataset(root, dataset, args.mode, args.limit, result["warnings"])
+        except Exception as error:  # noqa: BLE001
+            # 一份数据集崩了不能连累其它份，也不能让 --out 不写（调用方会拿到旧证据账）
+            result["warnings"].append(f"{dataset.get('id')} 处理失败：{error}")
+            result["datasets"].append({"id": dataset.get("id"), "error": str(error)})
+            exit_code = 5
+            continue
         all_checks.extend(info.pop("_checks", []))
         result["datasets"].append(info)
 
@@ -524,25 +633,42 @@ def main() -> int:
             result["cells"]["pass"] += 1
         elif status == "noise":
             result["cells"]["noise"] += 1
+        elif status == "unreadable":
+            result["cells"]["unreadable"] += 1
+        elif status == "short":
+            result["cells"]["short"] += 1
         else:
             result["cells"]["missing"] += 1
 
     if all_checks:
         target = os.path.join(root, "output", "verify", "cell_checks.csv")
         os.makedirs(os.path.dirname(target), exist_ok=True)
-        tmp = f"{target}.tmp-{os.getpid()}"
         columns = ["dataset", "row", "row_key", "field", "status", "page", "coverage", "file", "quote", "note"]
+        # 合并，不覆盖：只跑 --dataset ds2 时不能把 ds1 的 missing 行抹掉
+        touched = {check["dataset"] for check in all_checks}
+        kept: list[dict] = []
+        if os.path.exists(target):
+            try:
+                with open(target, "r", encoding="utf-8-sig", newline="") as handle:
+                    for row in csv.DictReader(handle):
+                        if str(row.get("dataset") or "") not in touched:
+                            kept.append(row)
+            except Exception as error:  # noqa: BLE001
+                result["warnings"].append(f"旧 cell_checks.csv 读不出来，已整体重写：{error}")
+        tmp = f"{target}.tmp-{os.getpid()}"
         with open(tmp, "w", encoding="utf-8-sig", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=columns)
             writer.writeheader()
-            for check in all_checks:
+            for check in kept + all_checks:
                 writer.writerow({key: check.get(key, "") for key in columns})
         os.replace(tmp, target)
 
-    result["ok"] = True
+    result["ok"] = exit_code == 0
+    if exit_code:
+        result["error"] = "；".join(result["warnings"][-3:]) or "有数据集处理失败"
     write_out(args.out, result)
     print(json.dumps({k: result[k] for k in ("ok", "mode", "cells")}, ensure_ascii=False))
-    return 0
+    return exit_code
 
 
 def write_out(path: str, payload: dict) -> None:

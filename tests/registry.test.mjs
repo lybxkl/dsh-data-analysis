@@ -346,6 +346,7 @@ check('闸门：没有注册表时 v2 闸门全部 unjudged（老项目不回归
     ['figures', 'fig-title'],
     ['manuscript', 'fig-cited'],
     ['manuscript', 'tbl-present'],
+    ['manuscript', 'manuscript-body'],
     ['qa', 'provenance-cells'],
     ['qa', 'provenance-claims'],
     ['qa', 'artifacts-declared'],
@@ -422,6 +423,64 @@ check('闸门：声明了产物但没产出 → fail', () => {
   const gateItem = gateOf(stages, 'qa', 'artifacts-declared');
   assert.equal(gateItem.status, 'fail');
   assert.match(gateItem.detail, /qa_report\.json/);
+});
+
+check('闸门：模型挂在没登记的数据集上 → fail（不是静默跳过）', () => {
+  const root = makeProject();
+  seedRegistry(root);
+  upsert(root, 'models', { id: 'M9', estimator: 'ols', outcome: 'y', dataset: 'ghost', coef: 'output/models/coef_m1.csv', n: 10 });
+  const item = gateOf(gatesFor(root), 'stats', 'models-index');
+  assert.equal(item.status, 'fail', item.detail);
+  assert.match(item.detail, /没登记的数据集|ghost/);
+});
+
+check('闸门：cells=0 的证据账不能判 pass', () => {
+  const root = makeProject();
+  seedRegistry(root);
+  const dir = path.join(root, 'output/datasets/analysis');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'extract.meta.json'), JSON.stringify({
+    dataset: 'analysis',
+    rows: 3,
+    fields: [{ name: 'raw_item', cells: 0, covered: 0, noise: 0, missing: 0, unreadable: 0 }],
+  }), 'utf8');
+  const item = gateOf(gatesFor(root), 'qa', 'provenance-cells');
+  assert.equal(item.status, 'unjudged', item.detail);
+  assert.match(item.detail, /一格都没核到|引文列/);
+});
+
+check('闸门：表块指向的 CSV 不存在 → fail（不是当「已编排」）', () => {
+  const root = makeProject({ 'output/chart_pack/figures/f01.png': 'x' });
+  fs.writeFileSync(path.join(root, 'manuscript.json'), JSON.stringify({
+    blocks: [
+      { type: 'para', text: '见表 1。图 1 是分布。' },
+      { type: 'figure', png: 'output/chart_pack/figures/f01.png', caption: '图题' },
+      { type: 'table', csv: 'output/tables/missing.csv', caption: '表 1 描述统计' },
+    ],
+  }), 'utf8');
+  const item = gateOf(gatesFor(root), 'manuscript', 'tbl-present');
+  assert.equal(item.status, 'fail', item.detail);
+  assert.match(item.detail, /CSV 读不到|missing\.csv/);
+});
+
+check('闸门：断言用 ref/value 旧写法也能算（不再静默变空操作数）', () => {
+  const root = makeProject();
+  seedRegistry(root);
+  fs.mkdirSync(path.join(root, 'output/claims'), { recursive: true });
+  const claim = normalizeClaim({ id: 'C9', text: 'N 约为 3', assert: { ref: 'dataset:analysis.rows', op: 'eq', value: 3 } });
+  assert.equal(claim.assert.left, 'dataset:analysis.rows');
+  assert.equal(claim.assert.right, 3);
+  const check = validateClaim(claim);
+  assert.equal(check.ok, true, JSON.stringify(check.errors));
+  addClaim(root, { id: 'C9', text: 'N 约为 3', assert: { ref: 'dataset:analysis.rows', op: 'eq', value: 3 } });
+  const item = gateOf(gatesFor(root), 'qa', 'provenance-claims');
+  assert.equal(item.status, 'pass', item.detail);
+});
+
+check('闸门：in_range 缺 from/to 时是登记错误（不是「与数据矛盾」）', () => {
+  const bad = validateClaim(normalizeClaim({ id: 'C1', text: 'x', assert: { op: 'in_range', left: 'M1.n' } }));
+  assert.equal(bad.ok, false);
+  assert.ok(bad.errors.some((item) => item.code === 'claim.assert.range'));
 });
 
 /* ------------------------------ 清理 ------------------------------ */

@@ -323,37 +323,43 @@ v2 把这些变成**数据**：
 3. 迁移生成的条目带 `confidence: "inferred"` + `confirmedByHuman: false`：机器猜的结构可以参与校验，
    但在人确认（`data_analysis_register` action=confirm）之前不许冒充「已核实」。
 
-### 新闸门（第一版一律 warn 级，灰度两轮再升级）
+### 新闸门（十个；`datasets-index` / `models-index` / `models-sweep` / `provenance-claims` 是 error 级，会拦住下一步）
 
-| 闸门 | 判什么 | 判不了时 |
-|---|---|---|
-| `datasets-index` | 每份数据集文件在、行列数与声明一致、注册无 error | 没有 v2 注册表 → unjudged + 迁移指引 |
-| `models-index` | 系数表在、模型 N 与「数据集纳入量 − 剔除量」一致 | 同上 |
-| `models-sweep` | 每个结局至少两个族表态、`blocked` 有 why、没有 `unknown` | 没跑普查 → unjudged |
-| `fig-title` | 每张图的题注不是只有「注：」 | 没有可解析的 manuscript.json |
-| `fig-cited` | 正文引用了每一张图（按图块顺序，`图 N`） | 同上 |
-| `tbl-present` | 表的列数 ≤ 12，或用 `presentation.columns` 选过列 | 同上 |
-| `manuscript-body` | 正文体量撑得起图集（每图 ≥ 80 字） | 同上 |
-| `provenance-cells` | 证据账覆盖整份数据集、回源率 ≥ 98%、没有 missing | 没跑回源 → unjudged |
-| `provenance-claims` | 每条结论的 `assert` 为真 | 没有 claims.jsonl / 没有 assert |
-| `artifacts-declared` | `project.json` 里 `stages.<id>.outputs` 声明的产物都在 | 一个都没声明 |
+| 闸门 | 级别 | 判什么 | 判不了时 |
+|---|---|---|---|
+| `datasets-index` | **error** | 每份数据集文件在、行列数与声明一致、注册无 error | 没有 v2 注册表 → unjudged + 迁移指引 |
+| `models-index` | **error** | 系数表在、模型 N 与「数据集纳入量 − 剔除量」一致、`dataset` 指向已登记的表 | 同上 |
+| `models-sweep` | **error** | 每个结局至少两个族表态、`blocked` 有 why、没有 `unknown` | 没跑普查 → unjudged |
+| `fig-title` | warn | 每张图的题注不是只有「注：」 | 没有可解析的 manuscript.json |
+| `fig-cited` | warn | 正文引用了每一张图（按图块顺序，`图 N`） | 同上 |
+| `tbl-present` | warn | 表块 CSV 读得到、列数 ≤ 12 或用 `presentation.columns` 选过列 | 同上 |
+| `manuscript-body` | warn | 正文体量撑得起图集（每图 ≥ 80 字） | 同上 |
+| `provenance-cells` | warn | 证据账覆盖整份数据集、回源率 ≥ 98%、没有 missing | 没跑回源 → unjudged |
+| `provenance-claims` | **error**（有 refuted 时） | 每条结论的 `assert` 为真；claims.jsonl 没有坏行 | 没有 claims.jsonl / 没有 assert |
+| `artifacts-declared` | warn | `project.json` 里 `stages.<id>.outputs` 声明的产物都在 | 一个都没声明 |
+
+error 级 = 阶段状态会变 `blocked`，`data_analysis_run_stage` 会拒绝往下跑（确需跳过要显式 `force`）。
+
+逐格回源的边界要说清：它证明的是「这句话的字在原文里按顺序出现过」，不是「这句话在原文里是完整的一句」。
+两页相邻的句子被拼成一条引文时也会判 `noise`（页眉删除后两段贴在一起），台账的 note 会把这种情况写出来。
+真要防这一类，只能人工读上下文——所以 `noise` 不算「核实无误」，`qa-signoff` 仍然要人签。
 
 `assert` 只支持声明式比较（`gt/lt/gte/lte/eq/ne/abs_gt/in_range`），两边可以是常量、模型引用
 （`M1.coef.multi_charge.beta`）、数据集元数据（`dataset:analysis.rows`）或条件计数
 （`dataset:analysis.count[year=2024]`）——**不执行任意表达式**。
 
-### 三个适配器（`assets/`，可选，不改技能包）
+### 四个适配器（`assets/`，可选，不改技能包）
 
 | 脚本 | 补的缺口 |
 |---|---|
 | `sweep_models.py` | 技能只认 logit/ols → 这里只做**可行性诊断**（分布/零值/事件数/过度离散），不估参数 |
-| `verify_source.py` | 技能不产逐格证据 → 按 `provenance.sourceColumn/quoteColumn` 回源，页眉差异记 `noise` |
+| `verify_source.py` | 技能不产逐格证据 → 按 `provenance.sourceColumn/quoteColumn` 回源，页眉/页码/标点/跨页差异记 `noise`；读不出文字的源文件记 `unreadable`，短于 6 字的引文记 `short`（都不算「回源成功」） |
 | `figure_check.py` | 清单常缺 `min_fontsize` → 从 PDF 里实测，写 `measure.json`，`readFigures` 自动合并 |
 | `thumb.py` | 产物中心的缩略图（服务端生成，缓存 `output/.thumbs/`） |
 
 ### 旧项目
 
-没有注册表的老项目照样能跑：所有 v2 闸门判 `unjudged` 并给出迁移指引，
+没有注册表的老项目照样能跑：与注册表相关的 v2 闸门判 `unjudged` 并给出迁移指引，
 其余闸门与以前完全一致。迁移只有一步：面板契约卡点「采纳现有产物」
 （或 `data_analysis_register` action=adopt），然后逐条 `confirm` 复核列类型、单位、缺失原因、模型族。
 
@@ -505,12 +511,13 @@ v2 把这些变成**数据**：
 ## 测试
 
 ```bash
-npm test                          # 下面九套全跑，一条命令（e2e 单独跑，见最后一行）
+npm test                          # 下面十套全跑，一条命令（e2e 单独跑，见最后一行）
 node tests/materials.test.mjs     # 通道分类、挂载、迁移、识图全流程、来源账、移除项目（全在临时目录里造数据）
 node tests/runner.test.mjs        # 运行器视图与阶段命令：跑着的 run 有 status、可选 --config/--spec、并发阶段守卫、手稿骨架与改稿说明
 node tests/gates.test.mjs         # 闸门三态：pass / fail / unjudged 的边界，用合成项目逐条打
-node tests/registry.test.mjs      # 契约层：注册表 schema、引用解析、assert 求值、adopt 推断、九个新闸门的联动
-node tests/provenance.test.mjs    # 逐格回源：pass / noise / missing 三态、改一个数字必须判 missing、插一段页眉算 noise
+node tests/registry.test.mjs      # 契约层：注册表 schema、引用解析、assert 求值、adopt 推断、十个新闸门的联动
+node tests/provenance.test.mjs    # 逐格回源：pass / noise / missing / unreadable / short 五态、改一个数字必须判 missing、GBK 语料与坏 PDF
+node tests/artifacts.test.mjs     # 产物中心：路径越界与符号链接、扩展名白名单、CSV 截断、文件树与 viewable 标记
 node tests/recheck.test.mjs       # 复核与补丁：baseHash、越界、目录联接穿透、备份命名、12 项复算口径
 node tests/consistency.test.mjs   # 静态对账：文案键 / CSS 类 / 接口路径 / 工具名 / 快照字段 / README 计数
 node tests/client-smoke.test.mjs  # 不开浏览器，用假 React 把面板渲染成树：环境闸门 / 主界面 / 九个弹窗 / 产物中心 / 24 轮 fuzz
@@ -634,7 +641,7 @@ dsh-data-analysis/
   assets/sweep_models.py  模型普查（每个结局给出该考虑的族，只表态不代拟合）
   assets/figure_check.py  图表实测（min_fontsize / dpi / 像素宽）
   assets/thumb.py         缩略图
-  tests/              10 套回归：materials / runner / gates / registry / provenance / recheck / consistency / client-smoke / visual / e2e-corpus
+  tests/              11 套回归：materials / runner / gates / registry / provenance / artifacts / recheck / consistency / client-smoke / visual / e2e-corpus
 ```
 
 ## 两个 Node 的坑（Windows）

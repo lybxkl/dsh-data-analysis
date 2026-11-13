@@ -48,14 +48,15 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node tests/materials.test.mjs && node tests/runner.test.mjs && node tests/gates.test.mjs && node tests/registry.test.mjs && node tests/provenance.test.mjs && node tests/recheck.test.mjs && node tests/consistency.test.mjs && node tests/client-smoke.test.mjs && node tests/visual.mjs",
+    "test": "node tests/materials.test.mjs && node tests/runner.test.mjs && node tests/gates.test.mjs && node tests/registry.test.mjs && node tests/provenance.test.mjs && node tests/artifacts.test.mjs && node tests/recheck.test.mjs && node tests/consistency.test.mjs && node tests/client-smoke.test.mjs && node tests/visual.mjs",
     "test:visual": "node tests/visual.mjs",
     "test:e2e": "node tests/e2e-corpus.test.mjs",
     "test:client": "node tests/client-smoke.test.mjs",
     "test:runner": "node tests/runner.test.mjs",
     "test:gates": "node tests/gates.test.mjs",
     "test:registry": "node tests/registry.test.mjs",
-    "test:provenance": "node tests/provenance.test.mjs"
+    "test:provenance": "node tests/provenance.test.mjs",
+    "test:artifacts": "node tests/artifacts.test.mjs"
   },
   "keywords": [
     "dsh",

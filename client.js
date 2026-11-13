@@ -1469,7 +1469,7 @@
         '.dsa-reg-pill{display:inline-flex;align-items:baseline;gap:5px;padding:3px 10px;border-radius:999px;',
         '  background:var(--dsa-card2);border:1px solid var(--dsa-line);font-size:11px;color:var(--dsa-ink2);}',
         '.dsa-reg-pill b{font-size:13px;color:var(--dsa-ink);}',
-        '.dsa-reg-pill.muted{opacity:.6;}',
+        '.dsa-reg-pill.muted{color:var(--dsa-ink3);background:transparent;border-style:dashed;}',
         '.dsa-reg-lists{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin-top:12px;}',
         '.dsa-reg-list{min-width:0;}',
         '.dsa-reg-h{margin-bottom:4px;font-size:11px;letter-spacing:.04em;color:var(--dsa-ink3);text-transform:uppercase;}',
@@ -2317,8 +2317,9 @@
           if (activeIdRef.current !== activeId) {
             activeIdRef.current = activeId;
             setDialog(null);
-            // 手稿骨架的提示属于上一个项目，别把它带到新项目上
+            // 手稿骨架与契约卡的提示都属于上一个项目，别把它们带到新项目上
             setManNote('');
+            setRegNote('');
           }
         }, [activeId]);
 
@@ -4445,7 +4446,7 @@
       }
 
       function ArtifactsDialog(props) {
-        var treeState = useState({ loading: true, ok: false, entries: [], error: '', totalFiles: 0, totalBytes: 0 });
+        var treeState = useState({ loading: true, ok: false, entries: [], error: '', totalFiles: 0, totalBytes: 0, truncated: false });
         var tree = treeState[0];
         var setTree = treeState[1];
         var tabState = useState('figures');
@@ -4468,7 +4469,7 @@
           return request('GET', '/artifacts/tree').then(function (json) {
             if (!aliveRef.current) return;
             if (!json || !json.ok) {
-              setTree({ loading: false, ok: false, entries: [], error: (json && json.error) || '读不到产物目录', totalFiles: 0, totalBytes: 0 });
+              setTree({ loading: false, ok: false, entries: [], error: (json && json.error) || '读不到产物目录', totalFiles: 0, totalBytes: 0, truncated: false });
               return;
             }
             setTree({
@@ -4477,11 +4478,17 @@
               error: '',
               entries: Array.isArray(json.entries) ? json.entries : [],
               totalFiles: Number(json.totalFiles) || 0,
-              totalBytes: Number(json.totalBytes) || 0
+              totalBytes: Number(json.totalBytes) || 0,
+              truncated: json.truncated === true
             });
           }).catch(function (error) {
             if (!aliveRef.current) return;
-            setTree({ loading: false, ok: false, entries: [], error: String((error && error.message) || error), totalFiles: 0, totalBytes: 0 });
+            var message = String((error && error.message) || error);
+            // 宿主没重启时这条路由还不存在：说清楚，别只甩一个 HTTP 404
+            if (/HTTP 404|not found/i.test(message)) {
+              message = '宿主还没有提供产物中心接口（client 已更新、宿主没重启）。重启 DSH 后再打开这里。';
+            }
+            setTree({ loading: false, ok: false, entries: [], error: message, totalFiles: 0, totalBytes: 0, truncated: false });
           });
         };
 
@@ -4522,7 +4529,7 @@
                     h(
                       'div',
                       { className: 'dsa-tabs', role: 'tablist' },
-                      ARTIFACT_TABS.map(function (item) {
+                      ARTIFACT_TABS.map(function (item, index) {
                         var count = files.filter(item.test).length;
                         return h(
                           'button',
@@ -4531,21 +4538,38 @@
                             type: 'button',
                             role: 'tab',
                             'aria-selected': tab === item.id ? 'true' : 'false',
+                            tabIndex: tab === item.id ? 0 : -1,
                             className: 'dsa-tab' + (tab === item.id ? ' sel' : ''),
-                            onClick: function () { setTab(item.id); }
+                            onClick: function () { setTab(item.id); },
+                            onKeyDown: function (event) {
+                              var key = event && event.key;
+                              if (key !== 'ArrowLeft' && key !== 'ArrowRight' && key !== 'Home' && key !== 'End') return;
+                              event.preventDefault();
+                              var next = key === 'Home' ? 0
+                                : key === 'End' ? ARTIFACT_TABS.length - 1
+                                  : (index + (key === 'ArrowRight' ? 1 : -1) + ARTIFACT_TABS.length) % ARTIFACT_TABS.length;
+                              var target = ARTIFACT_TABS[next];
+                              setTab(target.id);
+                              var node = event.currentTarget && event.currentTarget.parentNode
+                                && event.currentTarget.parentNode.children
+                                && event.currentTarget.parentNode.children[next];
+                              try { if (node && node.focus) node.focus(); } catch (error) { /* ignore */ }
+                            }
                           },
                           item.label + ' ' + count
                         );
                       })
                     ),
                     h('span', { className: 'dsa-spacer' }),
-                    h('span', { className: 'dsa-hint' }, tree.totalFiles + ' 个文件 · ' + sizeText(tree.totalBytes))
+                    h('span', { className: 'dsa-hint' }, (tree.truncated ? '≥ ' : '') + tree.totalFiles + ' 个文件 · ' + sizeText(tree.totalBytes))
                   ),
                   h(
                     'div',
                     { className: 'dsa-art-grid' },
                     visible.slice(0, 120).map(function (entry) {
-                      var isImage = /^\.(png|jpe?g|webp|gif|tiff?)$/.test(entry.ext);
+                      // 服务端已经判过扩展名与大小上限：这里跟着它，不要自己再猜
+                      var isImage = entry.image === true || /^\.(png|jpe?g|webp|gif|tiff?)$/.test(entry.ext);
+                      var canPreview = entry.viewable !== false;
                       return h(
                         'button',
                         {
@@ -4555,15 +4579,21 @@
                           title: entry.rel,
                           onClick: function () { open(entry.rel); }
                         },
-                        isImage
+                        isImage && canPreview
                           ? h('img', {
                               className: 'dsa-art-thumb',
                               src: artifactThumbUrl(entry.rel, 320),
                               alt: entry.name,
                               loading: 'lazy',
-                              // 缩略图失败时退回原图：总比一张破图好
+                              // 缩略图失败只退回一次原图：原图也被服务端拒（>32MB）时不再重试
                               onError: function (event) {
-                                try { event.target.src = artifactRawUrl(entry.rel); } catch (error) { /* ignore */ }
+                                var img = event && event.target;
+                                if (!img || img.getAttribute('data-fallback') === '1') {
+                                  if (img) { img.onerror = null; img.style.visibility = 'hidden'; }
+                                  return;
+                                }
+                                img.setAttribute('data-fallback', '1');
+                                img.src = artifactRawUrl(entry.rel);
                               }
                             })
                           : h('span', { className: 'dsa-art-ext' }, (entry.ext || '?').replace('.', '').toUpperCase() || '?'),
@@ -4572,7 +4602,9 @@
                       );
                     })
                   ),
-                  visible.length > 120 ? h('div', { className: 'dsa-hint' }, '只列前 120 个；用「全部」或用工具按路径读取其余文件。') : null,
+                  visible.length > 120
+                    ? h('div', { className: 'dsa-hint' }, '只显示前 120 个（这一类共 ' + visible.length + ' 个）。要找具体某个文件，让 AI 用 data_analysis_artifacts 按路径读，或直接看上面的相对路径。')
+                    : null,
                   sel
                     ? h(
                         'div',

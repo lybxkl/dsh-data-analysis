@@ -180,8 +180,15 @@ report(
 
 /* ---------------- 5. 面板读的快照字段 ---------------- */
 
+// 只在 snapshot() 的方法体里抓键：抓全文会把别处同缩进的键也算进来，「改名」就发现不了
+const snapshotBody = (() => {
+  const start = service.indexOf('  snapshot() {');
+  if (start < 0) return '';
+  const end = service.indexOf('\n  }', start);
+  return service.slice(start, end > start ? end : start + 6000);
+})();
 const snapshotKeys = new Set();
-for (const match of service.matchAll(/^\s{6}([a-zA-Z][A-Za-z0-9]*):/gm)) snapshotKeys.add(match[1]);
+for (const match of snapshotBody.matchAll(/^\s{6}([a-zA-Z][A-Za-z0-9]*):/gm)) snapshotKeys.add(match[1]);
 
 // 只查最常读的顶层字段（deep 到二级的靠人工）
 const clientSnapReads = new Set();
@@ -193,8 +200,12 @@ const knownSnapshotFields = new Set([
   'totals', 'artifacts', 'runs', 'adjudications', 'activeRuns', 'materials', 'platform', 'isWindows',
   'layout', 'recheck', 'deadline', 'registry',
 ]);
-const unknownSnapFields = [...clientSnapReads].filter((key) => !knownSnapshotFields.has(key)).sort();
-report('面板只读快照里有的字段', unknownSnapFields.length === 0, unknownSnapFields.length ? unknownSnapFields.join('、') : `${clientSnapReads.size} 个字段`);
+// snapshot() 真产出的键（从源码里抓）；抓不到就退回白名单，但要让「服务端删了某个键」能被发现
+const producedKeys = snapshotKeys.size >= 8 ? snapshotKeys : knownSnapshotFields;
+const unknownSnapFields = [...clientSnapReads]
+  .filter((key) => !knownSnapshotFields.has(key) && !producedKeys.has(key))
+  .sort();
+report('面板只读快照里有的字段', unknownSnapFields.length === 0, unknownSnapFields.length ? unknownSnapFields.join('、') : `${clientSnapReads.size} 个字段（服务端产出 ${snapshotKeys.size} 个键）`);
 
 // 二级字段（artifacts.X / materials.X）同样会静默降级：删掉服务端那个键，面板只会少一块，
 // 不报错。这里按「客户端读了、服务端必须产出」对一遍。

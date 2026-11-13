@@ -152,9 +152,12 @@ function sendFile(res, file, { type = 'application/octet-stream', download = fal
     'cache-control': 'private, max-age=60',
     'x-content-type-options': 'nosniff',
   };
+  // 产物是「不可信数据」：万一以后放进可渲染的 HTML/SVG，也不给它同源脚本能力
+  if (/^text\/html|^image\/svg/i.test(type)) headers['content-security-policy'] = "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:";
   if (download) {
+    const ascii = String(name || path.basename(file)).replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_') || 'download';
     const label = encodeURIComponent(name || path.basename(file));
-    headers['content-disposition'] = `attachment; filename="${label}"; filename*=UTF-8''${label}`;
+    headers['content-disposition'] = `attachment; filename="${ascii}"; filename*=UTF-8''${label}`;
   }
   res.writeHead(200, headers);
   const stream = fs.createReadStream(file);
@@ -313,7 +316,8 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
         return {
           __file: result.abs,
           __type: MIME[result.ext] || 'application/octet-stream',
-          __download: isTrue(query?.download),
+          // .html 一律当下载：它和 GUI 同源，内联渲染等于把产物里的脚本放进插件源执行
+          __download: isTrue(query?.download) || result.ext === '.html',
           __name: path.basename(result.abs),
         };
       },

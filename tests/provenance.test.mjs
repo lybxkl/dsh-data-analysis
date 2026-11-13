@@ -313,6 +313,95 @@ check('引文原样照抄 → pass（带精确页与偏移）', () => {
   assert.equal(exact.method, 'verbatim');
 });
 
+/* --------------- 边界：短引文 / GBK 语料 / 读不出文字的 PDF --------------- */
+
+function seedEdge() {
+  const dir = makeProject();
+  fs.mkdirSync(path.join(dir, 'output', 'datasets'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'output', 'dataset'), { recursive: true });
+  const gbkText = '本院认为，被告人王五犯盗窃罪，判处有期徒刑二年。';
+  // GBK 用 Node 写不出来：借 python 落一份，模拟中文 Windows 上的 txt 语料
+  const made = spawnSync(DEFAULT_PYTHON, ['-c', [
+    'import io,os,sys',
+    `open(os.path.join(sys.argv[1],"gbk.txt"),"wb").write(${JSON.stringify(gbkText)}.encode("gbk"))`,
+  ].join('\n'), path.join(dir, 'data')], { encoding: 'utf8' });
+  if (made.status !== 0) throw new Error(`造 GBK 样本失败：${made.stderr}`);
+  // 坏 PDF：fitz 打不开 → 没有文字 → unreadable（不是 missing）
+  fs.writeFileSync(path.join(dir, 'data', 'broken.pdf'), Buffer.from('%PDF-1.4 not really a pdf', 'utf8'));
+  const rows = [
+    ['1', 'gbk.txt', gbkText],
+    ['2', 'broken.pdf', '这一段在坏文件里当然找不到'],
+    ['3', 'gbk.txt', '有'],
+  ];
+  fs.writeFileSync(
+    path.join(dir, 'output', 'dataset', 'analysis.csv'),
+    'id,rel_path,raw_item,in_analysis\n' + rows.map((row) => `${row[0]},${row[1]},"${row[2]}",1`).join('\n') + '\n',
+    'utf8',
+  );
+  writeRegistry(dir, 'datasets', [
+    {
+      id: 'edge',
+      title: '边界',
+      unit: 'defendant',
+      grainKeys: ['id'],
+      file: 'output/dataset/analysis.csv',
+      rows: rows.length,
+      columns: [
+        { name: 'rel_path', type: 'id' },
+        { name: 'raw_item', type: 'text' },
+      ],
+      inAnalysis: { column: 'in_analysis', rule: 'in_analysis == 1', n: rows.length },
+      provenance: {
+        cells: 'output/datasets/edge/extract.jsonl',
+        derived: 'output/datasets/edge/derivations.csv',
+        sourceColumn: 'rel_path',
+        quoteColumn: 'raw_item',
+        sourceRoot: 'data',
+      },
+    },
+  ]);
+  return dir;
+}
+
+const edgeRoot = seedEdge();
+const edgeRun = runVerify(edgeRoot, ['--mode', 'build']);
+
+check('GBK 语料按编码回退读到，不栽成「引文不存在」', () => {
+  assert.equal(edgeRun.status, 0, edgeRun.stderr.slice(-300));
+  const ledger = fs
+    .readFileSync(path.join(edgeRoot, 'output/datasets/edge/extract.jsonl'), 'utf8')
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  const row = ledger.find((item) => item.row === 1);
+  assert.ok(row, '第 1 行应写进台账');
+  assert.equal(row.status, 'pass', `GBK 原文应判 pass，实际 ${row.status}`);
+});
+
+check('读不出文字的 PDF → unreadable（不是 missing）', () => {
+  const ledger = fs
+    .readFileSync(path.join(edgeRoot, 'output/datasets/edge/extract.jsonl'), 'utf8')
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  const row = ledger.find((item) => item.row === 2);
+  assert.ok(row, '坏 PDF 那行也要落账');
+  assert.equal(row.status, 'unreadable', `应为 unreadable，实际 ${row.status}`);
+  assert.match(row.note, /读不出文字/);
+});
+
+check('引文只有 1 个字 → short（不判 pass）', () => {
+  const checks = fs.readFileSync(path.join(edgeRoot, 'output/verify/cell_checks.csv'), 'utf8');
+  assert.match(checks, /short/);
+  assert.equal(edgeRun.payload.cells.short, 1, JSON.stringify(edgeRun.payload.cells));
+  assert.equal(edgeRun.payload.cells.pass, 1, JSON.stringify(edgeRun.payload.cells));
+});
+
+check('闸门：只有 short/unreadable 时判 unjudged（不是 pass）', () => {
+  const item = gateOf(gatesFor(edgeRoot), 'qa', 'provenance-cells');
+  assert.equal(item.status, 'unjudged', item.detail);
+});
+
 /* ------------------------------ 清理 ------------------------------ */
 
 for (const dir of roots) {

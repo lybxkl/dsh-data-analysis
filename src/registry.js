@@ -247,8 +247,12 @@ export function normalizeClaim(raw = {}) {
     assert: assert
       ? {
           op: text(assert.op, 20),
-          left: text(assert.left, 160),
-          right: typeof assert.right === 'number' ? assert.right : text(assert.right, 160),
+          // 兼容旧写法 ref/value：不认这两个别名的话，模型照旧文档写出来的断言会静默变成空操作数
+          left: text(assert.left ?? assert.ref, 160),
+          right: (() => {
+            const raw = assert.right !== undefined ? assert.right : assert.value;
+            return typeof raw === 'number' ? raw : text(raw, 160);
+          })(),
           from: numOrNull(assert.from),
           to: numOrNull(assert.to),
         }
@@ -269,6 +273,13 @@ export function validateClaim(claim) {
   if (!claim.assert) warnings.push(issue('claim.assert', `claim.${claim.id}.assert`, '没有 assert：只能人工读，闸门判不了', 'warn'));
   else if (!['gt', 'lt', 'gte', 'lte', 'eq', 'ne', 'abs_gt', 'in_range'].includes(claim.assert.op)) {
     errors.push(issue('claim.assert.op', `claim.${claim.id}.assert.op`, `不支持的比较 ${claim.assert.op}`));
+  } else if (claim.assert.op === 'in_range') {
+    if (claim.assert.from === null || claim.assert.to === null) {
+      errors.push(issue('claim.assert.range', `claim.${claim.id}.assert`, 'in_range 缺 from/to：写不全就别写，闸门会把格式问题当成「数据反驳结论」'));
+    }
+  } else if (!claim.assert.left || claim.assert.right === '' || claim.assert.right === null) {
+    // 空操作数是「写错了」，不是「判不了」：不报出来，这条结论就永远抓不到假
+    errors.push(issue('claim.assert.operand', `claim.${claim.id}.assert`, 'assert 缺 left/right（引用写成 M1.coef.<term>.beta 或 dataset:<id>.rows）'));
   }
   if (!claim.evidence.length) warnings.push(issue('claim.evidence', `claim.${claim.id}.evidence`, '没有 evidence：结论与产物没绑定', 'warn'));
   return { ok: !errors.length, errors, warnings };
@@ -327,7 +338,7 @@ function emptyRegistry() {
     claims: { file: REGISTRY_FILES.claims, exists: false, error: '', rows: [], issues: [] },
     sweep: { file: REGISTRY_FILES.sweep, exists: false, error: '', value: null, issues: [] },
     measure: { file: REGISTRY_FILES.measure, exists: false, value: null },
-    cells: { file: REGISTRY_FILES.cells, exists: false, rows: 0, counts: { pass: 0, noise: 0, missing: 0, unjudged: 0 } },
+    cells: { file: REGISTRY_FILES.cells, exists: false, rows: 0, counts: { pass: 0, noise: 0, missing: 0, unreadable: 0, short: 0, unjudged: 0 } },
     legacy: true,
     issues: [],
   };
@@ -465,6 +476,8 @@ export function readRegistry(projectRoot) {
       if (status === 'pass' || status === 'exact') registry.cells.counts.pass += 1;
       else if (status === 'noise') registry.cells.counts.noise += 1;
       else if (status === 'missing') registry.cells.counts.missing += 1;
+      else if (status === 'unreadable') registry.cells.counts.unreadable += 1;
+      else if (status === 'short') registry.cells.counts.short += 1;
       else registry.cells.counts.unjudged += 1;
     }
   }
@@ -511,9 +524,32 @@ export function writeRegistry(projectRoot, kind, rows) {
   return { ok: true, file: rel, rows: rows.length };
 }
 
+/** 文件在、但读不懂时，任何写操作都必须停下——否则一次 save 会把整份表覆盖成一条。 */
+function guardReadable(registry, kind) {
+  const slot = registry[kind];
+  if (!slot || !slot.exists) return null;
+  if (slot.error) {
+    return {
+      ok: false,
+      error: `${REGISTRY_FILES[kind]} 读不懂（${slot.error}）：先把这份 JSON 修好或删掉，再登记——现在写会把已有记录整份盖掉`,
+    };
+  }
+  // jsonl 里坏掉的行不会进 rows：这时重写等于把那几行删掉
+  const broken = (slot.issues || []).filter((item) => item.code === 'jsonl.parse');
+  if (broken.length) {
+    return {
+      ok: false,
+      error: `${REGISTRY_FILES[kind]} 里有 ${broken.length} 行读不懂（${broken[0].where}）：先把它们修好再写，否则会被覆盖`,
+    };
+  }
+  return null;
+}
+
 /** 登记一条：同 id 覆盖，不同 id 追加；返回写入后的完整列表。 */
 export function upsert(projectRoot, kind, raw) {
   const registry = readRegistry(projectRoot);
+  const blocked = guardReadable(registry, kind);
+  if (blocked) return blocked;
   const normalize = kind === 'datasets' ? normalizeDataset : kind === 'models' ? normalizeModel : normalizeArtifact;
   const validate = kind === 'datasets' ? validateDataset : kind === 'models' ? validateModel : validateArtifact;
   const row = normalize(raw);
@@ -527,6 +563,8 @@ export function upsert(projectRoot, kind, raw) {
 
 export function removeRow(projectRoot, kind, id) {
   const registry = readRegistry(projectRoot);
+  const blocked = guardReadable(registry, kind);
+  if (blocked) return blocked;
   const before = registry[kind].rows.length;
   const rows = registry[kind].rows.filter((item) => item.id !== id);
   if (rows.length === before) return { ok: false, error: `注册表里没有 ${id}` };
@@ -536,6 +574,8 @@ export function removeRow(projectRoot, kind, id) {
 
 export function confirmRow(projectRoot, kind, id) {
   const registry = readRegistry(projectRoot);
+  const blocked = guardReadable(registry, kind);
+  if (blocked) return blocked;
   const rows = registry[kind].rows.map((item) => (item.id === id ? { ...item, confirmedByHuman: true } : item));
   if (!rows.some((item) => item.id === id)) return { ok: false, error: `注册表里没有 ${id}` };
   writeRegistry(projectRoot, kind, rows);
@@ -544,6 +584,8 @@ export function confirmRow(projectRoot, kind, id) {
 
 export function addClaim(projectRoot, raw) {
   const registry = readRegistry(projectRoot);
+  const blocked = guardReadable(registry, 'claims');
+  if (blocked) return blocked;
   const claim = normalizeClaim(raw);
   const check = validateClaim(claim);
   if (!check.ok) return { ok: false, errors: check.errors, warnings: check.warnings, claim };
@@ -563,8 +605,23 @@ const COEF_ALIASES = {
   ciHigh: ['ci_high', 'ci.high', 'conf_high', 'upper', 'ul'],
 };
 
-function pick(row, keys) {
-  for (const key of keys) {
+/**
+ * 严格取数：不做「剥掉不认识的字符」那种清洗。
+ * 千分位逗号与 U+2212 减号可以认，括号负数 `(0.51)`、`0.51 (0.12)` 一律当「不是数字」报出来——
+ * 悄悄把符号翻正比报错危险得多。
+ */
+function toNumber(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  const raw = String(value ?? '').trim();
+  if (!raw) return null;
+  const direct = Number(raw);
+  if (Number.isFinite(direct)) return direct;
+  const cleaned = raw.replace(/,/g, '').replace(/[\u2212\u2013\u2014]/g, '-');
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : null;
+}
+
+function pick(row, keys) {  for (const key of keys) {
     if (row[key] !== undefined && row[key] !== '') return row[key];
   }
   return undefined;
@@ -684,8 +741,8 @@ export function resolveRef(registry, ref, options = {}) {
     if (!hit) return { ok: false, error: `${model.id} 的系数表里没有 ${term}` };
     const value = pick(hit, alias);
     if (value === undefined) return { ok: false, error: `${model.id}.${term} 缺字段 ${field}` };
-    const n = Number(String(value).replace(/[^0-9eE+\-.]/g, ''));
-    return Number.isFinite(n) ? { ok: true, value: n } : { ok: false, error: `${model.id}.${term}.${field} 不是数字（${value}）` };
+    const n = toNumber(value);
+    return n === null ? { ok: false, error: `${model.id}.${term}.${field} 不是数字（${value}）` } : { ok: true, value: n };
   }
   return { ok: false, error: `不认识的引用 ${raw}` };
 }
@@ -721,7 +778,13 @@ export function evaluateAssert(assert, registry, options = {}) {
     case 'eq': passed = a === b; break;
     case 'ne': passed = a !== b; break;
     case 'abs_gt': passed = Math.abs(a) > b; break;
-    case 'in_range': passed = a >= Number(assert.from) && a <= Number(assert.to); break;
+    case 'in_range': {
+      const from = toNumber(assert.from);
+      const to = toNumber(assert.to);
+      if (from === null || to === null) return { ok: false, error: 'in_range 需要数字 from 与 to（缺了就没法判）' };
+      passed = a >= from && a <= to;
+      break;
+    }
     default: return { ok: false, error: `不支持的比较 ${assert.op}` };
   }
   return { ok: true, pass: passed, left: a, right: b, op: assert.op };

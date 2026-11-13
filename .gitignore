@@ -25,3 +25,5 @@ __pycache__/
 
 # 排查用临时脚本
 .tmp-*
+.git-commit-msg.txt
+*.commit-msg.txt

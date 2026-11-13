@@ -22,7 +22,7 @@ import {
 import { evaluateProject, summarizeStages, gateTotals } from './gates.js';
 import { createProject, projectId, readProject, writeProject, runsDir } from './projects.js';
 import { fingerprint, resolveSkillRoot, resolveStageScript, listScripts } from './skill.js';
-import { clearCorpusScan, readFigures, readManuscriptSpec, scanArtifacts } from './audit.js';
+import { clearCorpusScan, readCsv, readFigures, readManuscriptSpec, scanArtifacts } from './audit.js';
 import { adoptLegacy } from './adopt.js';
 import {
   addClaim,

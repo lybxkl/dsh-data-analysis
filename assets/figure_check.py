@@ -60,11 +60,24 @@ def measure_pdf(path: str) -> dict:
     min_size = None
     pages = 0
     page_width_in = None
+    placed_width_in = None
     with fitz.open(path) as doc:
         pages = doc.page_count
         for page in doc:
             if page_width_in is None:
                 page_width_in = float(page.rect.width) / 72.0
+            # 图的落位框才是算 dpi 的分母；A4 整页宽会把 3000px 的图算成 363dpi
+            try:
+                for info in page.get_images(full=True):
+                    try:
+                        rect = page.get_image_bbox(info)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    width_pt = float(getattr(rect, "width", 0) or 0)
+                    if width_pt > 1:
+                        placed_width_in = max(placed_width_in or 0.0, width_pt / 72.0)
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 data = page.get_text("dict")
             except Exception:  # noqa: BLE001
@@ -80,7 +93,12 @@ def measure_pdf(path: str) -> dict:
                             continue
                         if min_size is None or size < min_size:
                             min_size = size
-    return {"minFont": round(min_size, 2) if min_size else None, "pages": pages, "pageWidthIn": page_width_in}
+    return {
+        "minFont": round(min_size, 2) if min_size else None,
+        "pages": pages or None,
+        "pageWidthIn": page_width_in,
+        "placedWidthIn": placed_width_in,
+    }
 
 
 def png_width(path: str) -> float | None:
@@ -126,6 +144,7 @@ def main() -> int:
     by_png: dict[str, dict] = {}
     measured = 0
     fonts: list[float] = []
+    missing_png = 0
     for row in rows:
         png_rel = pick(row, ["png", "file"]).replace("\\", "/")
         pdf_rel = pick(row, ["pdf"]).replace("\\", "/")
@@ -140,19 +159,23 @@ def main() -> int:
                     entry.update({k: v for k, v in info.items() if v is not None})
                     if info.get("minFont") is not None:
                         fonts.append(float(info["minFont"]))
-                    measured += 1
+                        measured += 1
                 except Exception as error:  # noqa: BLE001
                     result["warnings"].append(f"{pdf_rel} 量不了：{error}")
             else:
                 result["missingPdf"] += 1
         png_abs = resolve(base, root, png_rel) if png_rel else ""
-        if png_abs and os.path.isfile(png_abs):
-            width = png_width(png_abs)
-            if width:
-                entry["pxWidth"] = width
-                page_width = entry.get("pageWidthIn")
-                if page_width:
-                    entry["dpi"] = round(width / page_width, 1)
+        if not png_abs or not os.path.isfile(png_abs):
+            # 清单写了 png 但文件不在：单独计数，别让它悄悄消失
+            if png_rel:
+                missing_png += 1
+            continue
+        width = png_width(png_abs)
+        if width:
+            entry["pxWidth"] = width
+            span_in = entry.get("placedWidthIn") or entry.get("pageWidthIn")
+            if span_in:
+                entry["dpi"] = round(width / float(span_in), 1)
         if entry and png_rel:
             by_png[png_rel] = entry
             # 清单里可能只写文件名：再放一份 basename 键，readFigures 两种都能命中
@@ -160,6 +183,7 @@ def main() -> int:
 
     if not by_png:
         result["error"] = "清单里没有可用行（png/pdf 都不存在？）"
+        result["missingPng"] = missing_png
         write_out(args.out, result)
         return 4
 
@@ -181,8 +205,10 @@ def main() -> int:
         {
             "ok": True,
             "written": os.path.relpath(target, root).replace("\\", "/"),
-            "figures": len({k for k in by_png if "/" in k or os.sep in k}) or len(by_png),
+            # figures 与 measured 都是「行」口径：一个数清单里有几张图，一个数量到了字号
+            "figures": len({k for k in by_png if "/" in k or "\\" in k}) or len(by_png),
             "measured": measured,
+            "missingPng": missing_png,
             "minFont": round(min(fonts), 2) if fonts else None,
         }
     )

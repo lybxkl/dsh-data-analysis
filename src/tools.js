@@ -924,7 +924,9 @@ export function registerTools(ctx, workbench, helpers = {}) {
           };
         }
         if (result.kind === 'text' || result.kind === 'json') {
-          return { ok: true, text: `${result.rel}（${result.text.length} 字）\n${result.text.slice(0, 4000)}`, file: { rel: result.rel, kind: result.kind } };
+          const body = result.text.slice(0, 4000);
+          const more = result.text.length > body.length ? `（只回前 ${body.length} 字，全文 ${result.text.length} 字；要全文请在面板的产物中心打开或下载）` : '';
+          return { ok: true, text: `${result.rel}（${result.text.length} 字）${more}\n${body}`, file: { rel: result.rel, kind: result.kind } };
         }
         return { ok: true, text: `${result.rel}：${result.kind}（${Math.round((result.size || 0) / 1024)} KB）——用面板的产物中心打开或下载`, file: { rel: result.rel, kind: result.kind } };
       }
@@ -1003,6 +1005,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
         `已实测 ${payload.measured ?? 0}/${payload.figures ?? 0} 张图 → ${payload.written || 'output/artifacts/measure.json'}`,
         payload.minFont ? `全局最小字号 ${payload.minFont}pt` : '',
         payload.missingPdf ? `${payload.missingPdf} 张图没有 PDF，量不到字号` : '',
+        payload.missingPng ? `${payload.missingPng} 张图的 png 不在（清单写了但文件没有）` : '',
         ...(payload.warnings || []).map((w) => `注意：${w}`),
       ].filter(Boolean);
       return { ok: true, text: lines.join('\n'), result: payload };

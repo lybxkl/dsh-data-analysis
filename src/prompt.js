@@ -77,7 +77,7 @@ const LINES = [
   "- 每个结局都要表态：`data_analysis_sweep` 会按结局类型列出该考虑的族（logit/probit/poisson/negbin/ols/quantile/…），`blocked` 必须写为什么不可估（例如没有随访时间、没有分母）。**只要求表态，不要求都拟合**；不表态或只表态一个族，`models-sweep` 会 unjudged。",
   "- 数字必须能回源到原文：`data_analysis_verify_source` 逐格比对引文与 PDF/TXT 原文，写 `output/verify/cell_checks.csv`。`missing` 就是「这句话原文里没有」，不许当成格式差异；页眉/页码/标点差异会被记成 `noise`（可解释，不算造假）。",
   "- 图表尺寸自己量：`data_analysis_figure_check` 把实测 min_fontsize / dpi / 像素宽写进 `output/artifacts/measure.json`；清单里没有 `min_fontsize` 时 `fig-font` 只能 unjudged。",
-  "- 结论要可核验：`claims.jsonl` 里每条结论带 `assert`（`{\"ref\":\"M1.coef.multi_charge.p\",\"op\":\"lt\",\"value\":0.05}` 这种声明式断言，**不执行任意表达式**）。`provenance-claims` 会对 refuted 直接判 fail。",
+  "- 结论要可核验：`claims.jsonl` 里每条结论带 `assert`（`{\"op\":\"lt\",\"left\":\"M1.coef.multi_charge.p\",\"right\":0.05}` 这种声明式断言，**只认 op/left/right（in_range 另需 from/to），不执行任意表达式**）。`provenance-claims` 会对 refuted 直接判 fail。",
   "- 交付物登记：`data_analysis_artifacts`（tree/read）列出项目里能点的图片/表格/文档；面板的「产物」就是读它。声明了却找不到的产物，`artifacts-declared` 判 fail。",
 ];
 

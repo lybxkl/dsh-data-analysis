@@ -295,7 +295,10 @@ export function readFigures(projectRoot) {
         declaredDpi,
         pxWidth: pxWidth ?? pxWidthMeasured,
         effectiveDpi: effectiveDpi ?? (pxWidthMeasured ? pxWidthMeasured / PLOT_INCHES : null),
-        minFontsize: fontMatch ? Number(fontMatch[1]) : minFontMeasured,
+        // 实测值不许被清单自报盖掉：清单写 9pt、实测 6pt 时，按 6pt 判（取两者更小的）
+        minFontsize: fontMatch && minFontMeasured !== null
+          ? Math.min(Number(fontMatch[1]), minFontMeasured)
+          : (fontMatch ? Number(fontMatch[1]) : minFontMeasured),
         minFontMeasured: minFontMeasured !== null,
         measuredDpi: dpiMeasured,
         dataHash: pick(row, ['data_hash']),
@@ -730,7 +733,7 @@ export function readManuscriptSpec(projectRoot) {
     const presentation = block && block.presentation && Array.isArray(block.presentation.columns) && block.presentation.columns.length
       ? block.presentation.columns.length
       : 0;
-    return { n: index + 1, cols, presentation, csv: rel };
+    return { n: index + 1, cols, presentation, csv: rel, exists: Boolean(csv) && cols > 0 };
   });
   const paraChars = paraBlocks.reduce((acc, block) => {
     const textValue = String((block && block.text) || '').trim();

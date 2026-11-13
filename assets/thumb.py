@@ -14,6 +14,12 @@ import json
 import os
 import sys
 
+try:  # 中文路径 + cp936 控制台：保证调用方按 UTF-8 能读
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:  # noqa: BLE001
+    pass
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -50,7 +56,10 @@ def main() -> int:
                 ratio = target / float(width)
                 image = image.resize((target, max(1, int(round(height * ratio)))), Image.LANCZOS)
             os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
-            image.save(out, "PNG", optimize=True)
+            # 原子落盘：中断时留半张 PNG 会被缓存键（rel|size|mtime|px）永久固化
+            tmp = f"{out}.tmp-{os.getpid()}"
+            image.save(tmp, "PNG", optimize=True)
+            os.replace(tmp, out)
             payload = {
                 "ok": True,
                 "src": src,
@@ -62,6 +71,12 @@ def main() -> int:
             print(json.dumps(payload, ensure_ascii=False))
             return 0
     except Exception as error:  # noqa: BLE001
+        for leftover in (f"{out}.tmp-{os.getpid()}",):
+            try:
+                if os.path.exists(leftover):
+                    os.remove(leftover)
+            except Exception:  # noqa: BLE001
+                pass
         print(f"生成缩略图失败：{error}", file=sys.stderr)
         return 4
 

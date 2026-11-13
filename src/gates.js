@@ -15,7 +15,7 @@ import path from 'node:path';
 import { analysisFile, assessPalette, readCsv, statOf } from './audit.js';
 import { STAGE_DEFS } from './defaults.js';
 import { recheckSummary } from './recheck.js';
-import { evaluateAssert } from './registry.js';
+import { evaluateAssert, projectPath } from './registry.js';
 import { verifyMounts } from './sources.js';
 import { readVisionLog } from './vision.js';
 
@@ -447,11 +447,11 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
       } else {
         const rows = registry.datasets.rows;
         const hard = registry.datasets.issues.filter((item) => item.severity !== 'warn');
-        const missing = rows.filter((item) => item.file && !statOf(path.join(root, item.file)).exists);
+        const missing = rows.filter((item) => item.file && !statOf(projectPath(root, item.file)).exists);
         const mismatch = [];
         for (const item of rows) {
           if (!item.file) continue;
-          const csv = readCsv(path.join(root, item.file));
+          const csv = readCsv(projectPath(root, item.file));
           if (csv && item.rows && csv.rows.length !== item.rows) {
             mismatch.push(`${item.id} 声明 ${item.rows} 行 / 实际 ${csv.rows.length} 行`);
           }
@@ -538,13 +538,19 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
         } else {
           const rows = registry.models.rows;
           const hard = registry.models.issues.filter((item) => item.severity !== 'warn');
-          const missingCoef = rows.filter((item) => item.coef && !statOf(path.join(root, item.coef)).exists);
-          const badN = rows.filter((item) => item.n !== null && item.dropped !== null && item.n < 0);
+          const missingCoef = rows.filter((item) => item.coef && !statOf(projectPath(root, item.coef)).exists);
+          const badN = rows.filter((item) => item.n !== null && item.n < 0);
           const inconsistent = [];
+          const orphan = [];
           for (const item of rows) {
             if (!item.dataset) continue;
             const dataset = registry.datasets.rows.find((entry) => entry.id === item.dataset);
-            const base = dataset?.inAnalysis?.n;
+            if (!dataset) {
+              // 模型挂在一张没登记的表上：N 从哪来就说不清了，不能当通过
+              orphan.push(`${item.id} → ${item.dataset}`);
+              continue;
+            }
+            const base = dataset.inAnalysis?.n;
             if (Number.isFinite(base) && Number.isFinite(item.n) && Number.isFinite(item.dropped) && base - item.dropped !== item.n) {
               inconsistent.push(`${item.id}: ${base} - ${item.dropped} ≠ ${item.n}`);
             }
@@ -556,7 +562,9 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
                 ? gate('models-index', '模型注册表', 'error', 'fail', `${missingCoef.length} 个模型的系数表不存在：${missingCoef.slice(0, 3).map((item) => item.coef).join('、')}`, { source: 'output/models/index.json' })
                 : badN.length
                   ? gate('models-index', '模型注册表', 'error', 'fail', `${badN.length} 个模型 N 为负：${badN.map((item) => item.id).join('、')}`, { source: 'output/models/index.json' })
-                  : inconsistent.length
+                  : orphan.length
+                    ? gate('models-index', '模型注册表', 'error', 'fail', `${orphan.length} 个模型挂在没登记的数据集上：${orphan.slice(0, 3).join('，')}——先登记那张表，或把 dataset 改成正确的 id`, { source: 'output/models/index.json' })
+                    : inconsistent.length
                     ? gate('models-index', '模型注册表', 'error', 'fail', `模型 N 与数据集对不上：${inconsistent.slice(0, 3).join('；')}`, { source: 'output/models/index.json' })
                     : gate(
                         'models-index',
@@ -744,10 +752,20 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
 
         const widths = Array.isArray(spec.tableWidths) ? spec.tableWidths : [];
         const wide = widths.filter((item) => item.cols > 12 && !item.presentation);
+        const deadTables = widths.filter((item) => item.exists === false);
         gates.push(
           !widths.length
             ? gate('tbl-present', '表格经过编排', 'warn', 'unjudged', '文稿里还没有表块')
-            : wide.length
+            : deadTables.length
+              ? gate(
+                  'tbl-present',
+                  '表格经过编排',
+                  'warn',
+                  'fail',
+                  `${deadTables.length} 张表的 CSV 读不到（${deadTables.map((item) => `表 ${item.n}：${item.csv || '没写 csv'}`).join('，')}）：第 7 阶段会直接报 table csv not found`,
+                  { source: 'manuscript.json' },
+                )
+              : wide.length
               ? gate(
                   'tbl-present',
                   '表格经过编排',
@@ -913,20 +931,31 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
           for (const field of Array.isArray(meta.fields) ? meta.fields : []) {
             const total = Number(field.cells) || 0;
             const hit = Number(field.covered) || 0;
-            cells += total;
+            // 源文件读不出文字的格子（扫描件/加密/损坏）不进分母：
+            // 它们不是「回源失败」，是「没得判」，单列一条 unjudged
+            const unreadable = Number(field.unreadable) || 0;
+            const judgeable = Math.max(0, total - unreadable);
+            cells += judgeable;
             covered += hit;
-            if (total && hit / total < 0.98) thin.push(`${meta.dataset}.${field.name} ${hit}/${total}`);
+            if (judgeable && hit / judgeable < 0.98) thin.push(`${meta.dataset}.${field.name} ${hit}/${judgeable}`);
           }
         }
         // 只回源了一部分行（试跑用了 --limit）不能算通过：证据账要覆盖整份数据集
         const partial = [];
         for (const meta of ledgers) {
           const dataset = registry?.datasets?.rows?.find((item) => item.id === meta.dataset);
-          const total = Number(dataset?.rows) || 0;
+          let total = Number(dataset?.rows) || 0;
+          // 注册表没写 rows 时退回数 CSV：否则 --limit 跑出来的部分台账会被当成全量
+          if (!total && dataset?.file) {
+            const csv = readCsv(projectPath(root, dataset.file));
+            if (csv) total = csv.rows.length;
+          }
           const done = Number(meta.rows) || 0;
           if (total && done < total) partial.push(`${meta.dataset} ${done}/${total} 行`);
         }
         const missingCells = registry?.cells?.counts?.missing || 0;
+        const unreadableCells = registry?.cells?.counts?.unreadable || 0;
+        const shortCells = registry?.cells?.counts?.short || 0;
         gates.push(
           broken.length
             ? gate('provenance-cells', '逐格回源', 'warn', 'fail', `${broken.length} 份证据账读不懂：${broken[0].file} —— ${broken[0].error}`, { source: broken[0].file })
@@ -939,7 +968,16 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
                   `证据账只覆盖了部分行：${partial.join('，')}——去掉 --limit 重跑 data_analysis_verify_source，否则没回源的行等于没核`,
                   { source: 'output/datasets' },
                 )
-              : thin.length
+              : !cells
+                ? gate(
+                    'provenance-cells',
+                    '逐格回源',
+                    'warn',
+                    'unjudged',
+                    '证据账里一格都没核到（引文列是空的，或引文都短于 6 字）：先确认 provenance.quoteColumn 指对了列',
+                    { source: 'output/datasets' },
+                  )
+                : thin.length
                 ? gate(
                     'provenance-cells',
                     '逐格回源',
@@ -950,7 +988,25 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
                   )
                 : missingCells
                   ? gate('provenance-cells', '逐格回源', 'warn', 'fail', `cell_checks.csv 里有 ${missingCells} 条 missing：引文在原文里找不到`, { source: registry?.cells?.file || 'output/verify/cell_checks.csv' })
-                  : gate('provenance-cells', '逐格回源', 'warn', 'pass', `${ledgers.length} 份证据账、${covered}/${cells} 格可回源（> 98%）`, { source: 'output/datasets' }),
+                  : unreadableCells
+                    ? gate(
+                        'provenance-cells',
+                        '逐格回源',
+                        'warn',
+                        'unjudged',
+                        `${unreadableCells} 格的源文件读不出文字（扫描件没有文字层 / 加密 / 损坏）：这些格没得判，先把它们转成可读文本再重跑 data_analysis_verify_source`,
+                        { source: registry?.cells?.file || 'output/verify/cell_checks.csv' },
+                      )
+                    : shortCells
+                      ? gate(
+                          'provenance-cells',
+                          '逐格回源',
+                          'warn',
+                          'unjudged',
+                          `${shortCells} 格的引文短于 6 字（如「有」「1」「。」）：太短定位不到原句，先换一个能定位的引文列或补足句子`,
+                          { source: registry?.cells?.file || 'output/verify/cell_checks.csv' },
+                        )
+                      : gate('provenance-cells', '逐格回源', 'warn', 'pass', `${ledgers.length} 份证据账、${covered}/${cells} 格可回源（覆盖率 ≥ 98%，无 missing）`, { source: 'output/datasets' }),
         );
       }
 
@@ -972,7 +1028,15 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
         );
       } else {
         const claims = registry.claims.rows;
-        if (!claims.length) {
+        const brokenLines = (registry.claims.issues || []).filter((item) => item.code === 'jsonl.parse');
+        if (brokenLines.length) {
+          // 坏行不会进 claims.rows：不报出来，那条结论就静默消失了
+          gates.push(
+            gate('provenance-claims', '结论与证据一致', 'error', 'fail', `${brokenLines.length} 行 claims.jsonl 读不懂：${brokenLines.slice(0, 3).map((item) => item.where).join('、')}——这几条结论没参与机检，先修好 JSONL`, {
+              source: 'output/claims/claims.jsonl',
+            }),
+          );
+        } else if (!claims.length) {
           gates.push(gate('provenance-claims', '结论与证据一致', 'warn', 'unjudged', 'claims.jsonl 是空文件'));
         } else {
           let supported = 0;
@@ -1005,12 +1069,18 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
 
       // 阶段声明了哪些产物：声明了没产出 → fail；这是「产物路径不再写死」的落地方式。
       const declared = declaredOutputs(project);
-      if (!declared.length) {
+      if (registry?.artifacts?.error) {
+        gates.push(
+          gate('artifacts-declared', '阶段产物声明', 'warn', 'fail', `output/artifacts/index.json 读不懂：${registry.artifacts.error}——产物声明现在是空的，先把 JSON 修好`, {
+            source: 'output/artifacts/index.json',
+          }),
+        );
+      } else if (!declared.length) {
         gates.push(
           gate('artifacts-declared', '阶段产物声明', 'warn', 'unjudged', '没有任何阶段声明 outputs：在 project.json 的 stages.<id>.outputs 里写清这个阶段该交什么，闸门才能按声明验收', { source: 'project.json' }),
         );
       } else {
-        const missingDeclared = declared.filter((item) => !statOf(path.join(root, item.rel)).exists);
+        const missingDeclared = declared.filter((item) => !statOf(projectPath(root, item.rel)).exists);
         gates.push(
           missingDeclared.length
             ? gate(
