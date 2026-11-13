@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 import { Store } from '../src/store.js';
 import { Runner } from '../src/runner.js';
@@ -156,6 +157,56 @@ check('条目上限会标 truncated（数值只是下界）', () => {
   const tree = wb.artifactTree({ limit: 20 });
   assert.equal(tree.truncated, true);
   assert.ok(tree.entries.length <= 20);
+});
+
+/* ------------------------------ 大图预览（TIFF → PNG） ------------------------------ */
+
+// 浏览器不显示 TIFF/HEIC：大图预览必须由服务端转 PNG，且宽度上限 2400 不能被绕过
+async function checkAsync(label, fn) {
+  try {
+    await fn();
+    passed += 1;
+    console.log(`✓ ${label}`);
+  } catch (error) {
+    failures.push(`${label}：${error.message}`);
+    console.log(`✗ ${label} — ${error.message}`);
+  }
+}
+
+function pngSize(file) {
+  const buf = fs.readFileSync(file);
+  assert.equal(buf.subarray(1, 4).toString(), 'PNG', '不是 PNG');
+  return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+}
+
+const wideTiff = path.join(root, 'output/chart_pack/figures/wide.tiff');
+const made = spawnSync(
+  DEFAULT_PYTHON,
+  ['-c', `from PIL import Image; Image.new("RGB",(3000,10),(30,40,50)).save(r"${wideTiff}","TIFF")`],
+  { encoding: 'utf8' },
+);
+check('能造一张 3000px 宽的 TIFF（需要 Pillow）', () => {
+  assert.equal(made.status, 0, made.stderr || 'python 失败');
+  assert.ok(fs.existsSync(wideTiff));
+});
+
+await checkAsync('TIFF 的大图预览是 PNG，且宽度被夹到 2400', async () => {
+  const got = await wb.artifactThumb('output/chart_pack/figures/wide.tiff', { width: 4000 });
+  assert.equal(got.ok, true, got.error || '');
+  assert.equal(path.extname(got.abs), '.png');
+  assert.equal(pngSize(got.abs).width, 2400);
+});
+
+await checkAsync('同一个 TIFF 第二次取预览走缓存', async () => {
+  const again = await wb.artifactThumb('output/chart_pack/figures/wide.tiff', { width: 4000 });
+  assert.equal(again.ok, true, again.error || '');
+  assert.equal(again.cached, true);
+});
+
+await checkAsync('非图片不给生成预览', async () => {
+  const got = await wb.artifactThumb('output/dataset/analysis.csv', { width: 320 });
+  assert.equal(got.ok, false);
+  assert.match(got.error, /只有图片/);
 });
 
 /* ------------------------------ 清理 ------------------------------ */

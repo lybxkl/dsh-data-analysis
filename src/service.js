@@ -1577,8 +1577,9 @@ export class Workbench {
     if (!active.ok) return { ok: false, error: active.error };
     const resolved = this.artifactResolve(rel);
     if (!resolved.ok) return resolved;
-    if (!/^\.(png|jpe?g|webp|gif|tiff?)$/.test(resolved.ext)) return { ok: false, error: '只有图片能生成缩略图' };
-    const px = Math.min(960, Math.max(80, Number(width) || 320));
+    if (!/^\.(png|jpe?g|webp|gif|bmp|tiff?|hei[cf])$/.test(resolved.ext)) return { ok: false, error: '只有图片能生成缩略图' };
+    // 320 = 网格缩略图；2400 = 大图预览（TIFF/HEIC 浏览器不显示，只能靠这一步转 PNG）
+    const px = Math.min(2400, Math.max(80, Number(width) || 320));
     const cacheDir = path.join(active.path, 'output', '.thumbs');
     const key = `${createHash('sha1').update(`${resolved.rel}|${resolved.size}|${resolved.mtimeMs}|${px}`).digest('hex').slice(0, 16)}.png`;
     const out = path.join(cacheDir, key);

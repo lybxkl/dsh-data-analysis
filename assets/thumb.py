@@ -51,7 +51,9 @@ def main() -> int:
             else:
                 image = image.convert("RGB")
             width, height = image.size
-            target = max(80, min(960, int(args.width)))
+            # 上限 2400：缩略图网格要 320，大图预览要 2400（TIFF/HEIC 浏览器根本不显示，
+            # 只能由这里转成 PNG 再给前端看）
+            target = max(80, min(2400, int(args.width)))
             if width > target:
                 ratio = target / float(width)
                 image = image.resize((target, max(1, int(round(height * ratio)))), Image.LANCZOS)

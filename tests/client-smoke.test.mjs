@@ -1230,6 +1230,7 @@ await composerScenario(
           entries: [
             { rel: 'output/chart_pack/figures/a.png', name: 'a.png', ext: '.png', size: 1024, kind: 'file', image: true, viewable: true },
             { rel: 'output/chart_pack/figures/b.png', name: 'b.png', ext: '.png', size: 2048, kind: 'file', image: true, viewable: true },
+            { rel: 'output/chart_pack/figures/c.tiff', name: 'c.tiff', ext: '.tiff', size: 4096, kind: 'file', image: true, viewable: true },
             { rel: 'output/models/coef_all.csv', name: 'coef_all.csv', ext: '.csv', size: 512, kind: 'file', viewable: true },
           ],
         },
@@ -1272,9 +1273,9 @@ await composerScenario(
     view.render();
 
     const cards = findAllByClass(view.tree(), 'dsa-art-card');
-    check(cards.length === 2, '图表 tab 里两张图都在（表在「全部」里）');
+    check(cards.length === 3, '图表 tab 里三张图都在（表在「全部」里）');
     const thumbs = cards.filter((card) => Boolean(findByClass(card, 'dsa-art-thumb')));
-    check(thumbs.length === 2, '只有图片带缩略图');
+    check(thumbs.length === 3, '图片都带缩略图（含 TIFF）');
     check(!findByClass(view.tree(), 'dsa-lightbox'), '没点之前不弹大图');
 
     check(view.tap(thumbs[0]), '缩略图点得动');
@@ -1287,7 +1288,7 @@ await composerScenario(
       '大图指向被点的那一张',
     );
     check(textOf(findByClass(opened, 'dsa-lightbox-name')).includes('a.png'), '顶栏写着文件名');
-    check(textOf(findByClass(opened, 'dsa-lightbox-bar')).includes('1 / 2'), '标出「第 1 / 共 2 张」');
+    check(textOf(findByClass(opened, 'dsa-lightbox-bar')).includes('1 / 3'), '标出「第 1 / 共 3 张」');
     check(
       !stub.calls.some((call) => call.url.includes('/artifacts/file')),
       '点图不请求 /artifacts/file（不再为了看大图去拉详情）',
@@ -1302,10 +1303,21 @@ await composerScenario(
       Boolean(secondImg) && String(secondImg.props.src).includes(encodeURIComponent('output/chart_pack/figures/b.png')),
       '翻到第二张',
     );
-    check(textOf(findByClass(second, 'dsa-lightbox-bar')).includes('2 / 2'), '页码跟着变');
+    check(textOf(findByClass(second, 'dsa-lightbox-bar')).includes('2 / 3'), '页码跟着变');
 
     check(view.click('关闭'), '有「关闭」按钮');
     check(!findByClass(view.tree(), 'dsa-lightbox'), '关闭后回到网格');
+
+    /* TIFF 浏览器不显示：大图必须走服务端转码预览，不能再把 raw 塞进 img */
+    const tiffCard = findAllByClass(view.tree(), 'dsa-art-card').find((card) => textOf(card).includes('c.tiff'));
+    check(Boolean(tiffCard), 'TIFF 也有卡片');
+    view.tap(tiffCard);
+    const tiffView = view.tree();
+    const tiffImg = findByClass(tiffView, 'dsa-lightbox-img');
+    check(Boolean(tiffImg), 'TIFF 也能打开大图');
+    check(Boolean(tiffImg) && String(tiffImg.props.src).includes('/artifacts/thumb?path='), 'TIFF 走转码预览，不走 raw');
+    check(Boolean(tiffImg) && String(tiffImg.props.src).includes('w=2400'), '预览请求 2400 宽');
+    check(textOf(tiffView).includes('转码预览'), '说明这是转码预览、原图看下载');
   } finally {
     stub.restore();
     globalThis.setInterval = realInterval;

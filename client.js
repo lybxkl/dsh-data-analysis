@@ -4454,7 +4454,7 @@
        * ------------------------------------------------------------------ */
 
       var ARTIFACT_TABS = [
-        { id: 'figures', label: '图', test: function (entry) { return /^\.(png|jpe?g|webp|gif|tiff?)$/.test(entry.ext); } },
+        { id: 'figures', label: '图', test: function (entry) { return /^\.(png|jpe?g|webp|gif|tiff?|hei[cf])$/.test(entry.ext); } },
         { id: 'tables', label: '表', test: function (entry) { return entry.ext === '.csv' || entry.ext === '.tsv'; } },
         {
           id: 'docs',
@@ -4484,6 +4484,19 @@
 
       function artifactThumbUrl(rel, width) {
         return API + '/artifacts/thumb?path=' + encodeURIComponent(rel) + '&w=' + (width || 320);
+      }
+
+      // 浏览器能直接显示的图片格式；TIFF / HEIC 之类一律由服务端转成 PNG 再给前端
+      var VIEWABLE_IMAGE = /^\.(png|jpe?g|webp|gif|bmp|avif)$/i;
+
+      function extOf(rel) {
+        var hit = String(rel || '').match(/\.[^./\\]+$/);
+        return hit ? hit[0].toLowerCase() : '';
+      }
+
+      function artifactPreviewUrl(rel, ext) {
+        var kind = String(ext || extOf(rel));
+        return VIEWABLE_IMAGE.test(kind) ? artifactRawUrl(rel, false) : artifactThumbUrl(rel, 2400);
       }
 
       function ArtifactsDialog(props) {
@@ -4559,7 +4572,7 @@
         var visible = files.filter(activeTab.test).sort(function (a, b) { return String(a.rel).localeCompare(String(b.rel)); });
         // 大图里能左右翻的，就是当前 tab 里的图，顺序与网格一致
         var imageList = visible
-          .filter(function (entry) { return entry.image === true || /^\.(png|jpe?g|webp|gif|tiff?)$/.test(entry.ext); })
+          .filter(function (entry) { return entry.image === true || /^\.(png|jpe?g|webp|gif|tiff?|hei[cf])$/.test(entry.ext); })
           .map(function (entry) { return entry.rel; });
         var bigIndex = big ? imageList.indexOf(big) : -1;
 
@@ -4663,7 +4676,7 @@
                     { className: 'dsa-art-grid' },
                     visible.slice(0, 120).map(function (entry) {
                       // 服务端已经判过扩展名与大小上限：这里跟着它，不要自己再猜
-                      var isImage = entry.image === true || /^\.(png|jpe?g|webp|gif|tiff?)$/.test(entry.ext);
+                      var isImage = entry.image === true || /^\.(png|jpe?g|webp|gif|tiff?|hei[cf])$/.test(entry.ext);
                       var canPreview = entry.viewable !== false;
                       return h(
                         'button',
@@ -4692,7 +4705,8 @@
                                   return;
                                 }
                                 img.setAttribute('data-fallback', '1');
-                                img.src = artifactRawUrl(entry.rel);
+                                // 回退也用「能显示的」那个地址：TIFF 的 raw 浏览器一样打不开
+                                img.src = artifactPreviewUrl(entry.rel, entry.ext);
                               }
                             })
                           : h('span', { className: 'dsa-art-ext' }, (entry.ext || '?').replace('.', '').toUpperCase() || '?'),
@@ -4713,7 +4727,7 @@
                           { className: 'dsa-art-detail-h' },
                           h('b', { title: sel }, sel),
                           h('span', { className: 'dsa-spacer' }),
-                          h('a', { className: 'dsa-link', href: artifactRawUrl(sel, false), target: '_blank', rel: 'noreferrer' }, '新窗口打开'),
+                          h('a', { className: 'dsa-link', href: artifactPreviewUrl(sel), target: '_blank', rel: 'noreferrer' }, '新窗口打开'),
                           h('a', { className: 'dsa-link', href: artifactRawUrl(sel, true) }, '下载')
                         ),
                         detail.loading
@@ -4721,7 +4735,7 @@
                           : !detail.ok
                             ? h('div', { className: 'dsa-error', role: 'alert' }, detail.error || '读不出来')
                             : detail.data.kind === 'image'
-                              ? h('img', { className: 'dsa-art-full', src: artifactRawUrl(sel), alt: sel })
+                              ? h('img', { className: 'dsa-art-full', src: artifactPreviewUrl(sel), alt: sel })
                               : detail.data.kind === 'table'
                                 ? h(
                                     'div',
@@ -4770,11 +4784,14 @@
                   imageList.length > 1
                     ? h('span', { className: 'dsa-hint' }, bigIndex + 1 + ' / ' + imageList.length)
                     : null,
-                  h('a', { className: 'dsa-link', href: artifactRawUrl(big, false), target: '_blank', rel: 'noreferrer' }, '新窗口打开'),
+                  h('a', { className: 'dsa-link', href: artifactPreviewUrl(big), target: '_blank', rel: 'noreferrer' }, '新窗口打开'),
                   h('a', { className: 'dsa-link', href: artifactRawUrl(big, true) }, '下载'),
                   h(Btn, { onClick: function () { setBig(''); }, title: '关闭（Esc）' }, '关闭')
                 ),
-                h('img', { className: 'dsa-lightbox-img', src: artifactRawUrl(big), alt: big }),
+                h('img', { className: 'dsa-lightbox-img', src: artifactPreviewUrl(big), alt: big }),
+                VIEWABLE_IMAGE.test(extOf(big))
+                  ? null
+                  : h('div', { className: 'dsa-hint' }, extOf(big).replace('.', '').toUpperCase() + ' 浏览器不直接显示，这里看的是转码预览（最长边 2400px）；原图点「下载」。'),
                 imageList.length > 1
                   ? h(
                       'div',
