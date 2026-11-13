@@ -194,9 +194,9 @@ pip3 install -r SPSS-Style-Charting-Skill/requirements.txt
 - **弹窗**：设置、打开项目、新建项目、移除项目（二次确认）、AI 起草、人工裁定、材料库、产物中心、补丁预览（共 9 种）。
   全部自绘，Esc 关闭，打开时焦点进弹窗、Tab 圈在里面、关掉回到原来的位置。
   复核区（第 9 阶段）不是弹窗，它长在中栏里。
-- **产物中心**：图表 tab 是缩略图网格，**点一张图就地弹大图**（不全屏、不滚到底部找按钮），
-  顶栏给「新窗口打开 / 下载 / 关闭」，多张时按 `←`/`→` 翻页、`Esc` 只关大图（弹窗还开着）。
-  表格与文本仍在网格下方读前 200 行 / 前 4000 字的东西。
+- **产物中心**：图表 tab 是缩略图网格，**点任意一项就地弹层查看**，不再把详情塞在网格下面让人滚到底部找按钮——
+  图给大图（多张时 `←`/`→` 翻页并标「第 n / 共 m 张」），表给整张可滚动表格（行 × 列写在上面，超 200 行提示去下载），
+  文本/JSON 给全文 `pre`，PDF 用内嵌阅读器，Word 给下载提示；顶栏统一是 `新窗口打开` / `下载` / `关闭`，`Esc` 只关这一层（弹窗还开着）。
   **TIFF / HEIC 浏览器自己显示不了**，这两类由服务端 `thumb.py` 转成 PNG（最长边 2400，缓存 `output/.thumbs/`）再给面板；
   大图下面会写明「这是转码预览，原图点下载」。
 - **选文件夹**：凡是让你填目录的地方（新建项目、打开项目、设置里的技能包目录、材料库登记材料源），
@@ -525,7 +525,7 @@ node tests/provenance.test.mjs    # 逐格回源：pass / noise / missing / unre
 node tests/artifacts.test.mjs     # 产物中心：路径越界与符号链接、扩展名白名单、CSV 截断、文件树与 viewable 标记
 node tests/recheck.test.mjs       # 复核与补丁：baseHash、越界、目录联接穿透、备份命名、12 项复算口径
 node tests/consistency.test.mjs   # 静态对账：文案键 / CSS 类 / 接口路径 / 工具名 / 快照字段 / README 计数
-node tests/client-smoke.test.mjs  # 不开浏览器，用假 React 把面板渲染成树：环境闸门 / 主界面 / 九个弹窗 / 产物中心（含点图弹大图、翻页）/ 24 轮 fuzz
+node tests/client-smoke.test.mjs  # 不开浏览器，用假 React 把面板渲染成树：环境闸门 / 主界面 / 九个弹窗 / 产物中心（弹层看图看表看 PDF、翻页、TIFF 转码）/ 24 轮 fuzz
 node tests/visual.mjs             # 视觉回归：渲成真 HTML + 真 CSS，用无头 Chrome 量尺寸与对比度
 node tests/e2e-corpus.test.mjs    # 真实语料端到端（有材料包才跑；用 DSA_PROJECT / DSA_SOURCE 指定路径）
 ```

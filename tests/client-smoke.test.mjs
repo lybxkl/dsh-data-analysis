@@ -1232,7 +1232,22 @@ await composerScenario(
             { rel: 'output/chart_pack/figures/b.png', name: 'b.png', ext: '.png', size: 2048, kind: 'file', image: true, viewable: true },
             { rel: 'output/chart_pack/figures/c.tiff', name: 'c.tiff', ext: '.tiff', size: 4096, kind: 'file', image: true, viewable: true },
             { rel: 'output/models/coef_all.csv', name: 'coef_all.csv', ext: '.csv', size: 512, kind: 'file', viewable: true },
+            { rel: 'output/report.pdf', name: 'report.pdf', ext: '.pdf', size: 3072, kind: 'file', viewable: true },
           ],
+        },
+      };
+    }
+    if (url.includes('/artifacts/file')) {
+      if (url.includes('report.pdf')) return { payload: { ok: true, kind: 'pdf', rel: 'output/report.pdf' } };
+      return {
+        payload: {
+          ok: true,
+          kind: 'table',
+          rel: 'output/models/coef_all.csv',
+          header: ['term', 'beta'],
+          rows: [['multi_charge', '15.38'], ['prior_record', '-0.42']],
+          totalRows: 3,
+          truncated: false,
         },
       };
     }
@@ -1318,6 +1333,34 @@ await composerScenario(
     check(Boolean(tiffImg) && String(tiffImg.props.src).includes('/artifacts/thumb?path='), 'TIFF 走转码预览，不走 raw');
     check(Boolean(tiffImg) && String(tiffImg.props.src).includes('w=2400'), '预览请求 2400 宽');
     check(textOf(tiffView).includes('转码预览'), '说明这是转码预览、原图看下载');
+    view.click('关闭');
+
+    /* 表格同样要弹层：以前是在网格下面塞一块详情，得滚到最底下才看得到 */
+    const allTab = findAllByClass(view.tree(), 'dsa-tab').find((item) => textOf(item).includes('全部'));
+    check(Boolean(allTab), '有「全部」tab');
+    view.tap(allTab);
+    const csvCard = findAllByClass(view.tree(), 'dsa-art-card').find((card) => textOf(card).includes('coef_all.csv'));
+    check(Boolean(csvCard), '表格也有卡片');
+    view.tap(csvCard);
+    await flush();
+    await flush();
+    const tableView = view.render();
+    check(Boolean(findByClass(tableView, 'dsa-lightbox')), '表格也弹层，不再塞在网格下面');
+    check(!findByClass(tableView, 'dsa-art-detail'), '网格下面不再有内联详情块');
+    check(Boolean(findByClass(tableView, 'dsa-art-table')), '弹层里是真表格');
+    check(textOf(tableView).includes('3 行 × 2 列'), '标出行列数');
+    check(textOf(tableView).includes('multi_charge'), '表里有数据行');
+
+    /* PDF：内嵌阅读器读 raw，不能拿缩略图地址去当 iframe（那是 PNG 生成器，PDF 会 404） */
+    const pdfCard = findAllByClass(view.tree(), 'dsa-art-card').find((card) => textOf(card).includes('report.pdf'));
+    check(Boolean(pdfCard), 'PDF 也有卡片');
+    view.tap(pdfCard);
+    await flush();
+    await flush();
+    const pdfView = view.render();
+    const frame = findByClass(pdfView, 'dsa-lightbox-pdf');
+    check(Boolean(frame), 'PDF 在弹层里给内嵌阅读器');
+    check(Boolean(frame) && String(frame.props.src).includes('/artifacts/raw?path='), 'PDF 读的是 raw，不是缩略图');
   } finally {
     stub.restore();
     globalThis.setInterval = realInterval;

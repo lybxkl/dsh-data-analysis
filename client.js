@@ -1484,6 +1484,11 @@
         '.dsa-lightbox-card{position:relative;display:flex;flex-direction:column;gap:10px;max-width:min(1480px,94vw);',
         '  max-height:92vh;padding:12px 14px 14px;border-radius:var(--dsa-r);background:var(--dsa-panel);',
         '  border:1px solid var(--dsa-line2);box-shadow:0 18px 48px rgba(8,10,14,.45);}',
+        // 表格/文本/PDF 要宽：图是竖着长的，表是横着长的
+        '.dsa-lightbox-card.wide{width:min(1600px,96vw);max-width:min(1600px,96vw);}',
+        '.dsa-art-tablewrap-lg{max-height:70vh;background:var(--dsa-panel);}',
+        '.dsa-art-pre-lg{max-height:70vh;background:var(--dsa-card2);}',
+        '.dsa-lightbox-pdf{width:100%;height:70vh;border:0;border-radius:var(--dsa-r2);background:var(--dsa-card2);}',
         '.dsa-lightbox-bar{display:flex;align-items:center;gap:12px;font-size:12px;color:var(--dsa-ink2);min-width:0;}',
         '.dsa-lightbox-name{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;',
         '  font-family:var(--dsa-mono);font-size:11.5px;font-weight:600;color:var(--dsa-ink);}',
@@ -4499,6 +4504,11 @@
         return VIEWABLE_IMAGE.test(kind) ? artifactRawUrl(rel, false) : artifactThumbUrl(rel, 2400);
       }
 
+      // 能直接给浏览器打开的地址：PDF 走 raw（内嵌阅读器/新窗口都靠它），图按上面的规则
+      function artifactViewUrl(rel) {
+        return extOf(rel) === '.pdf' ? artifactRawUrl(rel, false) : artifactPreviewUrl(rel);
+      }
+
       function ArtifactsDialog(props) {
         var treeState = useState({ loading: true, ok: false, entries: [], error: '', totalFiles: 0, totalBytes: 0, truncated: false });
         var tree = treeState[0];
@@ -4512,10 +4522,6 @@
         var detailState = useState({ loading: false, ok: false, error: '', data: null });
         var detail = detailState[0];
         var setDetail = detailState[1];
-        // 点图就直接看大图（弹一层），不要让人滚到底部找操作按钮
-        var bigState = useState('');
-        var big = bigState[0];
-        var setBig = bigState[1];
         var aliveRef = useRef(true);
 
         useEffect(function () {
@@ -4551,8 +4557,15 @@
           void load();
         }, []);
 
+        // 点任何产物都在弹层里看：图给大图、表给整张表、文本给全文、PDF 给内嵌阅读器
         var open = function (rel) {
           setSel(rel);
+          var ext = extOf(rel);
+          if (/^\.(png|jpe?g|webp|gif|bmp|avif|tiff?|hei[cf])$/i.test(ext)) {
+            // 图不需要 /artifacts/file：预览地址直接能显示（TIFF 由服务端转 PNG）
+            setDetail({ loading: false, ok: true, error: '', data: { kind: 'image', rel: rel } });
+            return;
+          }
           setDetail({ loading: true, ok: false, error: '', data: null });
           request('GET', '/artifacts/file?path=' + encodeURIComponent(rel) + '&limit=200').then(function (json) {
             if (!aliveRef.current) return;
@@ -4570,36 +4583,37 @@
         var files = (tree.entries || []).filter(function (entry) { return entry.kind === 'file'; });
         var activeTab = ARTIFACT_TABS.filter(function (item) { return item.id === tab; })[0] || ARTIFACT_TABS[0];
         var visible = files.filter(activeTab.test).sort(function (a, b) { return String(a.rel).localeCompare(String(b.rel)); });
-        // 大图里能左右翻的，就是当前 tab 里的图，顺序与网格一致
+        // 弹层里能左右翻的只有图；顺序与网格一致
         var imageList = visible
           .filter(function (entry) { return entry.image === true || /^\.(png|jpe?g|webp|gif|tiff?|hei[cf])$/.test(entry.ext); })
           .map(function (entry) { return entry.rel; });
-        var bigIndex = big ? imageList.indexOf(big) : -1;
+        var viewIsImage = sel && imageList.indexOf(sel) >= 0;
+        var selIndex = viewIsImage ? imageList.indexOf(sel) : -1;
 
         var stepBig = function (delta) {
           if (!imageList.length) return;
-          var next = bigIndex < 0 ? 0 : (bigIndex + delta + imageList.length) % imageList.length;
-          setBig(imageList[next]);
+          var next = selIndex < 0 ? 0 : (selIndex + delta + imageList.length) % imageList.length;
+          open(imageList[next]);
         };
 
-        // 大图开着时接管键盘：Esc 只关大图（Modal 的 Esc 用 .dsa-lightbox 让路），左右翻页
+        // 弹层开着时接管键盘：Esc 只关这一层（Modal 的 Esc 用 .dsa-lightbox 让路），左右翻图
         useEffect(function () {
-          if (!big || typeof window === 'undefined' || !window.addEventListener) return;
+          if (!sel || typeof window === 'undefined' || !window.addEventListener) return;
           function onKey(event) {
             if (event.key === 'Escape') {
               event.stopPropagation();
-              setBig('');
-            } else if (event.key === 'ArrowLeft') {
+              setSel('');
+            } else if (event.key === 'ArrowLeft' && viewIsImage) {
               event.preventDefault();
               stepBig(-1);
-            } else if (event.key === 'ArrowRight') {
+            } else if (event.key === 'ArrowRight' && viewIsImage) {
               event.preventDefault();
               stepBig(1);
             }
           }
           window.addEventListener('keydown', onKey);
           return function () { window.removeEventListener('keydown', onKey); };
-        }, [big, imageList.join('|')]);
+        }, [sel, imageList.join('|')]);
 
         var body = props.stale
           ? // 直接由 props 判，不走 state：不会先闪一下「正在读」再变成错误
@@ -4685,11 +4699,7 @@
                           type: 'button',
                           className: 'dsa-art-card' + (sel === entry.rel ? ' sel' : ''),
                           title: entry.rel,
-                          onClick: function () {
-                            // 图片就地弹大图；表格/文本仍在下面那块里看（它们本来就窄）
-                            if (isImage && canPreview) setBig(entry.rel);
-                            else open(entry.rel);
-                          }
+                          onClick: function () { open(entry.rel); }
                         },
                         isImage && canPreview
                           ? h('img', {
@@ -4717,82 +4727,75 @@
                   ),
                   visible.length > 120
                     ? h('div', { className: 'dsa-hint' }, '只显示前 120 个（这一类共 ' + visible.length + ' 个）。要找具体某个文件，让 AI 用 data_analysis_artifacts 按路径读，或直接看上面的相对路径。')
-                    : null,
-                  sel
-                    ? h(
-                        'div',
-                        { className: 'dsa-art-detail' },
-                        h(
-                          'div',
-                          { className: 'dsa-art-detail-h' },
-                          h('b', { title: sel }, sel),
-                          h('span', { className: 'dsa-spacer' }),
-                          h('a', { className: 'dsa-link', href: artifactPreviewUrl(sel), target: '_blank', rel: 'noreferrer' }, '新窗口打开'),
-                          h('a', { className: 'dsa-link', href: artifactRawUrl(sel, true) }, '下载')
-                        ),
-                        detail.loading
-                          ? h('div', { className: 'dsa-hint' }, '读取中…')
-                          : !detail.ok
-                            ? h('div', { className: 'dsa-error', role: 'alert' }, detail.error || '读不出来')
-                            : detail.data.kind === 'image'
-                              ? h('img', { className: 'dsa-art-full', src: artifactPreviewUrl(sel), alt: sel })
-                              : detail.data.kind === 'table'
-                                ? h(
-                                    'div',
-                                    { className: 'dsa-art-tablewrap' },
-                                    h('div', { className: 'dsa-hint' }, detail.data.totalRows + ' 行 × ' + detail.data.header.length + ' 列' + (detail.data.truncated ? '（只显示前 200 行）' : '')),
-                                    h(
-                                      'table',
-                                      { className: 'dsa-art-table' },
-                                      h('thead', null, h('tr', null, detail.data.header.map(function (name) { return h('th', { key: name }, name); }))),
-                                      h('tbody', null, detail.data.rows.map(function (row, index) {
-                                        return h('tr', { key: index }, row.map(function (cell, cellIndex) { return h('td', { key: cellIndex }, String(cell)); }));
-                                      }))
-                                    )
-                                  )
-                                : detail.data.kind === 'text' || detail.data.kind === 'json'
-                                  ? h('pre', { className: 'dsa-art-pre' }, String(detail.data.text || '').slice(0, 20000))
-                                  : h(
-                                      'div',
-                                      { className: 'dsa-hint' },
-                                      detail.data.kind === 'document' ? '这是 Word 文档：点上面的「下载」用 Word/WPS 打开。' : '这是 PDF：点「新窗口打开」看。'
-                                    )
-                      )
-                    : h('div', { className: 'dsa-hint' }, '点图片直接看大图；点表格或文本看前几行。')
+                    : null
                 );
 
-        var lightbox = big
+        // 弹层内容：图给大图、表给整张表、文本给全文、PDF 内嵌阅读器、Word 给下载
+        var overlayBody = null;
+        if (detail.loading) {
+          overlayBody = h('div', { className: 'dsa-hint' }, '读取中…');
+        } else if (!detail.ok) {
+          overlayBody = h('div', { className: 'dsa-error', role: 'alert' }, detail.error || '读不出来');
+        } else if (detail.data && detail.data.kind === 'image') {
+          overlayBody = h('img', { className: 'dsa-lightbox-img', src: artifactPreviewUrl(sel), alt: sel });
+        } else if (detail.data && detail.data.kind === 'table') {
+          overlayBody = h(
+            'div',
+            { className: 'dsa-art-tablewrap dsa-art-tablewrap-lg' },
+            h('div', { className: 'dsa-hint' }, detail.data.totalRows + ' 行 × ' + detail.data.header.length + ' 列' + (detail.data.truncated ? '（只显示前 200 行；完整体点下载）' : '')),
+            h(
+              'table',
+              { className: 'dsa-art-table' },
+              h('thead', null, h('tr', null, detail.data.header.map(function (name) { return h('th', { key: name }, name); }))),
+              h('tbody', null, detail.data.rows.map(function (row, index) {
+                return h('tr', { key: index }, row.map(function (cell, cellIndex) { return h('td', { key: cellIndex }, String(cell)); }));
+              }))
+            )
+          );
+        } else if (detail.data && (detail.data.kind === 'text' || detail.data.kind === 'json')) {
+          overlayBody = h('pre', { className: 'dsa-art-pre dsa-art-pre-lg' }, String(detail.data.text || '').slice(0, 20000));
+        } else if (detail.data && detail.data.kind === 'pdf') {
+          overlayBody = h('iframe', { className: 'dsa-lightbox-pdf', src: artifactViewUrl(sel), title: sel });
+        } else {
+          overlayBody = h(
+            'div',
+            { className: 'dsa-hint' },
+            '这是 Word 文档，浏览器不内嵌显示：点「下载」用 Word / WPS 打开，或在产物中心里看同名的图表。'
+          );
+        }
+
+        var lightbox = sel
           ? h(
               'div',
               {
                 className: 'dsa-lightbox',
                 role: 'dialog',
                 'aria-modal': 'true',
-                'aria-label': '大图：' + big,
+                'aria-label': '预览：' + sel,
                 onClick: function (event) {
-                  if (event.target === event.currentTarget) setBig('');
+                  if (event.target === event.currentTarget) setSel('');
                 }
               },
               h(
                 'div',
-                { className: 'dsa-lightbox-card' },
+                { className: 'dsa-lightbox-card' + (viewIsImage ? '' : ' wide') },
                 h(
                   'div',
                   { className: 'dsa-lightbox-bar' },
-                  h('b', { className: 'dsa-lightbox-name', title: big }, big),
+                  h('b', { className: 'dsa-lightbox-name', title: sel }, sel),
                   h('span', { className: 'dsa-spacer' }),
-                  imageList.length > 1
-                    ? h('span', { className: 'dsa-hint' }, bigIndex + 1 + ' / ' + imageList.length)
+                  viewIsImage && imageList.length > 1
+                    ? h('span', { className: 'dsa-hint' }, selIndex + 1 + ' / ' + imageList.length)
                     : null,
-                  h('a', { className: 'dsa-link', href: artifactPreviewUrl(big), target: '_blank', rel: 'noreferrer' }, '新窗口打开'),
-                  h('a', { className: 'dsa-link', href: artifactRawUrl(big, true) }, '下载'),
-                  h(Btn, { onClick: function () { setBig(''); }, title: '关闭（Esc）' }, '关闭')
+                  h('a', { className: 'dsa-link', href: artifactViewUrl(sel), target: '_blank', rel: 'noreferrer' }, '新窗口打开'),
+                  h('a', { className: 'dsa-link', href: artifactRawUrl(sel, true) }, '下载'),
+                  h(Btn, { onClick: function () { setSel(''); }, title: '关闭（Esc）' }, '关闭')
                 ),
-                h('img', { className: 'dsa-lightbox-img', src: artifactPreviewUrl(big), alt: big }),
-                VIEWABLE_IMAGE.test(extOf(big))
-                  ? null
-                  : h('div', { className: 'dsa-hint' }, extOf(big).replace('.', '').toUpperCase() + ' 浏览器不直接显示，这里看的是转码预览（最长边 2400px）；原图点「下载」。'),
-                imageList.length > 1
+                overlayBody,
+                viewIsImage && !VIEWABLE_IMAGE.test(extOf(sel))
+                  ? h('div', { className: 'dsa-hint' }, extOf(sel).replace('.', '').toUpperCase() + ' 浏览器不直接显示，这里看的是转码预览（最长边 2400px）；原图点「下载」。')
+                  : null,
+                viewIsImage && imageList.length > 1
                   ? h(
                       'div',
                       { className: 'dsa-lightbox-navs' },
@@ -4808,7 +4811,7 @@
           Modal,
           {
             title: '产物中心',
-            desc: 'output/ 里的图、表与文档。点图片直接看大图（←/→ 翻页，Esc 关闭）；只读，不改文件。',
+            desc: 'output/ 里的图、表与文档。点任意一项就地弹层查看（图可 ←/→ 翻页，Esc 关闭）；只读，不改文件。',
             onCancel: props.onCancel
           },
           h('div', null, body, lightbox)
