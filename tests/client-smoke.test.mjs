@@ -292,6 +292,9 @@ const STAGES = [
 
 const SNAP = {
   ok: true,
+  // 新版宿主一定带这个键（值可以是 null = 还没有 v2 注册表）；
+  // 旧宿主快照里没有这个键，面板要据此降级成「重启 DSH 后可用」
+  registry: null,
   config: { pythonPath: 'python', skillRoot: 'C:/skill', modelMode: 'follow', maxRuns: 60, maxLogLines: 800, dataDir: '', modelProvider: '', modelId: '', assistantMaxTokens: 1800 },
   skill: { ok: true, version: '9.9.9', sha256: 'abcdef1234', scripts: 12, root: 'C:/skill' },
   python: { ok: true, version: '3.11.5', executable: 'C:/Python311/python.exe' },
@@ -546,6 +549,22 @@ scenario('弹窗：产物中心', { dialog: { kind: 'artifacts' } }, (tree, text
   check(Boolean(findByClass(tree, 'dsa-modal')), '产物中心渲染出来了');
   check(text.includes('产物中心'), '标题就是「产物中心」');
   check(text.includes('正在读') || text.includes('还没有产物'), '先给一句话，不留白屏');
+});
+
+/* 6b-2. 宿主还没重启（快照里根本没有 registry 这个键）：不许发注定 404 的请求，也不许只报一句看不懂的错 */
+const STALE_SNAP = Object.assign({}, SNAP);
+delete STALE_SNAP.registry;
+
+scenario('旧宿主：产物中心说清要重启', { snap: STALE_SNAP, dialog: { kind: 'artifacts' } }, (tree, text) => {
+  check(Boolean(findByClass(tree, 'dsa-modal')), '弹窗还是能打开');
+  check(text.includes('重启 DSH'), '直接告诉用户重启 DSH');
+  check(!text.includes('正在读'), '不假装在读文件');
+  check(!/未知接口|404/.test(text), '不把 404 原样甩给用户');
+});
+
+scenario('旧宿主：契约卡不留空白', { snap: STALE_SNAP }, (tree, text) => {
+  check(text.includes('契约卡需要新版宿主'), '契约卡位置给说明，而不是静默消失');
+  check(text.includes('重启 DSH'), '说明里带动作');
 });
 
 /* 6c. 契约卡：有注册表看计数，没有注册表给迁移入口 */

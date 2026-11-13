@@ -1869,6 +1869,8 @@
         var snapState = useState(null);
         var snap = snapState[0];
         var setSnap = snapState[1];
+        // 宿主没重启时快照里不会有 registry（v2 才有）：新入口要降级成「重启后可用」，而不是报错
+        var hostStale = Boolean(snap && snap.ok && snap.registry === undefined);
         var errState = useState('');
         var error = errState[0];
         var setError = errState[1];
@@ -2257,7 +2259,7 @@
             .then(function (json) {
               if (activeIdRef.current !== startKey) return json;
               if (!json || !json.ok) {
-                setError((json && json.error) || t('actionFail'));
+                setError(hostHint((json && json.error) || t('actionFail'), '契约卡'));
                 return json;
               }
               var c = json.counts || {};
@@ -2585,7 +2587,7 @@
                 {
                   className: 'dsa-settings-btn',
                   variant: 'ghost',
-                  title: '产物中心：看图、表格与文档（只读）',
+                  title: hostStale ? '产物中心需要重启 DSH（宿主还是旧代码）' : '产物中心：看图、表格与文档（只读）',
                   onClick: function () { setDialog({ kind: 'artifacts' }); }
                 },
                 h('span', { className: 'dsa-ico', 'aria-hidden': 'true' }, '▦'),
@@ -3520,6 +3522,8 @@
         // 契约卡：项目级信息（数据集/模型/产物/结论），与当前选中阶段无关，所以放在 KPI 下面
         var registryCard = h(RegistryCard, {
           registry: snap && snap.registry,
+          // 旧宿主没有 registry 这个键：先说清楚要重启，别让卡片静默消失
+          stale: Boolean(snap && snap.ok && snap.registry === undefined),
           busy: regBusy,
           onOpen: function () { setDialog({ kind: 'artifacts' }); },
           onAdopt: function () { doAdopt(false); }
@@ -3992,7 +3996,10 @@
             });
           }
           if (d.kind === 'artifacts') {
-            return h(ArtifactsDialog, { onCancel: function () { setDialog(null); } });
+            return h(ArtifactsDialog, {
+              stale: Boolean(snap && snap.ok && snap.registry === undefined),
+              onCancel: function () { setDialog(null); }
+            });
           }
           if (d.kind === 'adjudicate') {
             return h(AdjudicateDialog, {
@@ -4437,6 +4444,18 @@
         { id: 'all', label: '全部', test: function () { return true; } }
       ];
 
+      /**
+       * 宿主没重启时，新接口会回「未知接口 …」或裸 404：这时候要把话说清楚，
+       * 而不是把后端那句「未知接口」原样甩给用户（client 能热更新、宿主不能）。
+       */
+      function hostHint(message, feature) {
+        var text = String((message && message.message) || message || '').trim();
+        if (/未知接口|\bHTTP 404\b|not found/i.test(text)) {
+          return feature + '需要新版宿主：面板已更新，但 DSH 主进程还在跑旧代码。重启 DSH 后再打开这里（client 的改动不用重启，宿主的必须重）。';
+        }
+        return text || (feature + '读取失败');
+      }
+
       function artifactRawUrl(rel, download) {
         return API + '/artifacts/raw?path=' + encodeURIComponent(rel) + (download ? '&download=1' : '');
       }
@@ -4469,7 +4488,7 @@
           return request('GET', '/artifacts/tree').then(function (json) {
             if (!aliveRef.current) return;
             if (!json || !json.ok) {
-              setTree({ loading: false, ok: false, entries: [], error: (json && json.error) || '读不到产物目录', totalFiles: 0, totalBytes: 0, truncated: false });
+              setTree({ loading: false, ok: false, entries: [], error: hostHint((json && json.error) || '读不到产物目录', '产物中心'), totalFiles: 0, totalBytes: 0, truncated: false });
               return;
             }
             setTree({
@@ -4483,16 +4502,15 @@
             });
           }).catch(function (error) {
             if (!aliveRef.current) return;
-            var message = String((error && error.message) || error);
-            // 宿主没重启时这条路由还不存在：说清楚，别只甩一个 HTTP 404
-            if (/HTTP 404|not found/i.test(message)) {
-              message = '宿主还没有提供产物中心接口（client 已更新、宿主没重启）。重启 DSH 后再打开这里。';
-            }
-            setTree({ loading: false, ok: false, entries: [], error: message, totalFiles: 0, totalBytes: 0, truncated: false });
+            setTree({ loading: false, ok: false, entries: [], error: hostHint(error, '产物中心'), totalFiles: 0, totalBytes: 0, truncated: false });
           });
         };
 
-        useEffect(function () { void load(); }, []);
+        useEffect(function () {
+          // 旧宿主没有这条路由：直接给结论，不发一个注定 404 的请求
+          if (props.stale) return;
+          void load();
+        }, []);
 
         var open = function (rel) {
           setSel(rel);
@@ -4500,7 +4518,7 @@
           request('GET', '/artifacts/file?path=' + encodeURIComponent(rel) + '&limit=200').then(function (json) {
             if (!aliveRef.current) return;
             if (!json || !json.ok) {
-              setDetail({ loading: false, ok: false, error: (json && json.error) || '读不出来', data: null });
+              setDetail({ loading: false, ok: false, error: hostHint((json && json.error) || '读不出来', '产物中心'), data: null });
               return;
             }
             setDetail({ loading: false, ok: true, error: '', data: json });
@@ -4514,10 +4532,31 @@
         var activeTab = ARTIFACT_TABS.filter(function (item) { return item.id === tab; })[0] || ARTIFACT_TABS[0];
         var visible = files.filter(activeTab.test).sort(function (a, b) { return String(a.rel).localeCompare(String(b.rel)); });
 
-        var body = tree.loading
+        var body = props.stale
+          ? // 直接由 props 判，不走 state：不会先闪一下「正在读」再变成错误
+            h('div', { className: 'dsa-error', role: 'alert' }, hostHint('未知接口', '产物中心'))
+          : tree.loading
           ? h('div', { className: 'dsa-hint' }, '正在读 output/…')
           : !tree.ok
-            ? h('div', { className: 'dsa-error', role: 'alert' }, tree.error || '读不到产物目录')
+            ? h(
+                'div',
+                { className: 'dsa-error', role: 'alert' },
+                h('div', null, tree.error || '读不到产物目录'),
+                h(
+                  'div',
+                  { style: { marginTop: '8px' } },
+                  h(
+                    Btn,
+                    {
+                      onClick: function () {
+                        setTree({ loading: true, ok: false, entries: [], error: '', totalFiles: 0, totalBytes: 0, truncated: false });
+                        void load();
+                      }
+                    },
+                    '重试'
+                  )
+                )
+              )
             : !files.length
               ? h('div', { className: 'dsa-hint' }, 'output/ 里还没有产物：先把阶段跑起来。')
               : h(
@@ -4665,7 +4704,16 @@
 
       function RegistryCard(props) {
         var reg = props.registry;
-        if (!reg) return null;
+        if (!reg) {
+          // 旧宿主 / 还没重启：不留空白，说清楚这块是什么、怎么出现
+          return props.stale
+            ? h(
+                'div',
+                { className: 'dsa-card dsa-pad' },
+                h('div', { className: 'dsa-hint' }, '契约卡需要新版宿主：面板已经是新的，DSH 主进程还在跑旧代码。重启 DSH 后这里会显示数据集 / 模型 / 产物 / 结论的登记情况。')
+              )
+            : null;
+        }
         var counts = reg.counts || {};
         var issues = (reg.issues || []).filter(function (item) { return item && item.message; }).slice(0, 3);
         var pill = function (label, value, tone) {
