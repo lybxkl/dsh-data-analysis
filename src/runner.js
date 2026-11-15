@@ -114,7 +114,7 @@ export class Runner {
    * steps: [{ script, argv, continueOnError }]
    * argv 已经展开成绝对脚本路径 + 参数。
    */
-  start({ project, stageId, steps, projectLease = null }) {
+  start({ project, stageId, steps, projectLease = null, workflow=null, actionId='' }) {
     const config = this.getConfig();
     const projectRoot = project.path;
     const python = config.pythonPath || DEFAULT_PYTHON;
@@ -124,7 +124,7 @@ export class Runner {
     const id = runId();
     let environment=null;
     if(projectLease){try{const skill=resolveSkillRoot(config.skillRoot);if(skill.ok)environment=currentEnvironment(skill.packageDir,python);}catch{}}
-    const gateProduction = projectLease ? productionReceipt(projectRoot, stageId, id, list,{environment}) : null;
+    const gateProduction = projectLease ? productionReceipt(projectRoot, stageId, id, list,{environment,workflow}) : null;
     const logDir = path.join(projectRoot, 'runs');
     fs.mkdirSync(logDir, { recursive: true });
     const logFile = path.join(logDir, `${id}.log`);
@@ -134,6 +134,8 @@ export class Runner {
     const run = {
       id,
       stageId,
+      actionId,
+      workflow:workflow?{id:workflow.id,version:workflow.version,sha256:workflow.sha256}:null,
       script: list[0].script || '',
       projectId: project.id,
       projectRoot,

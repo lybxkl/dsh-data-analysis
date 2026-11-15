@@ -44,33 +44,6 @@ function describeManual(stage) {
     .join('\n');
 }
 
-const MANUAL_BRIEF = {
-  scope: [
-    '写 docs/scope.md，至少包含：研究问题、分析单位、时间窗、纳入/排除标准、关键变量的操作化口径、已知局限。',
-    '这一步不产生数字；不要为了「看起来完整」编造样本量或文献引用。',
-    '写完后在工作台点「刷新」，scope 闸门会检查文件是否存在且非空。',
-  ],
-  dataset: [
-    '从 output/coding/dataset.csv（逐份抽取结果）构建 output/dataset/analysis.csv：一行一个分析单位。',
-    '必须保留 in_analysis 标记（0/1）并说明排除理由；派生变量（分组、对数等）要写进 docs/codebook.md。',
-    '不要改动 evidence.jsonl 里的原文证据；分析表只做可追溯的转换。',
-    '构建脚本放 scripts/ 并在 project.json 里登记（可选），但产物必须是 output/dataset/analysis.csv——data/ 是语料根，宽表放进去会被下一次审计当成一份资料。',
-  ],
-  manuscript: [
-    '先调 data_analysis_manuscript action=scaffold 生成骨架（按图表清单的 section 分组，figure 块的 png/caption 照抄清单，正文留「待补」；png 缺失或 status 不是 ok 的图会被跳过）。',
-    '再按 action=brief 的改稿说明把「待补」写成正文，只改 manuscript.json；不要凭空手写一份 spec 绕过骨架。',
-    '正文里的每个数字都要能落到 output/models/*.csv 或 output/dataset/analysis.csv 的原值；图注里的 N 不要重复加。',
-    '改完必须重跑第 8 阶段（data_analysis_run_stage(stageId="manuscript")）生成 output/manuscript.docx——闸门只认这个 docx；再跑第 9 阶段终检。',
-    '不要手改 docx 绕过统计结果；数字对不上就回到 stats/figures 修产物。',
-  ],
-  recheck: [
-    '先调 data_analysis_recheck（action=status）看 12 项机器复算，再取 action=evidence 的证据包。',
-    '逐条写问题：id（RC-001…）、severity、where（文件:行 或 阶段）、claim、evidence、fix_kind；用 data_analysis_issue 落库。',
-    '修数据只能改 scripts/ 或 data/ 后重跑受影响阶段；不要手改 output/ 产物让闸门变绿。',
-    '最后交 12 项覆盖表（R1–R12：checked / unchecked+理由）与 report.md；人逐条裁定后闭环。',
-  ],
-};
-
 export function buildTaskCard({ project, projectRoot, stage, stages, commands = [], sessionId = '', scriptRegistered = false }) {
   if (!stage) return { ok: false, error: '未知阶段' };
   const name = project?.name || '';
@@ -90,7 +63,7 @@ export function buildTaskCard({ project, projectRoot, stage, stages, commands = 
   lines.push('');
 
   lines.push('当前状态（工作台按产物自动判定）：');
-  const previous = (stages || []).filter((item) => (item.index || 0) < index);
+  const previous = (stages || []).filter((item) => (stage.dependsOn||[]).includes(item.id));
   if (previous.length) {
     for (const item of previous) {
       lines.push(`- ${item.index}. ${item.name}：${statusLine(item)}`);
@@ -98,7 +71,7 @@ export function buildTaskCard({ project, projectRoot, stage, stages, commands = 
       if (fails) lines.push(fails);
     }
   } else {
-    lines.push('- 这是第一阶段，前面没有依赖。');
+    lines.push('- 当前阶段没有前置依赖。');
   }
   lines.push(`- 本阶段：${statusLine(stage)}`);
   const currentFails = describeFailures(stage);
@@ -143,7 +116,7 @@ export function buildTaskCard({ project, projectRoot, stage, stages, commands = 
     }
     lines.push(`${commands.length + 1}. 读产物与报告；闸门不过就按报告修输入/参数后重跑，不要手改结果文件让闸门变绿。`);
   } else {
-    const brief = MANUAL_BRIEF[stage.id];
+    const brief = stage.manualInstructions;
     if (brief) brief.forEach((item, i) => lines.push(`${i + 1}. ${item}`));
     else lines.push('1. 这一步没有登记脚本，由你按阶段目标完成，产物写进项目目录。');
   }
@@ -152,11 +125,7 @@ export function buildTaskCard({ project, projectRoot, stage, stages, commands = 
   lines.push('约束：');
   lines.push('- 技能包（SKILL.md、scripts/、profiles/）只读：不要修改、不要复制进项目。');
   lines.push('- 不要手改 CSV/JSON/docx 让闸门通过；也不要改脚本输出标签去迎合闸门——闸门只能被真实产物满足。');
-  lines.push('- 每个数字都要能溯源：正文数字要么来自 analysis.csv（output/dataset/）的统计，要么在 output/tables/*.csv 有同值单元格。');
-  lines.push('- 缺少输入时停下来在回答里说明缺什么，不要伪造数据、N、p 值或文献。');
-  lines.push('- 图表按 600 dpi 生成；图注写 N 与口径；配色用可灰度区分的色环。');
-  lines.push('- 中文核对走 UTF-8 文件（必要时设 PYTHONIOENCODING=utf-8）；pwsh 直接打印可能乱码，不要把乱码当成数据错误。');
-  lines.push('- 命令以项目登记为准；若脚本自己改写 sys.argv，命令行参数可能被忽略，以脚本实际行为为准。');
+  for(const constraint of stage.taskConstraints||[])lines.push('- '+constraint);
   lines.push('');
 
   if (artifacts.length) {

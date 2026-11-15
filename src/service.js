@@ -1,3 +1,4 @@
+import {workflowFor,defaultWorkflow,workflowArguments,rerunStages,workflowFileExists} from './workflow.js';
 /**
  * 工作台服务层：面板、工具、路由共用这一份逻辑。
  *
@@ -8,7 +9,7 @@
  */
 
 import fs from 'node:fs';
-import { reportBlockers, gateAdmission, readGatePolicy, resolveGateResource,safePath } from './gate-report.js';
+import { reportBlockers, gateAdmission, readGatePolicy, resolveGateResource,safePath,strictJson } from './gate-report.js';
 import { inspectAfterRun, invalidateGateReports } from './gate-inspection.js';
 import { acquireProjectLease } from './gate-lease.js';
 import { gateCommand } from './gate-control.js';
@@ -22,10 +23,7 @@ import {
   DEFAULT_CONFIG,
   DEFAULT_PYTHON,
   SKILL_PACKAGE,
-  STAGE_DEFS,
-  STAGE_BY_ID,
   normalizeConfig,
-  resolveArgs,
 } from './defaults.js';
 import { evaluateProject, summarizeStages, gateTotals, contractMode } from './gates.js';
 import { createProject, projectId, readProject, writeProject, runsDir } from './projects.js';
@@ -137,7 +135,8 @@ function csvHasRows(file) {
  * 把错误挂到 artifacts.registryError，闸门据此判「判不了」。
  */
 function scanAll(projectRoot) {
-  const artifacts = scanArtifacts(projectRoot);
+  // skill 模式由报告校验资料集合；旧 corpusCurrent 只服务 legacy 判据，避免再扫描一遍挂载树。
+  const artifacts = scanArtifacts(projectRoot, { includeCorpusCurrent: readGatePolicy(projectRoot)?.mode !== 'skill' });
   try {
     artifacts.registry = readRegistry(projectRoot);
   } catch (error) {
@@ -197,7 +196,6 @@ export class Workbench {
     this.preflightState = { value: null, at: 0, promise: null };
     // 材料库的外部依赖：识图执行器（只被工具显式调用，不做自动流水线）+ 派生缓存目录
     this.materials = materials || null;
-    this.summaryCache = null;
     this.gateLeases = new Map();
     this.gateChecks = new Map();
   }
@@ -876,7 +874,7 @@ export class Workbench {
       sessionId: ledger?.sessionId || '',
       // 卡片文案要区分「工作台能替你跑」和「只能在工作台外跑」：
       // 上一轮会话被卡片里的「在工作台外直接运行」误导，绕过台账跑脚本，产物来源无法追溯。
-      scriptRegistered: Boolean(active.project?.stages?.[stage.id]?.script),
+      scriptRegistered: Boolean(command.ok && command.steps.length),
     });
     if (!card.ok) return card;
     return { ok: true, stageId: stage.id, stageName: stage.name, text: card.text, commands: commands.map((item) => item.display) };
@@ -1152,7 +1150,7 @@ export class Workbench {
 
   /** 重写留痕文件：provenance.csv / mounts.json / selection.csv。 */
   refreshMaterials(projectRoot) {
-    this.invalidateSummary();
+
     const read = readProject(projectRoot);
     if (!read.ok) return { ok: false, error: read.error };
     const materials = readMaterials(read.project);
@@ -1544,7 +1542,19 @@ export class Workbench {
   snapshot() {
     // 整段计算包进「读盘去重」作用域：同一批产物在 scanArtifacts 与闸门里被反复读，
     // 一次快照只解析一遍。结果仍是现读的——作用域一结束就丢，判定不缓存。
-    return withReadCache(() => this.buildSnapshot());
+    return withReadCache(() => {
+      try{return this.buildSnapshot();}catch(error){return this.unavailableWorkflowState(error);}
+    });
+  }
+
+  unavailableWorkflowState(error){
+    const active=this.active(),config=this.getConfig();
+    return {config:this.publicConfig(config),skill:this.publicSkill(this.skill()),python:config.pythonPath,projects:this.projects(),
+      active:active.ok?{id:active.id,path:active.path,name:active.project?.name||active.path,skillPin:active.project?.skill}:null,
+      workflow:{ok:false,error:String(error.message||error)},error:String(error.message||error),preflight:this.preflightSummary(),
+      stages:[],summary:{done:0,blocked:0,review:0,todo:0,running:0},totals:{pass:0,fail:0,unjudged:0,na:0},
+      admission:{allowed:false,blockingInstances:[{gateId:'platform.workflow',detail:String(error.message||error)}]},deliveryReady:false,deliveryBlockers:[String(error.message||error)],
+      artifacts:null,registry:null,runs:[],adjudications:{},activeRuns:{},gateChecking:null,materials:null,focus:this.focusSnapshot()};
   }
 
   buildSnapshot() {
@@ -1563,7 +1573,7 @@ export class Workbench {
         error: active.detached ? '' : active.error,
         preflight: this.preflightSummary(),
         stages: [],
-        summary: { done: 0, blocked: 0, review: 0, todo: 9, running: 0 },
+        summary: { done: 0, blocked: 0, review: 0, todo: 0, running: 0 },
         totals: { pass: 0, fail: 0, unjudged: 0 },
         artifacts: null,
         focus: this.focusSnapshot(),
@@ -1574,21 +1584,7 @@ export class Workbench {
       };
     }
 
-    const artifacts = scanAll(active.path);
-    const adjudications = this.adjudicationsFor(active.id);
-    const activeRuns = this.runner.activeFor(active.id);
-    const stages = evaluateProject({
-      pythonPath: this.getConfig().pythonPath,
-      projectRoot: active.path,
-      project: active.project,
-      artifacts,
-      adjudications,
-      activeRuns,
-      runs: this.recentRuns(200, active.id),
-      sources: listSources(this.store),
-    });
-    const summary = summarizeStages(stages);
-    const totals = gateTotals(stages);
+    const { workflow, artifacts, adjudications, activeRuns, stages, summary, totals } = this.evaluateActive(active);
     const deliveryBlockers = reportBlockers(stages, active.path, 'delivery-ready');
 
     return {
@@ -1607,6 +1603,7 @@ export class Workbench {
         sessionId: this.ledgerProject(active.id)?.sessionId || '',
         skillDrift: Boolean(skill.ok && active.project.skill?.sha256 && active.project.skill.sha256 !== skill.sha256),
       },
+      workflow:{ok:true,id:workflow.id,version:workflow.version,sha256:workflow.sha256,draftTasks:workflow.draftTasks,actions:workflow.actions.map(({id,stage,label})=>({id,stage,label}))},
       error: '',
       preflight: this.preflightSummary(),
       stages,
@@ -1629,39 +1626,63 @@ export class Workbench {
     };
   }
 
-  invalidateSummary() {
-    this.summaryCache = null;
+  // 每次请求现读现判；withReadCache 只在本次计算内复用相同文件的读取。
+  evaluateActive(active) {
+    const activeRuns = this.runner.activeFor(active.id);
+    const workflow=this.workflow(active);
+    const artifacts = scanAll(active.path);
+    const adjudications = this.adjudicationsFor(active.id);
+    const stages = evaluateProject({
+      pythonPath: this.getConfig().pythonPath,
+      projectRoot: active.path,
+      project: active.project,
+      artifacts,
+      adjudications,
+      activeRuns,
+      runs: this.recentRuns(200, active.id),
+      sources: listSources(this.store),
+    });
+    for(const stage of stages){
+      const definition=workflow.stages.find(item=>item.id===stage.id);
+      const override=active.project.stages?.[stage.id]||{};
+      stage.script=override.script===undefined?definition?.script:override.script;
+      stage.args=Array.isArray(override.args)?override.args:definition?.args||[];
+      stage.steps=Array.isArray(override.steps)?override.steps:definition?.steps||[];
+      stage.ui={...(definition?.ui||{})};
+      stage.missingInputs=(stage.ui.requiredFiles||[]).filter(relative=>!workflowFileExists(active.path,relative));
+      stage.manualInstructions=definition?.manualInstructions||[];
+      stage.taskConstraints=workflow.taskConstraints;
+      stage.artifacts=definition?.artifacts||stage.artifacts||[];
+      stage.outputFiles=stage.artifacts.map(relative=>{try{const file=safePath(active.path,relative),stat=fs.statSync(file);return {path:relative,exists:stat.isFile(),bytes:stat.size};}catch{return {path:relative,exists:false,bytes:0};}});
+      if(stage.ui.legacySkipWhenMissing&&readGatePolicy(active.path)?.mode!=='skill')stage.hidden=!fs.existsSync(path.join(active.path,stage.ui.legacySkipWhenMissing));
+    }
+    const entry = {
+      id: active.id,
+      workflow,
+      artifacts,
+      adjudications,
+      activeRuns,
+      stages,
+      summary: summarizeStages(stages),
+      totals: gateTotals(stages),
+    };
+    return entry;
   }
 
   /** 原生对话里的徽章每 8–10 秒轮询一次：只回摘要，不搬图表清单与产物明细。 */
   summary() {
     // 与 snapshot 同一套读盘去重：摘要是「何时刷新」的判定依据，必须现读，但不能读两遍
-    return withReadCache(() => this.buildSummary());
+    return withReadCache(() => {
+      try{return this.buildSummary();}catch(error){const state=this.unavailableWorkflowState(error);return {ok:false,error:state.error,active:state.active,workflow:state.workflow,summary:state.summary,totals:state.totals,next:null,running:false};}
+    });
   }
 
   buildSummary() {
     const active = this.active();
     if (!active.ok) return { ok: true, active: null, summary: null, totals: null, next: null, running: false };
     const running = Object.keys(this.runner.activeFor(active.id)).length > 0;
-    const now = Date.now();
-    const cache = this.summaryCache;
-    // 每条不属于该项目的对话也在轮询 /summary，而这里要全量扫产物：
-    // 2 秒内直接复用上一次结果（跑着的时候不复用，进度要动）
-    if (!running && cache && cache.id === active.id && now - cache.at < 2000) {
-      return JSON.parse(JSON.stringify(cache.value));
-    }
-    const artifacts = scanAll(active.path);
-    const stages = evaluateProject({
-      pythonPath: this.getConfig().pythonPath,
-      projectRoot: active.path,
-      project: active.project,
-      artifacts,
-      adjudications: this.adjudicationsFor(active.id),
-      activeRuns: this.runner.activeFor(active.id),
-      runs: this.recentRuns(200, active.id),
-      sources: listSources(this.store),
-    });
-    const next = stages.find((item) => !['done','na'].includes(item.status)) || null;
+    const { workflow, stages, summary, totals } = this.evaluateActive(active);
+    const next = stages.find((item) => !item.hidden&&!['done','na'].includes(item.status)) || null;
     const value = {
       ok: true,
       active: {
@@ -1676,15 +1697,25 @@ export class Workbench {
         },
         sessionId: this.ledgerProject(active.id)?.sessionId || '',
       },
-      summary: summarizeStages(stages),
-      totals: gateTotals(stages),
+      workflow:{ok:true,id:workflow.id,version:workflow.version,sha256:workflow.sha256},
+      summary,
+      totals,
       contract: contractMode(active.project),
       next: next
-        ? { id: next.id, index: next.index, name: next.name, status: next.status, script: next.script || null, args: next.args || [] }
+        ? {
+            id: next.id,
+            index: next.index,
+            name: next.name,
+            // 简称也一起下发：输入行那颗芯片只放得下简称，但阶段名只有 skill 工作流一份，
+            // 不能让前端自己截字或另抄一张对照表
+            short: next.short || next.name,
+            status: next.status,
+            script: next.script || null,
+            args: next.args || [],
+          }
         : null,
       running,
     };
-    this.summaryCache = { id: active.id, at: now, value };
     return value;
   }
 
@@ -1846,7 +1877,7 @@ export class Workbench {
     else if (target === 'sweep') {
       result = { ok: false, error: 'sweep 由 data_analysis_sweep 生成，不接受手工登记' };
     } else result = upsert(active.path, target, parsed);
-    this.invalidateSummary();
+
     clearCorpusScan();
     if (!result.ok) {
       return {
@@ -1873,7 +1904,7 @@ export class Workbench {
     const target = map[String(kind || '').trim()];
     if (!target) return { ok: false, error: 'kind 只能是 dataset / model / artifact / claim' };
     const result = removeRow(active.path, target, String(id || '').trim());
-    this.invalidateSummary();
+
     if (!result.ok) return result;
     const registry = readRegistry(active.path);
     return { ok: true, file: result.file, summary: summarizeRegistry(registry, active.path), registry: this.publicRegistry(registry, active.path) };
@@ -1887,7 +1918,7 @@ export class Workbench {
     const target = map[String(kind || '').trim()];
     if (!target) return { ok: false, error: 'kind 只能是 dataset / model / artifact' };
     const result = confirmRow(active.path, target, String(id || '').trim());
-    this.invalidateSummary();
+
     if (!result.ok) return result;
     const registry = readRegistry(active.path);
     return { ok: true, file: result.file, summary: summarizeRegistry(registry, active.path), registry: this.publicRegistry(registry, active.path) };
@@ -1897,7 +1928,7 @@ export class Workbench {
     const active = this.active();
     if (!active.ok) return { ok: false, error: active.error };
     const result = adoptLegacy(active.path, { overwrite: overwrite === true });
-    this.invalidateSummary();
+
     clearCorpusScan();
     if (!result.ok) return result;
     const registry = readRegistry(active.path);
@@ -2094,7 +2125,7 @@ export class Workbench {
     } catch (error) {
       parseError = String(error?.message || error).slice(0, 160);
     }
-    this.invalidateSummary();
+
     clearCorpusScan();
     const tail = `${result.stdout || ''}\n${result.stderr || ''}`.trim().split(/\r?\n/).slice(-12).join('\n');
     if (!result.ok || !payload) {
@@ -2125,118 +2156,35 @@ export class Workbench {
     return this.runAdapter('figure_check');
   }
 
-  /**
-   * 直接跑 skill 包里的脚本（不经过阶段登记表）。
-   * 用途：逐格复核的 final、研究总闸门、判断台账、复核包——它们要按需单独触发，
-   * 不适合塞进固定阶段（final 必须等人把 review_template 核完才能跑）。
-   */
-  async runSkillScript({ script, args = [], outFile = '', timeoutMs = 1800000 } = {}) {
-    const active = this.active();
-    if (!active.ok) return { ok: false, error: active.error };
-    const skill = this.skill();
-    const found = resolveStageScript({ projectRoot: active.path, skill, script });
-    if (!found.ok) {
-      return { ok: false, error: `找不到技能脚本 ${script}（${found.code}）${skill?.ok ? '' : '：技能包还没配置好'}` };
-    }
-    const python = this.getConfig().pythonPath || DEFAULT_PYTHON;
-    const result = await runProcess(python, [found.abs, ...args], { timeoutMs, cwd: active.path });
-    const log = [result.stdout, result.stderr].filter(Boolean).join('\n').trim();
-    let payload = null;
-    if (outFile) {
-      try {
-        payload = JSON.parse(fs.readFileSync(path.join(active.path, outFile), 'utf8').replace(/^\uFEFF/, ''));
-      } catch {
-        payload = null;
-      }
-    }
-    return {
-      ok: result.code === 0,
-      code: result.code,
-      log,
-      result: payload,
-      outFile,
-      script,
-      argv: [found.abs, ...args],
-    };
+  /** Old tool names are aliases; scripts, arguments and output locations come from the spec. */
+  runDatasetVerification({stage='prepare'}={}){return this.runBoundWorkflowAction('dataset-verification',stage);}
+  runResearchGate(){return this.runBoundWorkflowAction('research-gate');}
+  runDecisionCheck(){return this.runBoundWorkflowAction('decision-check');}
+  runReviewPack(){return this.runBoundWorkflowAction('review-pack');}
+
+  runBoundWorkflowAction(tool,variant=''){
+    const action=this.workflow().actions.find(action=>action.tool===tool&&(action.variant||'')===variant);
+    return action?this.runWorkflowAction(action.id):Promise.resolve({ok:false,error:'当前技能没有声明此工具动作'});
   }
 
-  /** 逐格复核：prepare 生成快照与待核模板；final 校验复核回执与版本指纹。 */
-  runDatasetVerification({ stage = 'prepare' } = {}) {
-    const args = [
-      '--registry', 'research_registry.json',
-      '--root', '.',
-      '--out', 'output/data_verification',
-      '--stage', stage === 'final' ? 'final' : 'prepare',
-    ];
-    if (stage === 'final') args.push('--snapshot', 'output/data_verification/verification_snapshot.json');
-    return this.runSkillScript({
-      script: 'scripts/verify_dataset.py',
-      args,
-      outFile: 'output/data_verification/dataset_verification.json',
+  async runWorkflowAction(actionId){
+    const active=this.active();
+    if(!active.ok)return {ok:false,error:active.error};
+    const action=this.workflow(active).actions.find(action=>action.id===actionId);
+    if(!action)return {ok:false,error:'当前技能没有声明此工作流动作'};
+    const started=this.runStage(action.stage,{actionId});
+    if(!started.ok)return started;
+    const deadline=Date.now()+1800000;let timedOut=false;
+    await new Promise(resolve=>{
+      const timer=setInterval(()=>{
+        if(Date.now()>deadline&&!timedOut){timedOut=true;this.runInProject(active.id,()=>this.cancelStage(action.stage));}
+        if(!this.runner.activeFor(active.id)[action.stage]&&!this.gateChecks.has(active.id)){clearInterval(timer);resolve();}
+      },100);
     });
-  }
-
-  /** 研究总闸门：来源覆盖 / 模型终态 / 补数回查 / 运行回执 / 复核版本。 */
-  runResearchGate() {
-    return this.runSkillScript({
-      script: 'scripts/research_gate.py',
-      args: [
-        '--registry', 'research_registry.json',
-        '--root', '.',
-        '--verification', 'output/data_verification/dataset_verification.json',
-        '--out', 'output/research_gate.json',
-      ],
-      outFile: 'output/research_gate.json',
-    });
-  }
-
-  /** 判断台账校验：重复 target、缺证据、needs_human、extract 取值不在候选里。 */
-  runDecisionCheck() {
-    const active = this.active();
-    if (!active.ok) return { ok: false, error: active.error };
-    const args = [
-      // 判断台账的 target/evidence 是相对语料根（--root data）写的，和编码/审计同一套路径。
-      '--root', 'data',
-      '--decisions', 'decisions.jsonl',
-      '--out', 'output/qa/decision_issues.csv',
-    ];
-    if (fs.existsSync(path.join(active.path, 'output/coding/extraction_review.csv'))) {
-      args.push('--review', 'output/coding/extraction_review.csv');
-    }
-    return this.runSkillScript({ script: 'scripts/check_decisions.py', args });
-  }
-
-  /** 复核包：把图、表、模型、未关闭问题、缺失项排成一页给人看。 */
-  runReviewPack() {
-    const active = this.active();
-    if (!active.ok) return { ok: false, error: active.error };
-    const has = (rel) => fs.existsSync(path.join(active.path, rel));
-    // review_pack 的 --figures/--qa/--verify 都是文件：传目录会被 isfile 判定
-    // 静默跳过，复核包里就少了图表/终检/数字三节。
-    const manifest = ['output/chart_pack/chart_manifest.csv', 'output/figures/paper_figures_manifest.csv']
-      .filter((rel) => has(rel))
-      .sort((a, b) => (fs.statSync(path.join(active.path, b)).mtimeMs || 0) - (fs.statSync(path.join(active.path, a)).mtimeMs || 0))[0]
-      || 'output/chart_pack/chart_manifest.csv';
-    // 宽表规范位置是 output/dataset/analysis.csv；旧项目仍在 data/ 时按同一套回退，
-    // 否则复核包会拿一份不存在的表去算描述统计。
-    const dataRel = has('output/dataset/analysis.csv')
-      ? 'output/dataset/analysis.csv'
-      : has('data/analysis.csv')
-        ? 'data/analysis.csv'
-        : 'output/dataset/analysis.csv';
-    const args = [
-      '--data', dataRel,
-      '--stats', 'output/models',
-      '--figures', manifest,
-      '--qa', 'output/qa/qa_report.json',
-      '--verify', 'output/verify/number_issues.csv',
-      '--sample-flow', has('output/coding/sample_flow.csv') ? 'output/coding/sample_flow.csv' : 'output/audit/sample_flow.csv',
-      '--out', 'output/review/review_pack.md',
-    ];
-    // 可选材料：缺了就不传，别让「还没做这一步」变成 review_pack 的参数错误
-    if (has('decisions.jsonl')) args.push('--decisions', 'decisions.jsonl');
-    if (has('output/research_gate.json')) args.push('--research-gate', 'output/research_gate.json');
-    return this.runSkillScript({ script: 'scripts/review_pack.py', args });
+    const run=this.recentRuns(200,active.id).find(run=>run.id===started.run.id);
+    let result=null;
+    if(action.outFile){try{result=strictJson(fs.readFileSync(safePath(active.path,action.outFile),'utf8'));}catch{}}
+    return {ok:!timedOut&&run?.status==='ok'&&run?.gateCheck?.status!=='failed',code:run?.exitCode??null,runId:started.run.id,actionId,result,outFile:action.outFile||'',log:this.runner.logTail(started.run.id,200).join('\n'),...(timedOut?{error:'工作流动作超时，已取消'}:{})};
   }
 
   recentRuns(limit, forProjectId) {
@@ -2248,6 +2196,8 @@ export class Workbench {
       .map((run) => ({
         id: run.id,
         stageId: run.stageId,
+        actionId:run.actionId||'',
+        workflow:run.workflow||null,
         projectId: run.projectId,
         status: run.status,
         startedAt: run.startedAt,
@@ -2262,8 +2212,12 @@ export class Workbench {
 
   /* ------------------------------- 运行 ------------------------------- */
 
+  workflow(active=this.active()) {
+    return workflowFor(active?.project||{},this.getConfig().skillRoot||'');
+  }
+
   stageById(stageId) {
-    return STAGE_BY_ID.get(stageId) || null;
+    return this.workflow().stages.find(stage=>stage.id===stageId)||null;
   }
 
   /**
@@ -2293,27 +2247,7 @@ export class Workbench {
     const exists = (rel) => Boolean(rel) && fs.existsSync(path.join(projectRoot, String(rel)));
     const skipped = [];
 
-    /**
-     * 图表清单可能来自 auto_chart_pack（output/chart_pack/chart_manifest.csv + figures/ 子目录），
-     * 也可能来自 paper_figures（output/figures/paper_figures_manifest.csv，图与清单同目录）。
-     * 写死 chart_pack 会让多面板项目在终检里查错文件，所以按「实际存在的清单」改写路径。
-     */
-    const manifestRel = ['output/chart_pack/chart_manifest.csv', 'output/figures/paper_figures_manifest.csv']
-      .map((rel) => { let mtimeMs = 0; try { mtimeMs = fs.statSync(path.join(projectRoot, rel)).mtimeMs; } catch {} return { rel, mtimeMs }; })
-      .filter((item) => exists(item.rel))
-      .sort((a, b) => b.mtimeMs - a.mtimeMs)
-      .map((item) => item.rel)[0] || 'output/chart_pack/chart_manifest.csv';
-    const figuresRel = manifestRel === 'output/chart_pack/chart_manifest.csv'
-      ? 'output/chart_pack/figures'
-      : path.posix.dirname(manifestRel.replace(/\\/g, '/'));
-    const mapArtifactPaths = (arg) => {
-      if (arg === 'output/chart_pack/chart_manifest.csv') return manifestRel;
-      if (arg === 'output/chart_pack/figures') return figuresRel;
-      // 注意：不要映射 `output/chart_pack` 目录本身——那是 auto_chart_pack 的
-      // --out 参数；一旦项目里存在 paper 清单，它会被改写成 output/figures，
-      // 把清单写错目录。review_pack 已改成吃清单文件，不需要这条。
-      return arg;
-    };
+    const workflow=workflowFor(project,skill.packageDir);
 
     const optionals = (resolved, item, extras) => {
       const has = (flag) => resolved.includes(flag) || extras.includes(flag);
@@ -2363,21 +2297,7 @@ export class Workbench {
       const args = Array.isArray(item.args) ? item.args : [];
       // 宽表规范位置是 output/dataset/analysis.csv；旧项目仍在 data/ 时自动回退，
       // 不让「升级插件」等于「旧项目立刻跑不动」。
-      const resolved = resolveArgs(args, { dataDir: 'data', outputDir: 'output', root: projectRoot }).map((arg) => {
-        const mapped = mapArtifactPaths(arg);
-        // 样本流程优先用编码阶段的漏斗（含复审排除/最终数据集），它才是模型 N
-        // 的对账口径；只跑了审计、还没编码时回退到审计漏斗。
-        if (mapped === 'output/coding/sample_flow.csv' && !fs.existsSync(path.join(projectRoot, mapped))) {
-          return 'output/audit/sample_flow.csv';
-        }
-        if (mapped !== 'output/dataset/analysis.csv') return mapped;
-        if (fs.existsSync(path.join(projectRoot, mapped))) return mapped;
-        // 注册表驱动的多数据集项目：没有 analysis.csv 时用登记的第一份数据集当主表，
-        // 而不是让 stats/figures 对着一个不存在的路径报错。
-        const registered = this.primaryDatasetFile(projectRoot);
-        if (registered) return registered;
-        return fs.existsSync(path.join(projectRoot, 'data', 'analysis.csv')) ? 'data/analysis.csv' : mapped;
-      });
+      const resolved = workflowArguments(workflow,projectRoot,args);
       // 可选参数：项目里确实有这个文件才带上。
       // 不传的后果很实在——统计不到模型、图表推断不出结局变量直接退出 2；
       // qa 不传 --min-fontsize 则字号永远「未核」。
@@ -2425,19 +2345,8 @@ export class Workbench {
     };
   }
 
-  /** 注册表里第一份「文件真实存在」的数据集：没有 analysis.csv 时用它当主表。 */
-  primaryDatasetFile(projectRoot) {
-    try {
-      const registry = readRegistry(projectRoot);
-      const row = (registry.datasets.rows || []).find((item) => item.file && fs.existsSync(registryPath(projectRoot, item.file)));
-      return row ? row.file : '';
-    } catch {
-      return '';
-    }
-  }
-
   /** 前置闸门：前面阶段不许留着 blocked / 未裁定的人工项。 */
-  blockers(projectRoot, project, stageId, adjudications) {
+  blockers(projectRoot, project, stageId, adjudications, execution={}) {
     const artifacts = scanAll(projectRoot);
     const stages = evaluateProject({
       pythonPath: this.getConfig().pythonPath,
@@ -2451,54 +2360,43 @@ export class Workbench {
     });
     const index = stages.findIndex((item) => item.id === stageId);
     const reasons = [];
-    const targetCheckpoint = ({ stats: 'analysis-ready', figures: 'analysis-ready', manuscript: 'figures-ready', qa: 'manuscript-ready', recheck: 'delivery-ready' })[stageId];
-    if (readGatePolicy(projectRoot)?.mode === 'skill') {
-      if(stageId==='audit')return stages.find(s=>s.id==='scope')?.gates.filter(g=>g.level==='error'&&!['pass','na'].includes(g.status)).map(g=>g.detail)||[];
-      const checkpoint=({coding:'data-ready',verify:'data-ready',stats:'analysis-ready',figures:'analysis-ready',manuscript:'figures-ready',qa:'manuscript-ready',recheck:'manuscript-ready'})[stageId];
-      if(!checkpoint)return [];
-      if(stageId==='coding'){
-        return reportBlockers(stages,projectRoot,checkpoint,{reportStages:['scope','audit']});
+    const definition=workflowFor(project).stages.find(stage=>stage.id===stageId);
+    if(!definition)return ['工作流中没有此阶段'];
+    const formal=readGatePolicy(projectRoot)?.mode==='skill';
+    for(const relative of execution.requiredFiles||definition.ui?.requiredFiles||[])if(!workflowFileExists(projectRoot,relative))reasons.push('缺少阶段输入：'+relative);
+    const rule=execution.admission||(formal?definition.admission:definition.legacyAdmission||{});
+    if(formal){
+      for(const id of execution.dependsOn||definition.dependsOn){
+        const dependency=stages.find(stage=>stage.id===id);
+        if(!dependency||!['done','na'].includes(dependency.status))reasons.push(`依赖阶段 ${dependency?.name||id} 尚未完成`);
       }
-      return reportBlockers(stages,projectRoot,checkpoint);
+    }else{
+      for(const previous of stages.slice(0,index)){
+        if(previous.status==='blocked')reasons.push(`${previous.name}：存在未通过的硬要求`);
+        for(const gate of previous.gates.filter(g=>g.manual&&g.status==='unjudged'))reasons.push(`${previous.name}：${gate.label} 待人工裁定`);
+      }
     }
-    if (targetCheckpoint) reasons.push(...reportBlockers(stages, projectRoot, targetCheckpoint));
-    for (let i = 0; i < index; i += 1) {
-      const stage = stages[i];
-      if (stage.status === 'blocked') {
-        const failed = stage.gates.filter((g) => g.status === 'fail' && g.level === 'error');
-        reasons.push(`${stage.name}：${failed.map((g) => g.label).join('、')} 未通过`);
-      }
-      const manual = stage.gates.filter((g) => g.manual && g.status === 'unjudged');
-      if (manual.length) reasons.push(`${stage.name}：${manual.map((g) => g.label).join('、')} 待人工裁定`);
-    }
-    // 研究层是硬前置：registry 一旦存在，统计前必须 final + verified + 0 error。
-    // 没有 registry 的老项目这一层 unjudged，保持「不拦」。
-    // 新项目（contract.mode=strict）没有 registry 就是拦：不能拿「兼容旧项目」当默认放行。
-    const research = artifacts.research;
-    const verifyIndex = stages.findIndex((item) => item.id === 'verify');
-    const strictContract = contractMode(project) === 'strict';
-    if (verifyIndex >= 0 && index > verifyIndex) {
-      if (!research?.registry?.exists) {
-        if (strictContract) reasons.push('严格契约（project.json contract.mode=strict）：缺 research_registry.json，先登记数据集、逐格复核到 final 再统计');
-      } else {
-        const verifyStage = stages[verifyIndex];
-        const finalGate = verifyStage.gates.find((item) => item.id === 'verification-final');
-        const freshGate = verifyStage.gates.find((item) => item.id === 'verification-fresh');
-        const blocker = [finalGate, freshGate].find((item) => item && item.status === 'fail')
-          || [finalGate, freshGate].find((item) => item && item.status === 'unjudged');
-        if (blocker) reasons.push(`全格复核：${blocker.detail || blocker.label}`);
-      }
+    if(rule.checkpoint)reasons.push(...reportBlockers(stages,projectRoot,rule.checkpoint,{reportStages:rule.reportStages||null}));
+    const available=!rule.whenFile||fs.existsSync(path.join(projectRoot,rule.whenFile));
+    if(!available&&rule.requiredInStrict&&contractMode(project)==='strict')reasons.push('缺少工作流要求的输入：'+rule.whenFile);
+    if(available)for(const id of rule.gates||[]){
+      const gate=stages.flatMap(stage=>stage.gates).find(g=>g.id===id);
+      if(!gate||!['pass','na'].includes(gate.status))reasons.push(gate?.detail||`尚未满足判据 ${id}`);
     }
     return reasons;
   }
 
-  runStage(stageId, { force = false } = {}) {
-    const stage = this.stageById(stageId);
+  runStage(stageId, { force = false, actionId = '' } = {}) {
+    let stage = this.stageById(stageId);
     if (!stage) return { ok: false, error: `未知阶段：${stageId}` };
     const active = this.active();
     if (!active.ok) return { ok: false, error: active.error };
-    this.invalidateSummary();
 
+
+    const workflow=this.workflow(active);
+    const operation=actionId?workflow.actions.find(action=>action.id===actionId&&action.stage===stageId):null;
+    if(actionId&&!operation)return {ok:false,error:'工作流中没有此阶段动作'};
+    if(operation)stage={...stage,steps:operation.steps,script:operation.steps[0].script,args:operation.steps[0].args||[]};
     const live = this.runner.activeFor(active.id);
     if (live[stageId]) {
       return { ok: false, error: `${stage.name} 已有运行在跑（${live[stageId].id}），先等它结束或取消` };
@@ -2506,7 +2404,7 @@ export class Workbench {
     // 同一项目里别的阶段还在跑：两个脚本会同时往 output/ 里写，闸门读到的是半成品。
     const busyStages = Object.keys(live).filter((id) => id !== stageId);
     if (busyStages.length) {
-      const names = busyStages.map((id) => (STAGE_BY_ID.get(id) || {}).name || id);
+      const names = busyStages.map((id) => (this.stageById(id) || {}).name || id);
       const error = `${names.join('、')} 正在运行，等它结束再跑这一步（确需并行请显式 force）`;
       if (!force || readGatePolicy(active.path)?.mode === 'skill') return { ok: false, error, blockers: [error] };
     }
@@ -2523,16 +2421,16 @@ export class Workbench {
     let run, command;
     try {
       if(lease)syncMaterialRoots(active.path,active.project,listSources(this.store),this.cacheDir());
-      command=this.commandFor(active.path,active.project,stage);
+      command=this.commandFor(active.path,operation?{...active.project,stages:{...active.project.stages,[stageId]:{}}}:active.project,stage);
       if(!command.ok)return {ok:false,error:command.error};
       if(!force||readGatePolicy(active.path)?.mode==='skill'){
-        const reasons=this.blockers(active.path,active.project,stageId,this.adjudicationsFor(active.id));
+        const reasons=this.blockers(active.path,active.project,stageId,this.adjudicationsFor(active.id),operation?{admission:operation.admission||{},dependsOn:[],requiredFiles:[]}:{});
         if(reasons.length)return {ok:false,error:`前置阶段未过：${reasons.join('；')}`,blockers:reasons};
       }
       invalidateGateReports(active.path);
       run = this.runner.start({
         project: { id: active.id, path: active.path },
-        stageId, steps: command.steps, projectLease: lease,
+        stageId, steps: command.steps, projectLease: lease, workflow, actionId,
       });
     } catch (error) {
       return {ok: false, error: String(error.message || error)};
@@ -2547,7 +2445,7 @@ export class Workbench {
   cancelStage(stageId) {
     const active = this.active();
     if (!active.ok) return { ok: false, error: active.error };
-    this.invalidateSummary();
+
     const checking=this.gateChecks.get(active.id);
     if(checking){checking.controller.abort();return {ok:true,cancelled:['gate-check']};}
     const cancelled = this.runner.cancelStage(active.id, stageId);
@@ -2564,9 +2462,9 @@ export class Workbench {
   /* ----------------------------- 手稿骨架 ----------------------------- */
 
   /**
-   * 第 8 阶段吃的是 manuscript.json，而这个文件只有人/模型能写。
+   * 文稿阶段吃的是 manuscript.json，而这个文件只有人/模型能写。
    * 这里把「机械的部分」拼好：图表清单里的每个 section、图块与题注、模型表。
-   * 正文段落留成「待补」占位——骨架不放任何自己编的数字，第 9 阶段报出来的
+   * 正文段落留成「待补」占位——骨架不放任何自己编的数字，质检阶段报出来的
    * 数字问题就都是真的，不会被骨架自己制造的假错淹掉。
    */
   manuscriptScaffold({ overwrite = false } = {}) {
@@ -2608,7 +2506,7 @@ export class Workbench {
     };
     const allRows = (figureSource.rows || []).filter((row) => row && row.png);
     // 画图失败的行（status=error*/skipped*）不会出现在骨架里；把它和「png 不存在」
-    // 分开数——两种原因要用户做的事完全不同（重跑第 7 阶段 vs 把图补齐）。
+    // 分开数——两种原因要用户做的事完全不同（重跑图表阶段 vs 把图补齐）。
     const badStatus = allRows.filter((row) => row.deliverable === false);
     const candidateRows = allRows.filter((row) => row.deliverable !== false);
     // png 缺了就别写进骨架：assemble_manuscript 遇到不存在的图会直接 SpecError，
@@ -2632,9 +2530,9 @@ export class Workbench {
     const cnLabel = (index) => (CN_NUM[index] ? CN_NUM[index] : String(index + 1));
     const warnings = [];
     if (!figureSource.file) {
-      warnings.push('还没找到图表清单（第 7 阶段的输出）——骨架里暂时没有图；先跑第 7 阶段，再点「重排骨架」。');
+      warnings.push('还没找到图表清单（图表阶段的输出）——骨架里暂时没有图；先跑图表阶段，再点「重排骨架」。');
     } else if (!figureRows.length) {
-      warnings.push('图表清单里没有可用的图（png 缺失或 status 不是 ok）——骨架里暂时没有图；先把第 7 阶段跑通再重排。');
+      warnings.push('图表清单里没有可用的图（png 缺失或 status 不是 ok）——骨架里暂时没有图；先把图表阶段跑通再重排。');
     }
     let headingIndex = 1;
     for (const group of groups) {
@@ -2692,7 +2590,7 @@ export class Workbench {
       }
       return { ok: false, error: `写不进 manuscript.json：${error.message}`, file: rel };
     }
-    this.invalidateSummary();
+
     this.onChange({ kind: 'manuscript-scaffold', file: rel });
     const spec = readManuscriptSpec(root);
     if (!groups.length && !tables.length) warnings.push('骨架里只有「研究设计」一节：没有图也没有可用的模型表，正文需要你自己补结构。');
@@ -2728,25 +2626,25 @@ export class Workbench {
       stateLine = '还没有 manuscript.json —— 先生成骨架';
     } else if (state.error) {
       stateLine = state.errorKind === 'structure'
-        ? `跑不了：${state.error} —— 先按上面的结构改好，再跑第 8 阶段`
-        : `解析失败：${state.error} —— 先把 JSON 改对，再跑第 8 阶段`;
+        ? `跑不了：${state.error} —— 先按上面的结构改好，再跑文稿阶段`
+        : `解析失败：${state.error} —— 先把 JSON 改对，再跑文稿阶段`;
     } else {
       stateLine = `${state.blocks} 块（图 ${state.figures} / 表 ${state.tables} / 待补段落 ${state.placeholders}）`;
       if (state.invalidBlocks) {
-        stateLine += `；有 ${state.invalidBlocks} 块结构不对（type 不认识、table 缺 csv 或 csv 没有数据行），第 8 阶段会直接报错`;
+        stateLine += `；有 ${state.invalidBlocks} 块结构不对（type 不认识、table 缺 csv 或 csv 没有数据行），文稿阶段会直接报错`;
       }
       if (state.figuresMissing) {
-        stateLine += `；有 ${state.figuresMissing} 个图块的 png 找不到（第 8 阶段会直接报 figure image not found）`;
+        stateLine += `；有 ${state.figuresMissing} 个图块的 png 找不到（文稿阶段会直接报 figure image not found）`;
       }
     }
     const text = [
-      '【手稿正文】把第 8 阶段（文稿组装）的骨架写成正文',
+      '【手稿正文】把文稿阶段（文稿组装）的骨架写成正文',
       '',
       `项目目录：${root}`,
       `manuscript.json：${stateLine}`,
       '',
       '怎么做：',
-      '1. 读 manuscript.json。figure 块的 png / caption 不要改；N 已经写在题注里（或 n 字段里），不要重复加，也不要把题注里的 N 删掉——它是第 9 阶段核对的统计口径。补 note 可以。',
+      '1. 读 manuscript.json。figure 块的 png / caption 不要改；N 已经写在题注里（或 n 字段里），不要重复加，也不要把题注里的 N 删掉——它是质检阶段核对的统计口径。补 note 可以。',
       '2. 把每个「待补」的 para 换成真正的段落（问题、数据、方法、发现、局限）。每个数字都要能在 output/models/*.csv 或 output/dataset/analysis.csv 里找到原值；找不到就补一张表，不要在正文里估一个数出来。',
       '3. 正文至少引用每个图号一次（图1、图2…），图号从 1 连续；要加表就写 {"type":"table","csv":"output/models/coef_m1_probation.csv","caption":"…","columns":[{"col":"term","label":"变量"},{"col":"beta","label":"系数","fmt":".3f"}]}，数字由脚本从 CSV 取，不要抄进正文。',
       '   表的列选择写在 table 块的顶层 columns（不是 presentation.columns）：只选要发表的列，别把整张原始输出贴进论文。',
@@ -2754,7 +2652,7 @@ export class Workbench {
       '4. 只改 manuscript.json，写完自己 JSON.parse 一遍；不要动 output/ 下的产物，也不要改 data/ 里的资料。',
       '5. 写完跑 data_analysis_run_stage(stageId="manuscript")，再跑终检，按 qa 报告逐条修。',
       '',
-      '产物落点：output/manuscript.docx（另写 manuscript_numbers.csv 与 figure_map.json）；第 8 阶段的闸门只认这个 docx（manuscript.json 是它的输入，不是闸门证据）。',
+      '产物落点：output/manuscript.docx（另写 manuscript_numbers.csv 与 figure_map.json）；文稿阶段的闸门只认这个 docx（manuscript.json 是它的输入，不是闸门证据）。',
       '导 PDF：本阶段会自动跑 export_pdf_hires.py 回填 600dpi 图（需要本机 Word）；失败不影响 docx，但 qa 的 --pdf 检查会缺席。',
     ].join('\n');
     return { ok: true, text, spec: state };
@@ -2765,7 +2663,7 @@ export class Workbench {
   adjudicate({ stageId, gateId, status, note }) {
     const active = this.active();
     if (!active.ok) return { ok: false, error: active.error };
-    this.invalidateSummary();
+
     const allowed = new Set(['pass', 'fail', 'unjudged']);
     if (!allowed.has(status)) return { ok: false, error: '人工裁定只能是 pass / fail / unjudged' };
     const stage = this.stageById(stageId);
@@ -2868,7 +2766,10 @@ export class Workbench {
       try{
         lease=acquireProjectLease(active.path);this.gateLeases.set(active.id,lease);
         syncMaterialRoots(active.path,active.project,listSources(this.store),this.cacheDir());
-        const checked=await this.inspectGates(active.id,{...common,lease,stageIds:stageId?[stageId]:null});
+        const declared=stageId?this.workflow(active).stages.find(stage=>stage.id===stageId):null;
+        if(stageId&&!declared)throw Error('工作流中没有此检查阶段');
+        const stageIds=declared?declared.inspectionStages:null;
+        const checked=stageIds?.length===0?{status:'completed',results:[]}:await this.inspectGates(active.id,{...common,lease,stageIds});
         result={ok:checked.status==='completed',...checked};
       }catch(error){result={ok:false,error:error.message};}
       finally{if(lease){const error=this.releaseGateLease(active.id,lease);if(error)result={ok:false,error,status:'failed'};}}
@@ -2897,7 +2798,7 @@ export class Workbench {
         finally{if(lease){const error=this.releaseGateLease(active.id,lease);if(error)result={ok:false,error,status:'failed'};}}
       }
     }
-    this.invalidateSummary();
+
     this.onChange({kind:'gate-control',action,result});
     return {...result,state:this.snapshot()};
   }
@@ -2914,7 +2815,7 @@ export class Workbench {
     this.gateChecks.set(projectId,{controller,stageId:options.run?.stageId||options.stageIds?.[0]||'',startedAt:new Date().toISOString()});
     this.onChange({kind:'gate-check-start',projectId});
     try{return await inspectAfterRun({...options,signal:controller.signal});}
-    finally{this.gateChecks.delete(projectId);this.invalidateSummary();this.onChange({kind:'gate-check-finish',projectId});}
+    finally{this.gateChecks.delete(projectId);this.onChange({kind:'gate-check-finish',projectId});}
   }
 
   async recoverGateLeases() {
@@ -2925,7 +2826,7 @@ export class Workbench {
       const result=await gateCommand({root:project.path,skillRoot:skill.packageDir,python:this.getConfig().pythonPath,action:'recover'});
       results.push({projectId:project.id,...result});
     }
-    if(results.length){this.invalidateSummary();this.onChange({kind:'gate-recovery',results});}
+    if(results.length){this.onChange({kind:'gate-recovery',results});}
     return results;
   }
 
@@ -3028,30 +2929,7 @@ export class Workbench {
    * （会把刚套用的补丁覆盖掉）。人工步骤（verify 的 final、dataset 的宽表）不硬跑，变成等待点。
    */
   downstreamStages(file) {
-    const rel = String(file).replace(/\\/g, '/').replace(/^\.\//, '');
-    const all = ['audit', 'coding', 'dataset', 'verify', 'stats', 'figures', 'manuscript', 'qa'];
-    // 原始资料变了：审计结论、编码、数据集、复核全部失效
-    if (/^data\//.test(rel)) return all.slice();
-    // 项目脚本变了：审计/编码/统计都可能变，从审计重来最保守
-    if (/^scripts\//.test(rel)) return all.slice();
-    // skill 注册表：数据集身份/主键/证据账变了 → 复核必须先重来
-    if (/^research_registry\.json$/.test(rel)) return ['verify', 'dataset', 'stats', 'figures', 'manuscript', 'qa'];
-    // 登记的数据集或 index.json：数据变了 → 复核作废
-    if (/^output\/datasets\//.test(rel)) return ['verify', 'dataset', 'stats', 'figures', 'manuscript', 'qa'];
-    if (/^output\/(datasets|data_verification)\//.test(rel)) return ['verify', 'stats', 'figures', 'manuscript', 'qa'];
-    if (/^output\/audit\//.test(rel)) return ['coding', 'dataset', 'verify', 'stats', 'figures', 'manuscript', 'qa'];
-    // 编码漏斗 / 判断台账：它们直接改变「哪些行算样本」，数据集与复核都要重来。
-    if (/^output\/coding\//.test(rel)) return ['dataset', 'verify', 'stats', 'figures', 'manuscript', 'qa'];
-    if (/^decisions\.jsonl$/.test(rel)) return ['coding', 'dataset', 'verify', 'stats', 'figures', 'manuscript', 'qa'];
-    if (/^output\/dataset\//.test(rel)) return ['verify', 'stats', 'figures', 'manuscript', 'qa'];
-    if (/^(model_spec\.json|chart_config\.json|methods\.json)$/.test(rel)) return ['stats', 'figures', 'manuscript', 'qa'];
-    // 模型产物被修（补丁/手改）时不能「重跑统计」——那会把修好的系数表覆盖回原样。
-    if (/^output\/(models|methods)\//.test(rel)) return ['figures', 'manuscript', 'qa'];
-    if (/^output\/chart_pack\//.test(rel)) return ['figures', 'manuscript', 'qa'];
-    if (/^output\/figures\//.test(rel)) return ['figures', 'manuscript', 'qa'];
-    if (/^(output\/manuscript|manuscript\.json|output\/figure_map\.json)/.test(rel)) return ['manuscript', 'qa'];
-    if (/^output\/(qa|verify)\//.test(rel)) return ['qa'];
-    return [];
+    return rerunStages(this.workflow(),file);
   }
 
   /** 阶段有没有可执行脚本（没有 = 人工步骤，重跑链必须停下来等人）。 */
@@ -3071,6 +2949,7 @@ export class Workbench {
     const chains = { ...(state.recheckChains || {}) };
     chains[projectIdValue] = {
       id: `chain-${Date.now().toString(36)}`,
+      workflowHash:this.workflow().sha256,
       steps,
       index: 0,
       status: 'running',
@@ -3087,11 +2966,16 @@ export class Workbench {
   beginChainStep() {
     const chain = this.chainStatus();
     if (!chain || chain.status !== 'running') return;
+    if(chain.workflowHash&&chain.workflowHash!==this.workflow().sha256){this.patchChain({status:'interrupted',error:'工作流已变化：继续时将按当前声明重新规划重跑范围'});return;}
     if (chain.index >= chain.steps.length) {
       this.patchChain({ status: 'done', index: chain.steps.length });
       return;
     }
     const stageId = chain.steps[chain.index];
+    const current=this.snapshot().stages.find(stage=>stage.id===stageId);
+    if(current&&['done','na'].includes(current.status)){
+      this.patchChain({index:chain.index+1,waitingFor:'',error:''});setTimeout(()=>this.beginChainStep(),0);return;
+    }
     // 没有脚本的阶段（dataset / recheck）是人工步骤：明确停下等人，不要 force 一个空命令，
     // 也不要「静悄悄跳过」——这两种都会让链看起来跑完了。
     if (!this.stageRunnable(stageId)) {
@@ -3120,11 +3004,19 @@ export class Workbench {
 
   /** 重跑链的人工续跑：resume 重新尝试当前步骤；force=true 才跳过前置闸门。 */
   resumeChain({ force = false } = {}) {
-    const chain = this.chainStatus();
+    let chain = this.chainStatus();
     if (!chain) return { ok: false, error: '没有重跑链' };
     if (chain.status === 'running') return { ok: false, error: '重跑链正在跑' };
     if (!['waiting', 'stopped', 'interrupted', 'cancelled'].includes(chain.status)) {
       return { ok: false, error: `当前状态 ${chain.status} 不需要续跑` };
+    }
+    const active=this.active(),workflow=this.workflow(active);
+    if(chain.workflowHash&&chain.workflowHash!==workflow.sha256){
+      const issue=readIssues(active.path).find(issue=>issue.id===chain.issueId);
+      if(!issue?.patch?.path)return {ok:false,error:'工作流已变化，原链缺少可回查的补丁路径，无法安全重建'};
+      const steps=rerunStages(workflow,issue.patch.path);
+      this.patchChain({steps,index:0,workflowHash:workflow.sha256,waitingFor:'',note:'已按当前技能工作流重新规划'});
+      chain=this.chainStatus();
     }
     this.patchChain({ status: 'running', error: '', blockers: [] });
     if (force) {
@@ -3157,7 +3049,7 @@ export class Workbench {
       const lease = this.gateLeases.get(run?.projectId);
       try {
         if (active.ok && readGatePolicy(active.path)) {
-          const gateCheck = await this.inspectGates(active.id,{root: active.path, skillRoot: this.skill().packageDir, python: this.getConfig().pythonPath, run, lease});
+          const gateCheck = run.status==='cancelled'?{status:'cancelled',results:[]}:await this.inspectGates(active.id,{root: active.path, skillRoot: this.skill().packageDir, python: this.getConfig().pythonPath, run, lease});
           const state = this.store.get();
           this.store.set({runs: (state.runs || []).map(r => r.id === run.id ? {...r, gateCheck} : r)});
           this.onChange({kind: 'gate-check', runId: run.id, gateCheck});
@@ -3173,7 +3065,7 @@ export class Workbench {
   }
 
   applyRunToChain(run) {
-    this.invalidateSummary();
+
     const chain = this.chainStatus();
     if (!chain || chain.status !== 'running') return;
     if (run.projectId && chain.projectId && run.projectId !== chain.projectId) return;
@@ -3192,33 +3084,24 @@ export class Workbench {
       return;
     }
     const currentActive = this.active();
-    if(run.stageId==='verify'&&stageState?.gates?.find(g=>g.id==='verification-final')?.status!=='pass'){
-      this.patchChain({status:'waiting',waitingFor:'verify',error:'prepare 已生成待核模板：实际逐格复读并完成 final 校验后再续跑'});
+    const definition=this.stageById(run.stageId);
+    const rule=definition?.afterRun||{};
+    const all=this.snapshot().stages||[];
+    if(rule.requireComplete!==false&&!['done','na'].includes(stageStatus)){
+      this.patchChain({status:'waiting',waitingFor:run.stageId,error:rule.waitingMessage||'阶段尚未满足声明的完成要求'});return;
+    }
+    const missing=(rule.gates||[]).filter(id=>!all.some(stage=>stage.gates?.some(g=>g.id===id&&g.status==='pass')));
+    if(missing.length){
+      this.patchChain({status:'waiting',waitingFor:run.stageId,error:rule.waitingMessage||('需要完成：'+missing.join('、'))});
       return;
     }
-    const reportStages=run.stageId==='audit'?['scope','audit']:run.stageId==='coding'?['scope','audit','coding']:null;
-    const gateReasons = currentActive.ok ? reportBlockers(this.snapshot().stages || [], currentActive.path,
-      ({dataset:'data-ready',verify:'analysis-ready',stats:'analysis-ready',figures:'figures-ready',manuscript:'manuscript-ready',qa:'manuscript-ready',recheck:'delivery-ready'})[run.stageId] || 'data-ready',{reportStages}) : ['项目不可访问'];
+    const gateReasons=currentActive.ok&&rule.checkpoint?reportBlockers(all,currentActive.path,rule.checkpoint,{reportStages:rule.reportStages||null}):currentActive.ok?[]:['项目不可访问'];
     if (!stageStatus || stageStatus === 'blocked' || run.status === 'cancelled' || gateReasons.length) {
       const why = run.status === 'cancelled'
         ? '被取消'
         : stageStatus === 'blocked' ? '被 error 级闸门拦住' : '阶段状态读不到';
       this.patchChain({ status: 'stopped', error: `${expected} 运行${why}（退出码 ${run.exitCode ?? '—'}）` });
       return;
-    }
-    // 全格复核的 final 只能由人/模型逐格复读后产生：prepare 跑完就停下等人，
-    // 不能顺着链把还没 final 的数据送进统计。
-    if (run.stageId === 'verify') {
-      const verification = (this.snapshot().stages || []).find((stage) => stage.id === 'verify')
-        ?.gates?.find((gateItem) => gateItem.id === 'verification-final');
-      if (!verification || verification.status !== 'pass') {
-        this.patchChain({
-          status: 'waiting',
-          waitingFor: 'verify',
-          error: 'prepare 已生成待核模板：逐格复读并跑 data_analysis_verify_dataset(action=final)，再 action=chain resume',
-        });
-        return;
-      }
     }
     this.patchChain({
       index: chain.index + 1,
@@ -3288,7 +3171,7 @@ export class Workbench {
     const next = normalizeConfig({ ...current, ...patch });
     this.store.set({ config: next });
     this.invalidateSkill();
-    this.invalidateSummary();
+
     if ('skillRoot' in patch || 'pythonPath' in patch || 'dataDir' in patch) this.invalidatePreflight();
     this.onChange({ kind: 'config' });
     return { ok: true, config: next };
@@ -3296,7 +3179,7 @@ export class Workbench {
 }
 
 export function stageCatalog() {
-  return STAGE_DEFS.map((stage) => ({
+  return defaultWorkflow().stages.map((stage) => ({
     id: stage.id,
     index: stage.index,
     name: stage.name,

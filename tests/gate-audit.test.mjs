@@ -7,13 +7,13 @@ import {spawnSync} from 'node:child_process';
 import {readGatePolicy,loadStageReport} from '../src/gate-report.js';
 import {inspectAfterRun,invalidateGateReports} from '../src/gate-inspection.js';
 import {adjudicationSnapshot,evaluateHostProject} from '../src/gate-host.js';
-import {implementationBindings} from '../src/gate-report.js';
+import {implementationBindings,currentEnvironment} from '../src/gate-report.js';
 import {validateSchema} from '../src/gate-schema.js';
 import {Runner} from '../src/runner.js';
 import {Workbench} from '../src/service.js';
 import {acquireProjectLease} from '../src/gate-lease.js';
 import {syncMaterialRoots} from '../src/gate-material-roots.js';
-import {parseCsv} from '../src/audit.js';
+import {parseCsv,withReadCache} from '../src/audit.js';
 import {gateTotals} from '../src/gates.js';
 
 const skill=process.env.DSA_SKILL_ROOT;
@@ -39,11 +39,11 @@ try{
   const mount=path.join(root,'data/mount');link(a,mount);
   write(root,'research_registry.json',{source_root:'raw',datasets:[{id:'x',path:'data/mount/source.csv',key:'id'}]});
   assert.equal(cli(root,'evaluate','--stage','dataset').status,0);
-  assert.equal(loadStageReport(root,{skill:{root:skill}},readGatePolicy(root),'dataset').find(g=>g.id==='dataset-in-analysis').status,'pass');
+  assert.equal(withReadCache(()=>loadStageReport(root,{skill:{root:skill}},readGatePolicy(root),'dataset')).find(g=>g.id==='dataset-in-analysis').status,'pass');
   if(process.platform==='win32')fs.rmdirSync(mount);else fs.unlinkSync(mount);
   link(b,mount);
   await check('JavaScript rejects a retargeted project alias',()=>{
-    let status;try{status=loadStageReport(root,{skill:{root:skill}},readGatePolicy(root),'dataset').find(g=>g.id==='dataset-in-analysis').status;}catch{status='rejected';}
+    let status;try{status=withReadCache(()=>loadStageReport(root,{skill:{root:skill}},readGatePolicy(root),'dataset')).find(g=>g.id==='dataset-in-analysis').status;}catch{status='rejected';}
     assert.notEqual(status,'pass');
   });
   await check('Python rejects a retargeted project alias',()=>assert.notEqual(cli(root,'validate-report','--report','output/gates/dataset.json').status,0));
@@ -199,6 +199,51 @@ try{
     const run=bench.recentRuns(1,'p1')[0];
     assert.equal(run.status,'ok');assert.equal(run.exitCode,0);assert.equal(run.gateCheck.status,'failed');
     assert.equal(run.gateCheck.results[0].reason,'checker-failed');
+  });
+  await check('Runtime changes are observed on the next request, without a TTL window',()=>{
+    const runtime=path.join(base,'runtime-probe');
+    write(runtime,'scripts/gates.py',"from pathlib import Path\nprint(Path(__file__).with_name('environment.json').read_text())\n");
+    write(runtime,'scripts/environment.json',{python:'synthetic',modules:{example:'1'}});
+    assert.equal(withReadCache(()=>currentEnvironment(runtime,python)).modules.example,'1');
+    write(runtime,'scripts/environment.json',{python:'synthetic',modules:{example:'2'}});
+    assert.equal(withReadCache(()=>currentEnvironment(runtime,python)).modules.example,'2');
+  });
+  await check('Skill summary does not traverse materials for unused legacy freshness',()=>{
+    const fresh=path.join(base,'no-redundant-scan');fs.mkdirSync(path.join(fresh,'data'),{recursive:true});
+    assert.equal(cli(fresh,'init-policy','--mode','skill').status,0);
+    write(fresh,'data/uninspected.csv','id,in_analysis\na,1\n');
+    const bench=new Workbench({getConfig:()=>({pythonPath:python}),store:{get:()=>({}),set:()=>{}},runner:{activeFor:()=>({})}});
+    bench.active=()=>({ok:true,id:'scan',path:fresh,project});bench.ledgerProject=()=>null;
+    const original=fs.readdirSync;let scans=0;
+    fs.readdirSync=function(file,...args){if(path.resolve(String(file))===path.join(fresh,'data'))scans++;return original.call(fs,file,...args);};
+    try {
+      const summary=bench.summary();assert.equal(scans,0);
+      assert.equal(summary.summary.done,0,'uninspected project has no completed stages');
+      assert.equal(bench.evaluateActive(bench.active()).stages.find(s=>s.id==='dataset').gates.find(g=>g.id==='dataset-in-analysis').status,'unjudged');
+      assert.equal(scans,0);
+    } finally {fs.readdirSync=original;}
+  });
+  await check('Snapshot and summary never reuse old gates after same-size same-time mutation',()=>{
+    write(review,'data.csv','id,in_analysis\na,1\n');
+    assert.equal(cli(review,'evaluate','--stage','dataset').status,0);
+    const bench=new Workbench({getConfig:()=>({pythonPath:python}),store:{get:()=>({}),set:()=>{}},runner:{activeFor:()=>({})}});
+    bench.active=()=>({ok:true,id:'freshness',path:review,project});
+    bench.skill=()=>({ok:false});bench.projects=()=>[];bench.preflightSummary=()=>({});
+    bench.focusSnapshot=()=>null;bench.publicMaterials=()=>({});bench.ledgerProject=()=>null;
+    const gate=()=>bench.snapshot().stages.find(s=>s.id==='dataset').gates.find(g=>g.id==='dataset-in-analysis');
+    assert.equal(gate().status,'pass');
+    const before=bench.summary(), file=path.join(review,'data.csv'), stat=fs.statSync(file);
+    try {
+      fs.writeFileSync(file,'id,in_analysis\na,0\n');fs.utimesSync(file,stat.atime,stat.mtime);
+      assert.equal(fs.statSync(file).size,stat.size);
+      assert.equal(gate().status,'unjudged');
+      assert.notDeepEqual(bench.summary().totals,before.totals,'summary must also reflect invalid evidence immediately');
+      fs.unlinkSync(path.join(review,'.workbench/gates/policy.json'));
+      assert.equal(bench.snapshot().admission.allowed,false);
+      assert.ok(bench.snapshot().stages.every(s=>s.gates.some(g=>g.id==='platform.policy')));
+    } finally {
+      fs.writeFileSync(file,'id,in_analysis\na,1\n');fs.utimesSync(file,stat.atime,stat.mtime);
+    }
   });
   console.log(`audit regressions: ${passed} passed, ${failed} failed`);
   process.exitCode=failed?1:0;

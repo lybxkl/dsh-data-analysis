@@ -16,7 +16,7 @@ import { evaluateHostProject } from './gate-host.js';
 import path from 'node:path';
 
 import { analysisFile, assessPalette, readCsv, statOf } from './audit.js';
-import { STAGE_DEFS } from './defaults.js';
+import { workflowFor } from './workflow.js';
 import { verifyAuditRows } from './fingerprint.js';
 import { recheckSummary } from './recheck.js';
 import { evaluateAssert, projectPath } from './registry.js';
@@ -173,7 +173,7 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
     return pool.slice().sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)))[0];
   };
 
-  for (const def of STAGE_DEFS) {
+  for (const def of workflowFor(project).stages) {
     const gates = [];
     const root = projectRoot;
     const stageProject = project?.stages?.[def.id] || {};
@@ -2076,13 +2076,14 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
     if (status === 'done' && def.script && lastRun && lastRun.status !== 'ok') status = 'review';
 
     stages.push({
+      ...def,
       id: def.id,
       index: def.index,
       name: def.name,
       short: def.short,
       purpose: def.purpose,
       script: stageProject.script === undefined ? def.script : stageProject.script,
-      args: Array.isArray(stageProject.args) ? stageProject.args : [...def.args],
+      args: Array.isArray(stageProject.args) ? stageProject.args : [...(def.args||[])],
       // 多步阶段（终检）把每一步的脚本列出来：面板只显示一个脚本名会误导用户
       steps: Array.isArray(stageProject.steps)
         ? stageProject.steps.map((step) => step?.script || '')

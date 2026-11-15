@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {fileURLToPath} from 'node:url';
-import {STAGE_DEFS} from './defaults.js';
+import {workflowFor} from './workflow.js';
 import {verifyMounts,derivedMountName} from './sources.js';
 import {parseCsv} from './audit.js';
 import {readIssueLedger, readCoverage,RECHECK_ITEMS} from './recheck.js';
@@ -76,22 +76,24 @@ export function evaluateHostProject(context) {
   let runtime;
   try{runtime=context.gateRuntime||currentEnvironment(packageRoot(project),context.pythonPath||'python');}catch{runtime={python:'unavailable',modules:{}};}
   const snapshot=adjudicationSnapshot(root,project,{runtime});
-  const stages=STAGE_DEFS.map(def=>({...def,gates:[],status:activeRuns[def.id]?'running':'todo',
+  const workflow=workflowFor(project);
+  const hostFacts=[];
+  const stages=workflow.stages.map(def=>({...def,gates:[],status:activeRuns[def.id]?'running':'todo',
     lastRun:runs.filter(r=>r.stageId===def.id).sort((a,b)=>String(b.startedAt).localeCompare(String(a.startedAt)))[0]||null}));
-  const stage=id=>stages.find(s=>s.id===id);
-  stage('scope').gates.push(fact('scope-doc',exists(root,'docs/scope.md')?'pass':'unjudged','研究范围文档必须存在且非空'));
+  const addHostFacts=(...facts)=>hostFacts.push(...facts);
+  addHostFacts(fact('scope-doc',exists(root,'docs/scope.md')?'pass':'unjudged','研究范围文档必须存在且非空'));
   const mounts=project.materials?.mounts||[];
   try {
     const report=verifyMounts(root,{mounts});
-    stage('scope').gates.push(fact('sources-mounted',report.every(r=>r.status==='ok')?'pass':'fail','核对实际挂载目标',{mounts:report}));
+    addHostFacts(fact('sources-mounted',report.every(r=>r.status==='ok')?'pass':'fail','核对实际挂载目标',{mounts:report}));
     const inside=mounts.filter(m=>{
       const source=sources.find(s=>s.id===m.sourceId);
       if(!source)return true;
       const rel=path.relative(path.resolve(root),path.resolve(source.path,m.entry||''));
       return !rel.startsWith('..')&&!path.isAbsolute(rel);
     });
-    stage('scope').gates.push(fact('sources-outside',inside.length?'fail':'pass','原件挂载必须位于项目产出之外'));
-  } catch {stage('scope').gates.push(fact('sources-mounted','unjudged','挂载无法读取'),fact('sources-outside','unjudged','挂载目标无法确认'));}
+    addHostFacts(fact('sources-outside',inside.length?'fail':'pass','原件挂载必须位于项目产出之外'));
+  } catch {addHostFacts(fact('sources-mounted','unjudged','挂载无法读取'),fact('sources-outside','unjudged','挂载目标无法确认'));}
   const selection=hostCsv(root,'output/materials/selection.csv',['source_id','path_in_source','include','reason_code']);
   const provenance=hostCsv(root,'output/materials/provenance.csv',['rel_path','mount','source_id']);
   let selectionValid=Boolean(selection?.rows.length),provenanceValid=Boolean(provenance?.rows.length);
@@ -109,7 +111,7 @@ export function evaluateHostProject(context) {
     try{if(!mount||!row.rel_path.startsWith(row.mount+'/')||!fs.statSync(projectResourcePath(root,'data/'+row.rel_path)).isFile())provenanceValid=false;}catch{provenanceValid=false;}
   }
   for(const [id,rel,rows,valid] of [['materials-provenance','output/materials/provenance.csv',provenance,provenanceValid],['materials-selection','output/materials/selection.csv',selection,selectionValid]]){
-    stage('audit').gates.push(fact(id,!mounts.length?'na':!rows?'unjudged':valid?'pass':'fail',!mounts.length?'没有外部挂载，不需要挂载登记':'按当前挂载、来源身份和实际文件核对登记',{...(mounts.length?{}:{applicability:{rule:'no-external-mounts'}}),sourcePath:rel}));
+    addHostFacts(fact(id,!mounts.length?'na':!rows?'unjudged':valid?'pass':'fail',!mounts.length?'没有外部挂载，不需要挂载登记':'按当前挂载、来源身份和实际文件核对登记',{...(mounts.length?{}:{applicability:{rule:'no-external-mounts'}}),sourcePath:rel}));
   }
   let covered='unjudged';
   if(!mounts.length)covered='na';
@@ -127,9 +129,9 @@ export function evaluateHostProject(context) {
     }
     covered=!invalid&&actual.size===expected.size&&[...expected].every(x=>actual.has(x))?'pass':'fail';
   }
-  stage('audit').gates.push(fact('materials-provenance-cover',covered,!mounts.length?'没有外部挂载':'按当前挂载身份核对选材与来源集合',{...(!mounts.length?{applicability:{rule:'no-external-mounts'}}:{})}));
+  addHostFacts(fact('materials-provenance-cover',covered,!mounts.length?'没有外部挂载':'按当前挂载身份核对选材与来源集合',{...(!mounts.length?{applicability:{rule:'no-external-mounts'}}:{})}));
   const declared=Object.values(project.stages||{}).flatMap(s=>Array.isArray(s.outputs)?s.outputs:[]);
-  stage('qa').gates.push(fact('artifacts-declared',!declared.length?'unjudged':declared.every(p=>exists(root,p))?'pass':'fail','核对项目明确声明的输出文件',{level:'warn'}));
+  addHostFacts(fact('artifacts-declared',!declared.length?'unjudged':declared.every(p=>exists(root,p))?'pass':'fail','核对项目明确声明的输出文件',{level:'warn'}));
   const visionTable=hostCsv(root,'output/audit/vision_log.csv',['rel_path','input_sha256','status','human_verified']);
   const visionFile=exists(root,'output/audit/vision_log.csv');
   const vision=visionTable?[...new Map(readVisionLog(root).map(row=>[JSON.stringify([row.rel_path,row.page]),row])).values()]:[];
@@ -143,11 +145,11 @@ export function evaluateHostProject(context) {
   });
   const hasVisionDerivatives=provenance?.rows.some(row=>row.channel==='vision');
   const visionStatus=visionFile&&!visionTable?'unjudged':!vision.length?(hasVisionDerivatives?'unjudged':'na'):visionCurrent?'pass':'unjudged';
-  stage('qa').gates.push(fact('qa-vision',visionStatus,visionStatus==='na'?'没有识图派生记录':'识图复核须绑定当前原件、渲染页和识别稿',{...(visionStatus==='na'?{applicability:{rule:'no-vision-derivatives'}}:{})}));
+  addHostFacts(fact('qa-vision',visionStatus,visionStatus==='na'?'没有识图派生记录':'识图复核须绑定当前原件、渲染页和识别稿',{...(visionStatus==='na'?{applicability:{rule:'no-vision-derivatives'}}:{})}));
   for(const id of ['qa-decisions','qa-signoff']){
     const decision=adjudications[id];
     const valid=snapshot&&decision?.snapshotHash===snapshot;
-    stage('qa').gates.push(fact(id,valid?decision.status:'unjudged',valid?'已绑定当前证据的裁定':'需要对当前交付快照作真实裁定',{manual:true,snapshotHash:snapshot}));
+    addHostFacts(fact(id,valid?decision.status:'unjudged',valid?'已绑定当前证据的裁定':'需要对当前交付快照作真实裁定',{manual:true,snapshotHash:snapshot}));
   }
   let issueStatus='unjudged',issueDetail='问题台账需要有效的逐行记录（明确为空也应保留文件）';
   try{
@@ -156,14 +158,25 @@ export function evaluateHostProject(context) {
     issueStatus=unresolved.some(i=>i.severity==='error')?'fail':unresolved.length?'unjudged':'pass';
     issueDetail='当前问题台账中未关闭或暂缓的问题';
   }catch(error){issueDetail=error.message;}
-  stage('recheck').gates.push(fact('recheck-issues',issueStatus,issueDetail));
-  stage('recheck').gates.push(fact('recheck-report',exists(root,'output/recheck/report.md')?'pass':'unjudged','当前复核报告必须存在且非空'));
+  addHostFacts(fact('recheck-issues',issueStatus,issueDetail));
+  addHostFacts(fact('recheck-report',exists(root,'output/recheck/report.md')?'pass':'unjudged','当前复核报告必须存在且非空'));
   for(const s of stages){
     const receipt=path.join(root,'output/gates/production',`${s.id}.json`);
     let known=false;
     try{const r=JSON.parse(fs.readFileSync(receipt,'utf8'));known=r.status==='completed'&&r.runId===s.lastRun?.id;}catch{}
     s.gates.push(fact('stage-source',known?'pass':'unjudged',known?'已关联宿主生产运行':'没有绑定当前宿主运行的生产回执',{level:'info'}));
   }
+  const hostDefinitions=strictJson(fs.readFileSync(safePath(workflow.root,'contracts/gates/catalog.json'),'utf8')).gates;
+  function assignHostFacts(){
+    for(const requirement of hostDefinitions){
+      if(requirement.owner!=='workbench')continue;
+      const destination=stages.find(s=>s.id===requirement.displayStage);
+      if(!destination)throw Error('工作流缺少策略要求的显示阶段：'+requirement.displayStage);
+      const owned=hostFacts.find(f=>f.id===requirement.id);
+      if(owned){destination.gates=destination.gates.filter(g=>g.id!==owned.id);destination.gates.push(owned);}
+    }
+  }
+  assignHostFacts();
   applyGateReports(stages,{...context,gateRuntime:runtime});
   const all=stages.flatMap(s=>s.gates);
   const policy=readGatePolicy(root);
@@ -180,19 +193,33 @@ export function evaluateHostProject(context) {
   machine.push({id:'R12',status:complete&&machine.every(c=>c.status==='pass')?'pass':'unjudged',detail:'当前快照的十二项覆盖记录完整且不能覆盖机器事实'});
   for(const check of machine)check.label=RECHECK_ITEMS.find(item=>item.id===check.id)?.label||check.id;
   const state=machine.some(c=>c.status==='fail')?'fail':machine.every(c=>c.status==='pass')?'pass':'unjudged';
-  stage('recheck').gates.push(fact('recheck-machine',state,'复用当前技能事实及真实代码复核',{checks:machine}));
-  stage('recheck').gates.push(fact('recheck-coverage',complete&&state==='pass'?'pass':'unjudged','覆盖记录不能覆盖机器事实，也不能继承旧快照'));
+  addHostFacts(fact('recheck-machine',state,'复用当前技能事实及真实代码复核',{checks:machine}));
+  addHostFacts(fact('recheck-coverage',complete&&state==='pass'?'pass':'unjudged','覆盖记录不能覆盖机器事实，也不能继承旧快照'));
+  assignHostFacts();
   for(const s of stages){
     if(activeRuns[s.id])continue;
     const assessed=s.gates.filter(g=>g.level!=='info');
     if(assessed.some(g=>g.status==='fail'&&g.level==='error'))s.status='blocked';
     else if(assessed.some(g=>g.status==='unjudged'))s.status='review';
     else s.status=assessed.length&&assessed.every(g=>g.status==='na')?'na':'done';
+    if(!assessed.length){
+      const outputs=s.artifacts||[];
+      let current=false;
+      try{
+        const receipt=strictJson(fs.readFileSync(safePath(root,`output/gates/production/${s.id}.json`),'utf8'));
+        current=receipt.status==='completed'&&receipt.runId===s.lastRun?.id&&receipt.workflow?.sha256===workflow.sha256&&
+          outputs.length>0&&outputs.every(rel=>receipt.outputs.some(item=>item.path===rel&&hash(safePath(root,rel))===item.sha256))&&
+          receipt.inputs.every(item=>hash(projectResourcePath(root,item.path))===item.sha256)&&
+          receipt.implementation.every(item=>hash(item.path)===item.sha256)&&
+          receipt.collections.every(collection=>JSON.stringify(collectionMembers(root,{...collection,rootId:'project',complete:true,selector:{recursive:true}}))===JSON.stringify(collection.members));
+      }catch{}
+      s.status=current?'done':s.lastRun?.status==='failed'?'blocked':s.lastRun?'review':'todo';
+    }
     if(s.status!=='na'&&!s.lastRun&&!(s.artifacts||[]).some(rel=>exists(root,rel))&&!s.gates.some(g=>g.manual&&g.status==='pass'))s.status='todo';
   }
   // Labels share the catalog with skill facts; host ids are never UI copy.
   try{
-    const catalog=strictJson(fs.readFileSync(safePath(packageRoot(project),'contracts/gates/catalog.json'),'utf8'));
+    const catalog=strictJson(fs.readFileSync(safePath(workflow.root,'contracts/gates/catalog.json'),'utf8'));
     const labels=new Map(catalog.gates.map(g=>[g.id,g.label]));
     for(const s of stages)for(const g of s.gates)if(g.source==='workbench')g.label=labels.get(g.id)||g.label;
   }catch{/* applyGateReports has already surfaced an invalid policy/catalog. */}

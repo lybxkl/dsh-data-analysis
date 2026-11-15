@@ -1,3 +1,4 @@
+import {defaultWorkflow} from '../src/workflow.js';
 /**
  * 视觉回归：把面板真实渲染成 HTML（真 CSS、真 DOM 结构），交给无头 Chrome 量尺寸。
  *
@@ -117,7 +118,7 @@ const PATCHES = [
   ['var dialogState = useState(null);', 'var dialogState = useState(globalThis.__DSA__.dialog);'],
   ["var widthState = useState('wide');", "var widthState = useState(globalThis.__DSA__.width);"],
   ["var themeState = useState('light');", "var themeState = useState(globalThis.__DSA__.theme);"],
-  ["var selectedState = useState('scope');", "var selectedState = useState(globalThis.__DSA__.selected);"],
+  ["var selectedState = useState('');", "var selectedState = useState(globalThis.__DSA__.selected);"],
   // 输入行的「下一步」：它的数据来自 /summary 轮询、状态来自点击本身，静态渲染要能种进去才量得到
   ['var stateTuple = useState(null);', 'var stateTuple = useState(globalThis.__DSA__.wb);'],
   ["var phaseTuple = useState('idle');", "var phaseTuple = useState(globalThis.__DSA__.phase || 'idle');"],
@@ -403,6 +404,7 @@ function gate(status, index) {
 
 function stage(id, index, name, status, gateStatuses) {
   return {
+    ui:defaultWorkflow().stages.find(stage=>stage.id===id)?.ui||{panels:[]},
     id,
     index,
     name,
@@ -630,12 +632,16 @@ const COMPOSER_CASES = [
       next: {
         id: 'stats',
         index: 4,
-        name: '描述统计与回归（含稳健性与多重检验）',
+        name: '描述统计与回归（含稳健性分析、亚组比较、敏感性分析与多重检验校正）',
         status: 'todo',
         script: 'scripts/04-stats.py',
         args: [],
       },
     }),
+  },
+  {
+    key: 'idle-short-label', phase: 'idle', flash: '',
+    wb: COMPOSER_WB({next:{id:'stats',index:4,name:'描述统计与回归（含稳健性与多重检验）',short:'统计',status:'todo',script:'scripts/04-stats.py',args:[]}}),
   },
   {
     key: 'running',
@@ -706,6 +712,7 @@ const COMPOSER_PROBE = `(() => {
     bg: cs.backgroundColor,
     clip: clip ? { scroll: clip.scrollWidth, client: clip.clientWidth } : null,
     label: btn.textContent.trim(),
+    title: btn.getAttribute("title"),
     cx: rect.left + rect.width / 2,
     cy: rect.top + rect.height / 2,
   };
@@ -1107,7 +1114,7 @@ async function main() {
       check(probe.skTopBar && probe.skTopBar.h >= 8 && probe.skTopBar.h <= 16, tag + ' 骨架条高度不对：' + (probe.skTopBar && probe.skTopBar.h));
       check(probe.skBarBg.apart, tag + ' 骨架条和底色分不开：' + JSON.stringify(probe.skBarBg));
       check(probe.smallText.length === 0, tag + ' 骨架页有 ' + probe.smallText.length + ' 处小于 11px 的字');
-      check(probe.styles.top && probe.styles.top.h === 58, tag + ' 骨架页顶栏不是 58px');
+      check(probe.styles.top && probe.styles.top.h === 46, tag + ' 骨架页顶栏不是 46px');
       continue;
     }
     check(probe.kpiCount === 5, tag + ' KPI 应该是 5 个，实际 ' + probe.kpiCount);
@@ -1140,12 +1147,14 @@ async function main() {
     }
 
     // 形状层：圆角、阴影、尺寸这些「看起来像不像」的东西，只有算出来的值才算数
+    // 密度档（紧凑）：顶栏 58→46、品牌标 30→26、顶栏按钮 32→28、徽章 28→22；
+    // 字号下限仍是 11px（smallText 那条不变），所以「收紧」只发生在外框与留白上。
     const s = probe.styles;
-    check(s.top && s.top.h === 58, tag + ' 顶栏不是 58px：' + (s.top && s.top.h));
+    check(s.top && s.top.h === 46, tag + ' 顶栏不是 46px：' + (s.top && s.top.h));
     check(s.top && s.top.bg !== 'rgba(0, 0, 0, 0)', tag + ' 顶栏没有底色');
-    check(s.logo && s.logo.radius >= 8 && s.logo.h === 30, tag + ' 品牌标不是 30px 圆角块');
+    check(s.logo && s.logo.radius >= 8 && s.logo.h === 26, tag + ' 品牌标不是 26px 圆角块');
     check(s.chip && s.chip.radius >= 100, tag + ' 顶栏徽章不是 pill（radius=' + (s.chip && s.chip.radius) + '）');
-    check(s.btn && s.btn.h === 32 && s.btn.radius >= 8, tag + ' 顶栏按钮不是 32px/8px');
+    check(s.btn && s.btn.h === 28 && s.btn.radius >= 8, tag + ' 顶栏按钮不是 28px/8px');
     check(s.kpi && s.kpi.radius >= 10 && s.kpi.shadow !== 'none', tag + ' KPI 卡没有圆角或阴影');
     check(s.kpi && s.kpi.size >= 0, tag + ' KPI 卡缺样式');
     check(s.hero && s.hero.shadow !== 'none' && s.hero.radius >= 10, tag + ' hero 卡没有圆角或阴影');
@@ -1188,6 +1197,10 @@ async function main() {
       Boolean(hoverBg) && !/rgba?\(\s*0,\s*0,\s*0,\s*0\s*\)/.test(hoverBg),
       tag + ' 悬停没有可见反馈：' + hoverBg,
     );
+    if (item.key === 'idle-short-label') {
+      check(probe.label.includes('统计') && !probe.label.includes('稳健性'), tag + ' 未使用阶段简称');
+      check(probe.title && probe.title.includes(item.wb.next.name), tag + ' 悬停缺少完整阶段名');
+    }
     if (item.expectClip && probe.clip) {
       check(probe.clip.scroll > probe.clip.client, tag + ' 长文本没走省略号：' + probe.clip.scroll + ' / ' + probe.clip.client);
     }

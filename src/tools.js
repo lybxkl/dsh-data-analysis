@@ -355,7 +355,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
       + '前置阶段有 error 闸门未过或待人工裁定时会被拦住；返回 runId 后用 data_analysis_run_log 查看输出。'
       + '注意：退出码 0 不等于阶段完成，完成与否看闸门与产物。',
     parameters: {
-      stageId: { type: 'string', required: true, description: 'scope | audit | coding | dataset | verify | stats | figures | manuscript | qa | recheck' },
+      stageId: { type: 'string', required: true, description: '当前技能工作流中的阶段 ID；先读取 data_analysis_status 或 data_analysis_workflow' },
       force: { type: 'boolean', description: '跳过前置闸门检查（只在确认要跳过时用）' },
     },
     output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '已启动运行') },
@@ -1366,6 +1366,14 @@ export function registerTools(ctx, workbench, helpers = {}) {
         skill: snap.skill,
       };
     },
+  }));
+
+  register(defineTool({
+    name:'data_analysis_workflow',
+    description:'读取当前技能声明的完整工作流，或执行其中登记的动作。阶段、依赖、命令和动作以本次返回的契约为准。',
+    parameters:{action:{type:'string',enum:['describe','run-action']},actionId:{type:'string',description:'run-action 时填写 describe 返回的动作 ID'}},
+    output:{schema:{type:'json'},render:(_args,value)=>okText(value?.error||'已读取或执行技能工作流')},
+    async execute(args){return args.action==='run-action'?workbench.runWorkflowAction(String(args.actionId||'')):{ok:true,workflow:workbench.workflow()};},
   }));
 
   return disposers;

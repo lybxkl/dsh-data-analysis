@@ -1,3 +1,4 @@
+import {defaultWorkflow} from '../src/workflow.js';
 /**
  * client.js 冒烟测试：不开浏览器，直接把面板渲染成树。
  *
@@ -227,7 +228,7 @@ const PATCHES = [
   ['var dialogState = useState(null);', 'var dialogState = useState(globalThis.__DSA__.dialog);'],
   ['var widthState = useState(\'wide\');', 'var widthState = useState(globalThis.__DSA__.width);'],
   ['var themeState = useState(\'light\');', 'var themeState = useState(globalThis.__DSA__.theme);'],
-  ['var selectedState = useState(\'scope\');', 'var selectedState = useState(globalThis.__DSA__.selected);'],
+  ['var selectedState = useState(\'\');', 'var selectedState = useState(globalThis.__DSA__.selected);'],
   // 手稿骨架的交互态：生成中 / 结果提示 / 重排确认条
   ['var manBusyState = useState(\'\');', 'var manBusyState = useState(globalThis.__DSA__.manBusy || \'\');'],
   ['var manNoteState = useState(\'\');', 'var manNoteState = useState(globalThis.__DSA__.manNote || \'\');'],
@@ -328,6 +329,7 @@ function gate(status, index) {
 
 function stage(id, index, name, status, gateStatuses) {
   return {
+    ui:defaultWorkflow().stages.find(stage=>stage.id===id)?.ui||{panels:[]},
     id,
     index,
     name,
@@ -353,6 +355,7 @@ const STAGES = [
 
 const SNAP = {
   ok: true,
+  workflow:{ok:true,draftTasks:defaultWorkflow().draftTasks,actions:[]},
   // 新版宿主一定带这个键（值可以是 null = 还没有 v2 注册表）；
   // 旧宿主快照里没有这个键，面板要据此降级成「重启 DSH 后可用」
   registry: null,
@@ -862,7 +865,7 @@ scenario(
   },
   (tree, text) => {
     check(text.includes('缺 2 张图'), '标题点名缺几张图');
-    check(text.includes('第 8 阶段会失败'), '说清后果');
+    check(text.includes('文稿阶段会失败'), '说清后果');
   },
 );
 
@@ -1137,7 +1140,8 @@ async function composerScenario(name, fixture, assert) {
 await composerScenario('输入行：可运行的阶段', {}, (tree, text) => {
   const btn = findByClass(tree, 'dsa-chat-btn');
   check(Boolean(btn), '渲染出按钮');
-  check(text.includes('运行下一步'), '标签是「运行下一步」');
+  check(textOf(btn).trim() === '▶ 运行 编码与抽取', '标签是两个字「运行」：' + textOf(btn).trim());
+  check(!text.includes('下一步'), '不再写「运行下一步」四个字');
   check(text.includes('编码与抽取'), '带阶段名');
   check(hasClass(tree, 'dsa-cmp'), '外面有封顶容器 dsa-cmp');
   check(tree && tree.props && tree.props.role === 'status', '整块带 role=status，读屏能读到状态变化');
@@ -1195,7 +1199,7 @@ await composerScenario('输入行：启动失败', {}, async (tree, text, mounte
     check(afterText.includes('启动失败'), '按钮里写「启动失败」');
     check(afterText.includes('2 个 error 级未过'), '把服务端的原因带出来，不是只写失败');
     check(String(btn.props.title).includes('2 个 error 级未过'), '悬停能看到完整原因');
-    check(!afterText.includes('运行下一步'), '失败时不再和「运行下一步」并存（老实现两种状态同时显示）');
+    check(!afterText.includes('编码与抽取'), '失败时整块只写原因，不再并排显示阶段名（老实现两种状态同时显示）');
   } finally {
     stub.restore();
   }
@@ -1228,10 +1232,11 @@ await composerScenario(
 );
 
 await composerScenario(
-  '输入行：被拦住（待人工）',
+  '输入行：被拦住',
   { wb: composerState({ next: { id: 'coding', index: 2, name: '编码与抽取', status: 'blocked', script: 'x.py', args: [] } }) },
   async (tree, text, mounted) => {
-    check(text.includes('待人工'), '标签是「待人工」');
+    check(text.includes('被拦住'), 'blocked 就说「被拦住」，别说成「待人工」');
+    check(!text.includes('待人工'), '不再把「被卡住」和「等你拍板」混成一句话');
     check(text.includes('编码与抽取'), '仍然显示卡住的阶段，方便定位');
     check(text.includes('→'), '用 → 表示去面板处理，不用 ▶ 假装能直接跑');
     const stub = stubFetch(() => ({ payload: composerState() }));
@@ -1245,8 +1250,20 @@ await composerScenario(
   },
 );
 
+await composerScenario(
+  '输入行：等你拍板（review）',
+  { wb: composerState({ next: { id: 'scope', index: 1, name: '范围与口径', short: '范围', status: 'review', script: 'x.py', args: [] } }) },
+  (tree, text) => {
+    const btn = findByClass(tree, 'dsa-chat-btn');
+    check(text.includes('待裁定'), 'review 说「待裁定」，跟面板的裁定口径一致');
+    check(textOf(btn).trim() === '→ 待裁定 范围', '芯片里用简称：' + textOf(btn).trim());
+    check(!text.includes('范围与口径'), '按钮文字里不再摆完整阶段名');
+    check(String(btn.props.title).includes('范围与口径'), '完整阶段名留在悬停里');
+  },
+);
+
 await composerScenario('输入行：九个阶段都完成了', { wb: composerState({ next: null }) }, (tree, text) => {
-  check(text.includes('所有阶段都已完成'), '显示完成文案');
+  check(text.includes('全部完成'), '显示完成文案');
   check(!findByClass(tree, 'dsa-chat-btn'), '没有可点的按钮（不给假入口）');
   check(hasClass(tree, 'dsa-cmp-text'), '只是纯文本，不带边框');
 });
@@ -1256,7 +1273,7 @@ await composerScenario('输入行：别的会话的工作台不掺和', { props:
 });
 
 await composerScenario('输入行：没有脚本的待办阶段', { wb: composerState({ next: { id: 'coding', index: 2, name: '编码与抽取', status: 'todo', script: '', args: [] } }) }, (tree, text) => {
-  check(text.includes('待人工'), '没脚本时不给「运行下一步」，避免点了必然失败');
+  check(text.includes('待人工'), '没脚本又没有拦截理由，才落回「待人工」；不给「运行」，避免点了必然失败');
 });
 
 await composerScenario(
@@ -1906,6 +1923,9 @@ await (async()=>{
     finishInspection({ok:false,status:'cancelled',state:server});await flush();await flush();view.render();
     check(!view.buttons().includes('停止体检')&&view.buttons().includes('重新体检'),'停止后恢复可重试入口');
     check(view.text().includes('体检已停止')&&!view.text().includes('操作失败'),'主动停止有明确反馈，不误报操作失败');
+    const productionClicked=view.click('重跑')||view.click('运行');
+    check(productionClicked&&!view.text().includes('体检已停止'),'开始新的生产运行时清掉上次体检提示');
+    await flush();view.render();
     holdRead=false;finishRead();await flush();await flush();view.render();
     check(!view.buttons().includes('停止体检'),'较晚返回的旧运行快照不会复活已停止状态');
     server=Object.assign({},server,{active:Object.assign({},server.active,{id:'new-synthetic',name:'新项目'}),focus:null,stages:[stage('scope',1,'范围与口径','todo',['unjudged']),stage('audit',2,'资料审计','todo',[])]});
@@ -1917,6 +1937,56 @@ await (async()=>{
     globalThis.__DSA_EFFECTS__=false;globalThis.__DSA_EFFECT_DEPS__=false;
   }
 })();
+
+await (async()=>{
+  process.stdout.write('\n真实宿主回归：错误只属于触发它的表单\n');
+  const original=globalThis.fetch;
+  try{
+    globalThis.__DSA_EFFECTS__=false;
+    globalThis.__DSA__={snap:SNAP,pre:SNAP.preflight,loading:false,dialog:{kind:'open'},width:'wide',theme:'light',selected:'scope'};
+    globalThis.fetch=async()=>({ok:true,status:200,json:async()=>({ok:false,error:'没有找到 project.json'})});
+    PANEL=loadPanel().panel;const view=mountPanel({});
+    const modal=findByClass(view.tree(),'dsa-modal');
+    const input=findAllByClass(modal,'dsa-input')[0];input.props.onChange({target:{value:'C:/synthetic/missing'}});view.render();
+    check(view.click('打开项目'),'在打开表单提交无效目录');
+    await flush();await flush();view.render();
+    check(view.text().includes('没有找到 project.json'),'无效目录错误在原表单中保留');
+    view.click('取消');view.click('+ 新建');
+    check(view.text().includes('新建项目'),'能够切换到新建表单');
+    check(!view.text().includes('没有找到 project.json'),'新建表单不继承打开项目的旧错误');
+  }catch(error){check(false,'表单错误归属回归',String(error?.stack||error));}
+  finally{globalThis.fetch=original;}
+})();
+
+scenario('动态工作流：未知阶段按声明渲染组件和动作',{
+  selected:'brand-new-stage',snap:Object.assign({},SNAP,{workflow:{ok:true,actions:[{id:'brand-new-action',stage:'brand-new-stage',label:'新声明动作'}]},stages:[Object.assign(stage('brand-new-stage',1,'全新工作阶段','todo',['unjudged']),{ui:{panels:['figures'],draftTask:'custom-draft'},outputFiles:[{path:'output/custom.json',exists:false}]})]})
+},function(tree,text){
+  check(text.includes('全新工作阶段'),'阶段名称来自声明，不依赖旧 ID');
+  check(text.includes('新声明动作'),'未见过的动作出现在该阶段');
+  check(text.includes('output/custom.json'),'未见过的产物有可见的生成状态');
+  check(!text.includes('第 8 阶段')&&!text.includes('第 10 阶段'),'阶段动作没有固定阶段编号');
+});
+await(async function(){
+  const original=globalThis.fetch;const posted=[];
+  const dynamic=Object.assign({},SNAP,{workflow:{ok:true,actions:[{id:'brand-new-action',stage:'brand-new-stage',label:'新声明动作'}]},stages:[Object.assign(stage('brand-new-stage',1,'动态动作','todo',[]),{ui:{panels:[]}})]});
+  try{
+    globalThis.__DSA__={snap:dynamic,pre:dynamic.preflight,loading:false,dialog:null,width:'wide',theme:'light',selected:'brand-new-stage'};
+    globalThis.fetch=async(url,init={})=>{if(init.method==='POST')posted.push({url:String(url),body:JSON.parse(init.body)});return {ok:true,status:200,json:async()=>({ok:true,state:dynamic})};};
+    PANEL=loadPanel().panel;const view=mountPanel({});
+    check(view.click('新声明动作'),'能点击声明中的新动作');await flush();await flush();view.render();
+    check(posted.some(call=>call.url.endsWith('/workflow/action')&&call.body.actionId==='brand-new-action'),'新动作使用通用执行接口和声明 ID');
+  }catch(error){check(false,'动态动作交互',String(error.stack||error));}
+  finally{globalThis.fetch=original;}
+})();
+
+scenario('动态工作流：损坏契约显示恢复入口，不渲染虚构阶段',{
+  selected:'',snap:Object.assign({},SNAP,{stages:[],error:'技能工作流不可用：依赖关系成环',workflow:{ok:false,error:'依赖关系成环'}})
+},function(tree,text){
+  check(text.includes('技能工作流暂不可用'),'契约错误有明确的页面状态');
+  check(text.includes('依赖关系成环'),'能读到实际错误原因');
+  check(text.includes('重新读取')&&text.includes('检查设置'),'保留重试和设置入口');
+  check(!text.includes('资料审计')&&!text.includes('范围与口径'),'不生成默认十阶段作为回退');
+});
 
 process.stdout.write('\n');
 if (failedCount) {  process.stdout.write('✗ ' + failedCount + ' 项失败\n');

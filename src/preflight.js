@@ -1,3 +1,4 @@
+import {workflowFor} from './workflow.js';
 /**
  * 启动自检（preflight）：把「skill 在不在」「Python 和依赖装没装」变成可读的结论。
  *
@@ -172,7 +173,7 @@ export function expectedScripts(defs = STAGE_DEFS) {
   return [...names];
 }
 
-export async function runPreflight({ skillRoot = '', pythonPath = 'python', defs = STAGE_DEFS } = {}) {
+export async function runPreflight({ skillRoot = '', pythonPath = 'python', defs } = {}) {
   const checks = [];
   const checkedAt = new Date().toISOString();
 
@@ -201,7 +202,10 @@ export async function runPreflight({ skillRoot = '', pythonPath = 'python', defs
     );
   }
 
-  const wanted = expectedScripts(defs);
+  let workflow;
+  try{workflow=skill.ok?workflowFor({},skill.packageDir):null;if(!defs)defs=workflow?.stages||[];checks.push(check('workflow','技能工作流',workflow?'pass':'unjudged',workflow?`${workflow.stages.length} 个阶段 · ${workflow.version}`:'技能包未就位',''));}
+  catch(error){defs=[];checks.push(check('workflow','技能工作流','fail',error.message,'安装包含工作流契约的完整技能包'));}
+  const wanted = expectedScripts([...(defs||[]),...(workflow?.actions||[])]);
   if (!skill.ok) {
     checks.push(check('scripts', '阶段脚本', 'unjudged', '技能包未就位，无从检查', '先修好技能包目录'));
   } else {

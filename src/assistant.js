@@ -1,3 +1,4 @@
+import {defaultWorkflow,workflowFor} from './workflow.js';
 /**
  * LLM 桥：把「写东西」这一步接回 DSH 自己的模型选择与 llm 服务。
  *
@@ -17,68 +18,9 @@ import { isInside } from './skill.js';
 import { analysisFile, readFigures } from './audit.js';
 import { recheckSummary } from './recheck.js';
 
-/** 起草任务：每一项对应「人/模型负责」的一步，落点固定在项目 docs/ 下。 */
-export const DRAFT_TASKS = [
-  {
-    id: 'scope',
-    stage: 'scope',
-    label: '研究范围与口径',
-    file: 'docs/scope.md',
-    brief: '写研究范围：研究问题、假设、样本与时间口径、纳入排除标准、关键变量与测量、分析策略、交付物清单。',
-    need: ['项目骨架', 'docs/scope.md（若有）', 'data/ 文件清单', '审计摘要'],
-  },
-  {
-    id: 'codebook',
-    stage: 'coding',
-    label: '变量字典与编码规则',
-    file: 'docs/codebook.md',
-    brief: '写变量字典：每个变量一行（变量名、含义、类型、取值/编码、来源字段、缺失处理、是否进分析）。只写材料里能看到的列。',
-    need: ['analysis.csv 表头与样本行', 'docs/scope.md', '编码/审计摘要'],
-  },
-  {
-    id: 'verify',
-    stage: 'verify',
-    label: '逐格复核说明',
-    file: 'docs/verify-notes.md',
-    brief: '按 dataset_verification.json 与 cell_issues.csv 写复核说明：每个数据集的主键与单位、复核了多少格、哪些格退回、退回原因（缺来源/定位不到/派生规则不成立）、以及 prepare→final 之间改了哪些原件。**不要把「prepare 生成了模板」写成「已经复核通过」**。',
-    need: ['research_registry.json', 'output/data_verification/dataset_verification.json', 'output/data_verification/cell_issues.csv', 'output/source_coverage.jsonl'],
-  },
-  {
-    id: 'figures',
-    stage: 'figures',
-    label: '图表题注与解读',
-    file: 'docs/figure-notes.md',
-    brief: '为清单里的每张图写一条题注（图号、标题、含 N）与 2–3 句解读；N 只能取 manifest 的 n 列。缺 N 的图要明确写「N 未记录」。',
-    need: ['chart_pack/chart_manifest.csv', 'docs/scope.md'],
-  },
-  {
-    id: 'manuscript',
-    stage: 'manuscript',
-    label: '文稿小节',
-    file: 'docs/manuscript-notes.md',
-    brief: '按实证论文结构写「方法」「结果」小节草稿。每个数字都要来自统计输出，句末用（模型名 · 变量）标注来源；没有出处就不写数字。',
-    need: ['output/models 的系数与拟合摘要', '图表清单', 'docs/scope.md'],
-  },
-  {
-    id: 'qa',
-    stage: 'qa',
-    label: '质检问题说明',
-    file: 'docs/qa-notes.md',
-    brief: '把终检报告里的问题按 error / warning 分组，逐条说明「是什么、影响什么、怎么处理」；input 类（没得查）单独一节，不要算成数字错误。',
-    need: ['output/qa/qa_report.json', 'output/verify/number_issues.csv'],
-  },
-  {
-    id: 'recheck',
-    stage: 'recheck',
-    label: '复核问题清单',
-    file: 'docs/recheck-notes.md',
-    brief: '按 12 项复核清单逐项判断：每条问题写 id（RC-001…）、severity（error/warning/info）、where（文件:行 或 阶段）、claim（哪里不成立）、evidence（数字/行号）、fix_kind（edit-text/edit-code/rerun/accept-risk/ask-user）。'
-      + '只依据证据包，不要猜；证据不足就写「证据不足，建议人工核对」。最后给一张 12 项覆盖表（R1–R12：checked / unchecked+理由）。',
-    need: ['机器复算 12 项', 'analysis.csv 与 dataset.csv 样本', '图表清单与模型摘要', '数字溯源与终检报告'],
-  },
-];
-
-export const DRAFT_BY_ID = new Map(DRAFT_TASKS.map((task) => [task.id, task]));
+/** Compatibility view; task content is owned by the skill. */
+export const DRAFT_TASKS=new Proxy([], {get(_target,key){const tasks=defaultWorkflow().draftTasks;const value=Reflect.get(tasks,key);return typeof value==='function'?value.bind(tasks):value;}});
+export const DRAFT_BY_ID={get(id){return defaultWorkflow().draftTasks.find(task=>task.id===id);}};
 
 const CONTEXT_BUDGET = 14000;
 const MAX_TEXT = 200000;
@@ -148,6 +90,8 @@ export function buildContext(projectRoot, project, task) {
     if (read.ok && read.text.trim()) push(title, read.text);
     else missing.push(rel);
   };
+
+  for(const file of task.contextFiles||[])take(file,file,4000);
 
   const scopeNote = typeof project?.scope === 'string'
     ? project.scope
@@ -462,7 +406,7 @@ export class Assistant {
   async draft({ taskId, instruction = '', signal } = {}) {
     const gate = this.available();
     if (!gate.ok) return { ok: false, error: gate.reason };
-    const task = DRAFT_BY_ID.get(String(taskId || ''));
+    const task = this.tasks().find(task=>task.id===String(taskId||''));
     if (!task) return { ok: false, error: `未知任务：${taskId}` };
 
     const route = this.route();
@@ -555,9 +499,14 @@ export class Assistant {
     };
   }
 
+  tasks(){
+    const active=this.resolveProject();
+    return workflowFor(active.ok?active.project:{},this.getConfig().skillRoot).draftTasks;
+  }
+
   /** 只允许写回该任务固定的 docs/ 落点；不覆盖非本插件生成的文件除非用户明确点了写入。 */
   save({ taskId, text } = {}) {
-    const task = DRAFT_BY_ID.get(String(taskId || ''));
+    const task = this.tasks().find(task=>task.id===String(taskId||''));
     if (!task) return { ok: false, error: `未知任务：${taskId}` };
     const body = String(text || '');
     if (!body.trim()) return { ok: false, error: '没有内容可写' };

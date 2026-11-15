@@ -29,7 +29,7 @@ function isSkillPackage(dir) {
 export function resolveSkillRoot(configSkillRoot) {
   const tried = [];
   const configured = String(configSkillRoot || '').trim();
-  const candidates = configured ? [configured] : SKILL_CANDIDATES.slice();
+  const candidates = configured ? [configured] : [process.env.DSA_SKILL_ROOT,...SKILL_CANDIDATES].filter(Boolean);
   for (const candidate of candidates) {
     const raw = String(candidate || '').trim();
     if (!raw) continue;

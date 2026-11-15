@@ -4,48 +4,62 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import { validateSchema } from './gate-schema.js';
+import { readMemo } from './read-scope.js';
 
 export const CHECKPOINTS=['data-ready','analysis-ready','figures-ready','manuscript-ready','delivery-ready'];
 const states=['pass','fail','unjudged','na'];
 const FEATURES=['coverage-v1','relative-roots-v1','project-aliases-v1','package-closure-v1'];
-const sha=file=>{if(fs.statSync(file).size>2*1024**3)throw Error('verification-budget');const fd=fs.openSync(file,'r');try{const hash=crypto.createHash('sha256'),buffer=Buffer.alloc(1024*1024);let count;while((count=fs.readSync(fd,buffer,0,buffer.length,null)))hash.update(buffer.subarray(0,count));return hash.digest('hex');}finally{fs.closeSync(fd);}};
+const sha=file=>readMemo(`sha:${file}`,()=>{if(fs.statSync(file).size>2*1024**3)throw Error('verification-budget');const fd=fs.openSync(file,'r');try{const hash=crypto.createHash('sha256'),buffer=Buffer.alloc(1024*1024);let count;while((count=fs.readSync(fd,buffer,0,buffer.length,null)))hash.update(buffer.subarray(0,count));return hash.digest('hex');}finally{fs.closeSync(fd);}});
 
 function relativeSyntax(relative) {
   if(typeof relative!=='string'||!relative||relative.includes('\\')||relative.includes(':')||relative.includes('\0')||relative.split('/').includes('..')||path.posix.normalize(relative)!==relative||path.isAbsolute(relative))throw Error('unsafe-path');
 }
 
+function physicalPath(file){
+  // Windows 的原生解析器直接解析 junction；每条物理路径只在本次读作用域解析一次。
+  return readMemo(`physical:${file}`,()=>process.platform==='win32'?fs.realpathSync.native(file):fs.realpathSync(file));
+}
+
+function realRoot(root){
+  return readMemo(`rr:${root}`,()=>physicalPath(root));
+}
+
 export function safePath(root, relative) {
   relativeSyntax(relative);
-  const base=fs.realpathSync(root), target=path.resolve(base,relative);
-  let existing=target;
-  while(!fs.existsSync(existing))existing=path.dirname(existing);
-  const real=fs.realpathSync(existing), rel=path.relative(base,real);
-  if(rel.startsWith('..')||path.isAbsolute(rel))throw Error('outside-root');
-  return target;
+  // 同一次快照里同一条路径会被核验成百上千次，而 realpath/existsSync 走查是纯读盘事实：
+  // 挂进读盘去重作用域，作用域外（写操作/路由）仍然每次现算，行为不变。
+  return readMemo(`sp:${root}\u0000${relative}`, () => {
+    const base=realRoot(root), target=path.resolve(base,relative);
+    const real=realTarget(target), rel=path.relative(base,real);
+    if(rel.startsWith('..')||path.isAbsolute(rel))throw Error('outside-root');
+    return target;
+  });
 }
 
 export function materialRoots(root) {
-  const file=safePath(root,'.workbench/gates/roots.json');
-  if(!fs.existsSync(file))return {};
-  const value=read(file);
-  if(value.schema!=='dsa.gate-roots/1'||!value.roots||typeof value.roots!=='object')throw Error('invalid-material-roots');
-  for(const [id,base] of Object.entries(value.roots))if(!/^material:[A-Za-z0-9_.-]+$/.test(id)||typeof base!=='string'||!path.isAbsolute(base))throw Error('invalid-material-root');
-  return value.roots;
+  return readMemo(`material-roots:${root}`,()=>{
+    const file=safePath(root,'.workbench/gates/roots.json');
+    if(!fs.existsSync(file))return {};
+    const value=read(file);
+    if(value.schema!=='dsa.gate-roots/1'||!value.roots||typeof value.roots!=='object')throw Error('invalid-material-roots');
+    for(const [id,base] of Object.entries(value.roots))if(!/^material:[A-Za-z0-9_.-]+$/.test(id)||typeof base!=='string'||!path.isAbsolute(base))throw Error('invalid-material-root');
+    return value.roots;
+  });
 }
 
 export function projectResourcePath(root,relative) {
   relativeSyntax(relative);
-  try{return safePath(root,relative);}catch(error){
-    const target=path.resolve(root,relative);
-    let existing=target;
-    while(!fs.existsSync(existing))existing=path.dirname(existing);
-    const actual=fs.realpathSync(existing);
-    for(const base of Object.values(materialRoots(root))){
-      const rel=path.relative(fs.realpathSync(base),actual);
-      if(!rel.startsWith('..')&&!path.isAbsolute(rel))return target;
+  return readMemo(`project-resource:${root}\u0000${relative}`,()=>{
+    try{return safePath(root,relative);}catch(error){
+      const target=path.resolve(root,relative);
+      const actual=realTarget(target);
+      for(const base of Object.values(materialRoots(root))){
+        const rel=path.relative(realRoot(base),actual);
+        if(!rel.startsWith('..')&&!path.isAbsolute(rel))return target;
+      }
+      throw error;
     }
-    throw error;
-  }
+  });
 }
 
 // A recursive JSON reader rejects duplicate keys before JSON.parse can erase them.
@@ -98,7 +112,7 @@ export function implementationBindings(skillRoot){
   if(expected.size!==declared.length)throw Error('duplicate-implementation-member');
   const seen=new Set();
   function visit(relative){
-    const directory=safePath(skillRoot,relative),real=fs.realpathSync(directory);
+    const directory=safePath(skillRoot,relative),real=physicalPath(directory);
     if(seen.has(real))throw Error('implementation-cycle');seen.add(real);
     for(const entry of fs.readdirSync(directory,{withFileTypes:true})){
       if(entry.name==='__pycache__')continue;
@@ -126,16 +140,24 @@ export function validatePolicyCatalog(policy,skillRoot){
   }
 }
 
+// 运行环境也是报告绑定的一部分；只在本次请求内去重，不跨请求复用旧版本。
 export function currentEnvironment(skillRoot,python='python'){
-  const process=spawnSync(python,[safePath(skillRoot,'scripts/gates.py'),'environment'],{encoding:'utf8',timeout:15000,maxBuffer:1024*1024,windowsHide:true});
-  if(process.status!==0)throw Error('environment-unavailable');
-  return strictJson(process.stdout);
+  return readMemo(`environment:${skillRoot}\u0000${python}`,()=>{
+    const child=spawnSync(python,[safePath(skillRoot,'scripts/gates.py'),'environment'],{encoding:'utf8',timeout:15000,maxBuffer:1024*1024,windowsHide:true});
+    if(child.status!==0)throw Error('environment-unavailable');
+    return strictJson(child.stdout);
+  });
 }
 
 function realTarget(file){
-  let existing=file;
-  while(!fs.existsSync(existing))existing=path.dirname(existing);
-  return path.resolve(fs.realpathSync(existing),path.relative(existing,file));
+  return readMemo(`rt:${file}`,()=>{
+    try{return physicalPath(file);}catch(error){
+      if(!['ENOENT','ENOTDIR'].includes(error.code))throw error;
+      let existing=path.dirname(file);
+      while(!fs.existsSync(existing))existing=path.dirname(existing);
+      return path.resolve(physicalPath(existing),path.relative(existing,file));
+    }
+  });
 }
 
 export function resourceAliasesCurrent(root,resource,canonical){

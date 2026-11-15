@@ -145,14 +145,15 @@
         aiFailed: '投递任务卡失败',
         chatUnavailable: 'DSH 会话服务不可用（宿主没暴露 sessions）',
         chatNoProject: '先打开一个项目',
-        nextStep: '运行下一步',
-        nextAllDone: '所有阶段都已完成',
-        nextManual: '下一步要人工完成',
+        nextStep: '运行',
+        nextAllDone: '全部完成',
         nextStarting: '启动中…',
         nextStarted: '已启动',
         nextStartFailed: '启动失败',
         nextStateRunning: '运行中',
         nextStateManual: '待人工',
+        nextStateBlocked: '被拦住',
+        nextStateReview: '待裁定',
         tailTitle: '工作台',
         tailOpen: '打开',
         chatCardTitle: '研究对话',
@@ -255,7 +256,7 @@
       var CHAIN_STATUS = { running: 'chainRunning', waiting: 'chainWaiting', done: 'chainDone', stopped: 'chainStopped', cancelled: 'chainCancelled' };
       var RUN_WORD = { ok: '成功', failed: '失败', cancelled: '已取消', running: '运行中', interrupted: '被中断' };
       // 面板阶段 → AI 起草任务的对应关系：没有脚本的阶段，主按钮应该直接把起草任务打开
-      var STAGE_TASK = { scope: 'scope', coding: 'codebook', verify: 'verify', figures: 'figures', manuscript: 'manuscript', qa: 'qa', recheck: 'recheck' };
+      function hasPanel(stage,panel){return Boolean(stage&&stage.ui&&stage.ui.panels&&stage.ui.panels.indexOf(panel)>=0);}
       function fmtTime(iso) {
         if (!iso) return '';
         var date = new Date(iso);
@@ -677,6 +678,59 @@
         });
       }
       /** 原生会话侧读工作台摘要：payload 只含 active/summary/totals/next，不搬图表清单。 */
+      // 共享轮询：同一会话的 N 个 WorkbenchTail（每轮对话一个）+ NextStepControl 共用一个定时器、
+      // 一条在途请求。此前每个组件各起 setInterval，几十轮对话就是几十个轮询器打 /summary，
+      // 宿主单线程全耗在整项目快照重算上（实测一次约 5 秒），整个应用被拖死。
+      // 现在按 sessionId 合并：一个会话最多 10 秒一次；页面不可见时暂停，回前台立刻补一次。
+      var SUMMARY_POLL_MS = 10000;
+      var summaryHub = new Map();
+      function hubEntry(key) {
+        var entry = summaryHub.get(key);
+        if (!entry) {
+          entry = { subs: new Set(), timer: null, inflight: false, state: null, err: '' };
+          summaryHub.set(key, entry);
+        }
+        return entry;
+      }
+      function hubFetch(key) {
+        var entry = hubEntry(key);
+        if (entry.inflight) return Promise.resolve(entry.state);
+        if (typeof document !== 'undefined' && document.hidden) return Promise.resolve(entry.state);
+        entry.inflight = true;
+        return getSummary(key).then(function (json) {
+          entry.inflight = false;
+          if (json && json.ok) {
+            entry.state = json;
+            entry.err = '';
+          } else {
+            entry.err = (json && json.error) || t('loadFail');
+          }
+          entry.subs.forEach(function (notify) { notify(entry.state, entry.err); });
+          return entry.state;
+        }).catch(function (e) {
+          entry.inflight = false;
+          entry.err = String((e && e.message) || e);
+          entry.subs.forEach(function (notify) { notify(entry.state, entry.err); });
+          return entry.state;
+        });
+      }
+      function hubEnsureTimer(key) {
+        var entry = hubEntry(key);
+        if (entry.timer) return;
+        entry.timer = setInterval(function () { void hubFetch(key); }, SUMMARY_POLL_MS);
+      }
+      function hubRelease(key) {
+        var entry = summaryHub.get(key);
+        if (!entry || entry.subs.size > 0) return;
+        if (entry.timer) clearInterval(entry.timer);
+        summaryHub.delete(key);
+      }
+      if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+        document.addEventListener('visibilitychange', function () {
+          if (!document.hidden) summaryHub.forEach(function (_entry, key) { void hubFetch(key); });
+        });
+      }
+      // intervalMs 参数保留兼容旧调用，实际节奏统一为 SUMMARY_POLL_MS（共享后不能再各轮各的）
       function useWorkbenchState(intervalMs, deps, sessionId) {
         var stateTuple = useState(null);
         var state = stateTuple[0];
@@ -684,28 +738,26 @@
         var errTuple = useState('');
         var err = errTuple[0];
         var setErr = errTuple[1];
+        var key = sessionId || '';
         var reload = useCallback(function () {
-          return getSummary(sessionId).then(function (json) {
-            if (json && json.ok) {
-              setState(json);
-              setErr('');
-            } else {
-              setErr((json && json.error) || t('loadFail'));
-            }
-          }).catch(function (e) {
-            setErr(String((e && e.message) || e));
-          });
-        }, [sessionId]);
+          return hubFetch(key);
+        }, [key]);
         useEffect(function () {
-          void reload();
-          if (!intervalMs) return undefined;
-          var timer = setInterval(function () {
-            void reload();
-          }, intervalMs);
-          return function () {
-            clearInterval(timer);
+          var entry = hubEntry(key);
+          var notify = function (nextState, nextErr) {
+            setState(nextState);
+            setErr(nextErr);
           };
-        }, [reload].concat(deps || []));
+          entry.subs.add(notify);
+          // 共享结果已经在了就直接用：新挂载的轮次徽章不再各自打一次请求
+          if (entry.state || entry.err) notify(entry.state, entry.err);
+          hubEnsureTimer(key);
+          void hubFetch(key);
+          return function () {
+            entry.subs.delete(notify);
+            hubRelease(key);
+          };
+        }, [key].concat(deps || []));
         return [state, reload, err];
       }
       function useSessionRunning(sessionId) {
@@ -843,12 +895,12 @@
           h('button', { type: 'button', className: 'dsa-chat-btn', onClick: openWorkbenchPanel }, t('tailOpen'))
         );
       }
-      /* 输入行左侧的「下一步」：四种状态装在同一个按钮里，不再往旁边追加一句话——         追加的那句会把输入行撑长，点完还一直挂着（按钮已经换成下一阶段，旁边仍写着         「已启动：上一阶段」）。状态只来自两处真东西：本次请求的结果、/summary 里         next.status。没有假进度，也没有前端计时器造出来的「进行中」。 */
+      /* 输入行左侧的「下一步」：所有状态装在同一个按钮里，不再往旁边追加一句话——         追加的那句会把输入行撑长，点完还一直挂着（按钮已经换成下一阶段，旁边仍写着         「已启动：上一阶段」）。状态只来自两处真东西：本次请求的结果、/summary 里         next.status。没有假进度，也没有前端计时器造出来的「进行中」。文案按「两字动词 +         阶段简称」收：▶ 运行 范围 / ● 运行中 统计 / → 待裁定 图表。 */
       function NextStepControl(props) {
         var tuple = useWorkbenchState(8000, [props.sessionId], props.sessionId);
         var state = tuple[0];
         var reload = tuple[1];
-        // idle | starting | ok | error：只记这一次点击；运行中 / 待人工取自服务端
+        // idle | starting | ok | error：只记这一次点击；运行中 / 被拦住 / 待裁定 / 待人工取自服务端
         var phaseTuple = useState('idle');
         var phase = phaseTuple[0];
         var setPhase = phaseTuple[1];
@@ -873,6 +925,9 @@
           return h('span', { className: 'dsa-cmp' }, h('span', { className: 'dsa-cmp-text' }, t('nextAllDone')));
         }
         var running = next.status === 'running';
+        // 芯片只放简称（范围 / 统计 / 图表…），完整阶段名留给悬停与面板：输入行本来就窄，
+        // 「运行下一步 编码与抽取」这种一行两截全名的写法，读起来比按钮本身还长
+        var stageName = next.short || next.name;
         // 只有「未开始」才直接从输入行起跑：被拦住 / 待人工要先看清拦截原因，
         // 否则点下去只会收到一句 409，还得再来一次面板。这两种状态点开工作台定位。
         var runnable = Boolean(next.script) && next.status === 'todo';
@@ -888,7 +943,7 @@
           request('POST', '/stage/run', { stageId: next.id, sessionId: props.sessionId }).then(function (json) {
             if (json && json.ok) {
               setPhase('ok');
-              setFlash(t('nextStarted') + ' ' + next.name);
+              setFlash(t('nextStarted') + ' ' + stageName);
               void reload();
               return;
             }
@@ -911,16 +966,17 @@
             dot: true,
             tone: 'run',
             label: t('nextStateRunning'),
-            name: next.name,
+            name: stageName,
             hint: '「' + next.name + '」正在运行，点一下打开工作台看日志'          };
         } else if (runnable) {
-          view = { glyph: '▶', label: t('nextStep'), name: next.name, hint: '在工作台里运行「' + next.name + '」' };
+          view = { glyph: '▶', label: t('nextStep'), name: stageName, hint: '在工作台里运行「' + next.name + '」' };
         } else {
+          // 点一下只能去看原因，所以标签分清「被卡住」和「等你拍板」，不再一律吞成「待人工」
           view = {
             glyph: '→',
-            label: t('nextStateManual'),
-            name: next.name,
-            hint: t('nextManual') + '，点一下打开工作台'          };
+            label: next.status === 'blocked' ? t('nextStateBlocked') : next.status === 'review' ? t('nextStateReview') : t('nextStateManual'),
+            name: stageName,
+            hint: '「' + next.name + '」没法直接起跑，点一下打开工作台看原因'          };
         }
         var icon = view.spinner          ? h('span', { className: 'dsa-cmp-spin', 'aria-hidden': 'true' })          : view.dot            ? h('span', { className: 'dsa-cmp-dot', 'aria-hidden': 'true' })            : h('span', { className: 'dsa-cmp-icon', 'aria-hidden': 'true' }, view.glyph);
         return h(
@@ -1625,7 +1681,73 @@
         '.dsa-sk-card{height:64px;border:1px solid var(--dsa-line);border-radius:var(--dsa-r,6px);background:var(--dsa-card);}',
         '.dsa-sk-block{border:1px solid var(--dsa-line);border-radius:var(--dsa-r,6px);background:var(--dsa-card);padding:10px 0;}',
         '.dsa-skeleton .dsa-side .dsa-sk-block{margin:10px 12px;}',
-        '@media (prefers-reduced-motion:reduce){.dsa-sk-bar{animation:none;opacity:.75}}'      ].join('');
+        '@media (prefers-reduced-motion:reduce){.dsa-sk-bar{animation:none;opacity:.75}}',
+        // ==================================================================
+        // 密度档：紧凑（用户要「间距调小、紧凑一点」）
+        // 口径：只收紧「内边距 / 行高 / 间距 / 控件尺寸」，不动栏宽——
+        //      栏宽一动，窄屏立刻横向溢出（视觉回归会抓 docWidth > viewWidth）。
+        // 同时保证：并排控件最小间隙 8px，按钮永远不粘连；顶栏高度收进一个变量，
+        //      抽屉/遮罩的起始位置跟着它走，不再写死 44px（原来比 58px 的顶栏短一截）。
+        // ==================================================================
+        '.dsa-root{--dsa-top-h:46px;}',
+        '.dsa-top{height:var(--dsa-top-h);flex:0 0 var(--dsa-top-h);gap:8px;padding:0 12px;}',
+        '.dsa-root[data-dsa-width="narrow"] .dsa-side{top:var(--dsa-top-h);}',
+        '.dsa-scrim{inset:var(--dsa-top-h) 0 0 0;}',
+        '.dsa-logo{flex:0 0 26px;width:26px;height:26px;border-radius:8px;font-size:13px;}',
+        '.dsa-brand{gap:8px;}',
+        '.dsa-brand b{font-size:13px;}',
+        '.dsa-brand-tx span{font-size:11px;}',
+        // 顶栏与阶段头的按钮统一 28px：一排并排时高度一致，缝才看得见
+        '.dsa-chip{height:22px;padding:0 9px;font-size:11px;}',
+        '.dsa-btn{height:28px;padding:0 10px;font-size:12px;}',
+        '.dsa-menu>summary{height:28px;padding:0 10px;font-size:12px;}',
+        '.dsa-menu-list{top:32px;}',
+        '.dsa-menu-list button{padding:6px 8px;font-size:12px;}',
+        // 左栏：项目行与阶段行各收 1–2px，14 个项目时一屏能多露两行
+        '.dsa-rail{padding:10px 10px 0;}',
+        '.dsa-rail-h{padding:0 5px 6px;font-size:11px;}',
+        '.dsa-proj{padding:6px 7px;}',
+        '.dsa-proj-h{gap:6px;}',
+        '.dsa-proj-name{font-size:12px;}',
+        '.dsa-proj-path{font-size:11px;}',
+        '.dsa-proj-actions{gap:10px;padding:4px 3px 0;}',
+        '.dsa-stage{padding:4px 7px;gap:8px;}',
+        '.dsa-stage-name{font-size:12px;}',
+        '.dsa-stage-meta{padding:1px 6px;font-size:11px;}',
+        // 主区：外框与 hero 各收一圈，KPI 数字小一号（21→18），五张卡照样一屏排开
+        '.dsa-main{padding:12px 14px 36px;}',
+        '.dsa-hero{padding:12px 14px;margin:0 0 10px;}',
+        '.dsa-h1{font-size:18px;}',
+        '.dsa-sub{margin:3px 0 0;font-size:12px;}',
+        '.dsa-kpis{gap:8px;margin:0 0 10px;}',
+        '.dsa-kpi{padding:8px 11px;}',
+        '.dsa-kpi .k{font-size:11px;}',
+        '.dsa-kpi .v{font-size:18px;margin-top:1px;}',
+        '.dsa-section{margin:14px 0 6px;}',
+        '.dsa-pad{padding:10px 12px;}',
+        '.dsa-gate{padding:9px 12px;gap:8px;}',
+        '.dsa-next{padding:10px 13px;margin:0 0 10px;gap:10px;}',
+        '.dsa-next-line{font-size:13.5px;}',
+        '.dsa-next-sub{font-size:12px;margin-top:2px;}',
+        '.dsa-fold{margin-top:6px;}',
+        '.dsa-fold>summary{padding:7px 12px;font-size:12px;}',
+        '.dsa-fold-body{padding:9px 11px 10px;}',
+        '.dsa-fold-quiet>summary{padding:6px 9px;font-size:11.5px;}',
+        '.dsa-hint{font-size:11.5px;}',
+        '.dsa-kv{gap:12px;}',
+        // 右栏运行台：卡片与日志各收一圈，日志区因此更长
+        '.dsa-side-h{height:40px;}',
+        '.dsa-runs{margin:10px 10px 0;}',
+        '.dsa-run{padding:6px 9px;}',
+        '.dsa-run-h{margin:9px 10px 0;padding:8px 10px;}',
+        '.dsa-log{margin:9px 10px 0;padding:10px 12px;}',
+        '.dsa-chat-card{margin:10px 10px 0;}',
+        '.dsa-tab{padding:4px 10px;font-size:11.5px;}',
+        '.dsa-tag{height:18px;line-height:17px;padding:0 6px;font-size:11px;}',
+        '.dsa-badge{height:17px;line-height:16px;padding:0 6px;}',
+        // 兜底：并排的两个控件之间至少 8px，谁也别贴谁（0 间隙是「挤到一起」的元凶）
+        '.dsa-row{gap:8px;}',
+        '.dsa-inline{gap:8px;}'      ].join('');
       function installStyles() {
         if (document.getElementById('dsa-style')) return function () {};
         var el = document.createElement('style');
@@ -1721,7 +1843,7 @@
         var items = [];
         if (props.onDraft) items.push({ label: '写一份草稿', hint: '不跑脚本，只依据已有产物，落 docs/', run: props.onDraft });
         if (props.onChat) items.push({ label: '在对话里做这一步', hint: '投任务卡到项目会话，会改文件', run: props.onChat });
-        if (props.onReview) items.push({ label: '复核（第 10 阶段）', hint: '让模型按证据包写问题清单', run: props.onReview });
+        if (props.onReview) items.push({ label: '复核', hint: '让模型按证据包写问题清单', run: props.onReview });
         if (!items.length) return null;
         return h(
           'details',
@@ -2010,12 +2132,16 @@
         }
         // 宿主没重启时快照里不会有 registry（v2 才有）：新入口要降级成「重启后可用」，而不是报错
         var hostStale = Boolean(snap && snap.ok && snap.registry === undefined);
-        var selectedState = useState('scope');
+        var selectedState = useState('');
         var selected = selectedState[0];
         var setSelected = selectedState[1];
         var dialogState = useState(null);
         var dialog = dialogState[0];
-        var setDialog = dialogState[1];
+        var setDialogState = dialogState[1];
+        var setDialog = useCallback(function (next) {
+          setError('');
+          setDialogState(next);
+        }, []);
         // 起草结果按任务留在面板层：关掉弹窗（Esc/遮罩/取消）不该丢掉刚生成的正文
         var draftMemoState = useState({});
         var draftMemo = draftMemoState[0];
@@ -2309,11 +2435,11 @@
           actionCountRef.current += 1;
           setBusy(true);
           setError('');
+          if (path === '/stage/run' || path === '/gates/control') setGateNote('');
           var gateOperation = null;
           if (path === '/gates/control' && body && body.action === 'inspect') {
             gateOperation = {projectId:activeIdRef.current,stageId:body.stageId||'',startedAt:new Date().toISOString()};
             setGateOp(gateOperation);
-            setGateNote('');
           }
           // 用户自己点开的项目：记下「这次是人的选择」，跟着对话走的那条逻辑不要再覆盖它
           if (path === '/project/open' && body && body.dir) {
@@ -2403,7 +2529,7 @@
               var skipped = '';
               if (json.skippedNoPng) skipped += '；' + json.skippedNoPng + ' 张图缺 png（补齐后重排）';
               if (json.skippedBadStatus) {
-                skipped += '；' + json.skippedBadStatus + ' 张图在清单里是失败状态' +                  (json.skippedBadExample ? '（如 ' + json.skippedBadExample + '）' : '') + '（先重跑第 7 阶段）';
+                skipped += '；' + json.skippedBadStatus + ' 张图在清单里是失败状态' +                  (json.skippedBadExample ? '（如 ' + json.skippedBadExample + '）' : '') + '（先重跑图表阶段）';
               }
               setManNote(
                 '已生成 ' + json.file + '：' + json.blocks + ' 块（图 ' + json.figures + ' / 表 ' + json.tables + ' / 待补 ' + json.placeholders + '）' +                  skipped +                  (json.backup ? '；原文件已备份到 ' + json.backup : '') +                  (json.warning ? '。注意：' + json.warning : '')
@@ -2573,10 +2699,10 @@
         var reviewNow = useCallback(function () {
           var target = null;
           for (var i = 0; i < (snap?.stages || []).length; i += 1) {
-            if (snap.stages[i].id === 'recheck') target = snap.stages[i];
+            if (hasPanel(snap.stages[i],'recheck')) target = snap.stages[i];
           }
           if (!target) return;
-          setSelected('recheck');
+          setSelected(target.id);
           doAskAI(target);
         }, [snap, doAskAI]);
         // 只打开对话，不投递：已有会话直接进；没有就先建一个空会话
@@ -2680,7 +2806,7 @@
               return value;
             });
         }, [snap, busy]);
-        /* ---------------- 复核（第 10 阶段） ---------------- */
+        /* ---------------- 复核 ---------------- */
         // 只有选中复核阶段才拉：12 项检查 + 问题清单不该跟着 /state 每 8 秒轮询
         var recheckState = useState(null);
         var recheck = recheckState[0];
@@ -2745,7 +2871,7 @@
             });
         }, [snap && snap.active ? snap.active.id : '']);
         useEffect(function () {
-          if (selected !== 'recheck') return undefined;
+          if (!hasPanel((snap&&snap.stages||[]).find(function(stage){return stage.id===selected;}),'recheck')) return undefined;
           void loadRecheck();
           // 重跑链/模型审计落盘后，复核页要自己更新：不要求用户每改一步都手动刷新
           var timer = setInterval(function () { void loadRecheck(); }, 5000);
@@ -3184,6 +3310,15 @@
             })
           )
         );
+        if(!current){
+          return h('div',{className:'dsa-root',ref:attachRoot,'data-dsa-width':width,'data-dsa-theme':theme},header,
+            h('div',{className:'dsa-body'},rail,h('main',{className:'dsa-main'},
+              h('h2',null,'技能工作流暂不可用'),
+              h('div',{className:'dsa-error',role:'alert'},snap.error||(snap.workflow&&snap.workflow.error)||'当前技能没有声明可用阶段，请检查工作流契约。'),
+              h('p',{className:'dsa-hint'},'检查技能目录、契约版本和依赖关系后刷新；项目资料与已有产物会保留。'),
+              h('div',{className:'dsa-row'},h(Btn,{onClick:function(){load();}},'重新读取'),h(Btn,{onClick:function(){setDialog({kind:'settings'});}},'检查设置')))),
+            dialog?renderDialog(dialog):null);
+        }
         /* ---------------- 闸门 ---------------- */
         var gateRank = { fail: 0, manual: 1, todo: 2, unjudged: 2, na: 8, pass: 9 };
         var informationalGates = (current.gates || []).filter(function (gate) { return gate.level === 'info'; });
@@ -3229,7 +3364,7 @@
             current.gateComparison.map(gateRowOf)):null);
         /* ---------------- 复核区（第 10 阶段） ---------------- */
         var recheckView = null;
-        if (current && current.id === 'recheck') {
+        if (current && hasPanel(current,'recheck')) {
           var rc = recheck || { checks: [], issues: [], coverage: {}, chain: null, openErrors: 0, openOthers: 0 };
           var chain = rc.chain;
           var sortKey = function (key) {
@@ -3385,11 +3520,14 @@
         /* ---------------- 产物 ---------------- */
         var artifacts = snap.artifacts || {};
         var artifactBlocks = [];
+        if(current.missingInputs&&current.missingInputs.length)artifactBlocks.push(h('div',{key:'workflow-inputs',className:'dsa-hint'},'运行前需补齐：'+current.missingInputs.join('、')));
+        var workflowActions=(snap.workflow&&snap.workflow.actions||[]).filter(function(item){return item.stage===current.id;});
+        if(workflowActions.length)artifactBlocks.push(h('details',{key:'workflow-actions',className:'dsa-fold'},h('summary',null,'阶段动作'),h('div',{className:'dsa-row'},workflowActions.map(function(item){return h(Btn,{key:item.id,disabled:busy,onClick:function(){action('/workflow/action',{actionId:item.id});}},item.label);} ))));
+        if(current.outputFiles&&current.outputFiles.length)artifactBlocks.push(h('details',{key:'workflow-outputs',className:'dsa-fold'},h('summary',null,'本阶段产物'),h('ul',null,current.outputFiles.map(function(file){return h('li',{key:file.path},file.exists?h('a',{href:artifactRawUrl(file.path,true),target:'_blank',rel:'noopener noreferrer'},file.path):h('span',null,file.path+' · 待生成'));}))));
+
         // 产物按阶段归属：审计看审计链、编码看编码链，别把全项目的东西堆到每个阶段
         var flowChains = (artifacts.flow || []).filter(function (chain) {
-          if (current.id === 'audit') return chain.file.indexOf('output/audit/') === 0;
-          if (current.id === 'coding') return chain.file.indexOf('output/coding/') === 0;
-          return false;
+          return (current.ui&&current.ui.artifactPrefixes||[]).some(function(prefix){return chain.file.indexOf(prefix)===0;});
         });
         if (flowChains.length) {
           artifactBlocks.push(
@@ -3428,7 +3566,7 @@
             )
           );
         }
-        if (artifacts.figures && artifacts.figures.total && current.id === 'figures') {
+        if (artifacts.figures && artifacts.figures.total && hasPanel(current,'figures')) {
           var figRows = artifacts.figures.rows || [];
           var figSum = artifacts.figures.summary || {};
           var shown = figsOpen ? figRows : figRows.slice(0, 10);
@@ -3506,7 +3644,7 @@
                   )                : null            )
           );
         }
-        if (artifacts.models && artifacts.models.length && current.id === 'stats') {
+        if (artifacts.models && artifacts.models.length && hasPanel(current,'models')) {
           artifactBlocks.push(
             h(
               'div',
@@ -3534,7 +3672,7 @@
             )
           );
         }
-        if (artifacts.verify && current.id === 'qa') {
+        if (artifacts.verify && hasPanel(current,'numbers')) {
           var counts = artifacts.verify.counts || {};
           var issues = artifacts.verify.issues || [];
           artifactBlocks.push(
@@ -3589,7 +3727,7 @@
             )
           );
         }
-        if (artifacts.analysis && current.id === 'dataset') {
+        if (artifacts.analysis && hasPanel(current,'analysis')) {
           var a = artifacts.analysis;
           artifactBlocks.push(
             h(
@@ -3611,7 +3749,7 @@
             )
           );
         }
-        if (current.id === 'manuscript') {
+        if (hasPanel(current,'manuscriptSpec')) {
           var man = artifacts.manuscript || 0;
           artifactBlocks.push(
             h(
@@ -3628,7 +3766,7 @@
             )
           );
         }
-        if (artifacts.qa && artifacts.qa.count && current.id === 'qa') {
+        if (artifacts.qa && artifacts.qa.count && hasPanel(current,'qa')) {
           artifactBlocks.push(
             h(
               'div',
@@ -3666,7 +3804,7 @@
         var pyName = (snap.config && snap.config.pythonPath) || 'python';
         // 多步阶段（终检）不能只显示第一步：参数在每一步里，命令回显会把用户看糊涂
         var stepScripts = (current && current.steps ? current.steps : []).filter(Boolean);
-        var cmdText = stepScripts.length > 1          ? stepScripts.map(function (s) { return pyName + ' ' + s; }).join('  →  ') + '（' + stepScripts.length + ' 步，参数见任务卡与运行日志）'          : pyName + ' ' + current.script + ' ' + (current.args || []).join(' ');
+        var cmdText = stepScripts.length > 1          ? stepScripts.map(function (s) { return pyName + ' ' + (typeof s==='string'?s:s.script); }).join('  →  ') + '（' + stepScripts.length + ' 步，参数见任务卡与运行日志）'          : pyName + ' ' + current.script + ' ' + (current.args || []).join(' ');
         /* ---------------- 下一步 ---------------- */
         // 面板最该回答的问题是「现在该干嘛」：用一条横幅把状态、卡点、动作说清楚
         var runningStage = null;
@@ -3676,7 +3814,7 @@
         var hasResearchRegistry = !!(snap && snap.artifacts && snap.artifacts.research          && snap.artifacts.research.registry && snap.artifacts.research.registry.exists);
         for (var ni = 0; ni < stages.length; ni += 1) {
           if (stages[ni].status === 'running') runningStage = stages[ni];
-          if (!nextStage && stages[ni].status !== 'done' && stages[ni].status !== 'na'            && !(stages[ni].id === 'verify' && !hasResearchRegistry && snap.gateMode !== 'skill')) nextStage = stages[ni];
+          if (!nextStage && stages[ni].status !== 'done' && stages[ni].status !== 'na'            && !stages[ni].hidden) nextStage = stages[ni];
         }
         var nextView = null;
         if (runningStage) {
@@ -3750,7 +3888,7 @@
                     (nextStage.lastRun ? '重跑' : '运行') + ' ' + nextStage.short                  )                : h(AiMenu, {
                     primary: false,
                     busy: busy,
-                    onDraft: STAGE_TASK[nextStage.id]                      ? function () { setDialog({ kind: 'draft', task: STAGE_TASK[nextStage.id] }); }                      : null,
+                    onDraft: (nextStage.ui&&nextStage.ui.draftTask)                      ? function () { setDialog({ kind: 'draft', task: (nextStage.ui&&nextStage.ui.draftTask) }); }                      : null,
                     onChat: function () { doAskAI(nextStage); },
                     onReview: reviewNow                  });
             } else {
@@ -3773,10 +3911,10 @@
         for (var mgi = 0; mgi < openGates.length; mgi += 1) {
           if (gateFace(openGates[mgi], current.status).cls === 'manual') { manualOpen = openGates[mgi]; break; }
         }
-        // 第 8 阶段没有 manuscript.json 时「运行」必然报 spec not found：
+        // 文稿阶段没有 manuscript.json 时「运行」必然报 spec not found：
         // 这时别让它当实心主按钮（同屏只该有一个主动作——生成骨架）
         var manSpec = snap && snap.artifacts ? snap.artifacts.manuscriptSpec : null;
-        var needSpec = current.id === 'manuscript' && (!manSpec || !manSpec.exists);
+        var needSpec = (hasPanel(current,'manuscriptSpec') && (!manSpec || !manSpec.exists)) || (current.missingInputs||[]).length>0;
         var headerPrimary = stageRunning          ? h(Btn, { variant: 'danger', disabled: busy, onClick: function () { doCancel(current); } }, '停止')          : manualOpen            ? h(
                 Btn,
                 {
@@ -3790,7 +3928,7 @@
                   {
                     variant: needSpec ? undefined : 'primary',
                     disabled: busy,
-                    title: needSpec ? '先有 manuscript.json 才能跑：下面先点「生成手稿骨架」' : current.script,
+                    title: needSpec ? '先补齐本阶段要求的输入文件' : current.script,
                     onClick: function () { doRun(current); }
                   },
                   current.lastRun ? '重跑' : '运行'                )              : null;
@@ -3819,7 +3957,7 @@
           kpiOf('review', '待裁定', stageSummary.review || 0, '项', false),
           kpiOf('fail', '闸门未过', gateTotals.fail || 0, '项', false)
         );
-        // 手稿骨架：第 8 阶段的输入文件脚本造不出来，给它一条明确的入口，别让人猜
+        // 手稿骨架：文稿阶段的输入文件脚本造不出来，给它一条明确的入口，别让人猜
         // 契约卡：项目级信息（数据集/模型/产物/结论），与当前选中阶段无关，所以放在 KPI 下面
         var registryCard = h(RegistryCard, {
           registry: snap && snap.registry,
@@ -3830,7 +3968,7 @@
           onAdopt: function () { doAdopt(false); }
         });
         var manuscriptBlock = null;
-        if (current && current.id === 'manuscript') {
+        if (current && hasPanel(current,'manuscriptSpec')) {
           var spec = snap && snap.artifacts ? snap.artifacts.manuscriptSpec : null;
           var specNum = function (value) {
             var number = Number(value);
@@ -3849,7 +3987,7 @@
               )
             );
           } else {
-            var specTitle = !spec.exists              ? '还没有 manuscript.json'              : spec.error                ? 'manuscript.json 跑不了'                : spec.invalidBlocks                  ? '结构有问题：' + specNum(spec.invalidBlocks) + ' 块会让第 8 阶段直接报错'                  : spec.figuresMissing                    ? '已就绪，但缺 ' + specNum(spec.figuresMissing) + ' 张图（第 8 阶段会失败）'                    : 'manuscript.json 已就绪';
+            var specTitle = !spec.exists              ? '还没有 manuscript.json'              : spec.error                ? 'manuscript.json 跑不了'                : spec.invalidBlocks                  ? '结构有问题：' + specNum(spec.invalidBlocks) + ' 块会让文稿阶段直接报错'                  : spec.figuresMissing                    ? '已就绪，但缺 ' + specNum(spec.figuresMissing) + ' 张图（文稿阶段会失败）'                    : 'manuscript.json 已就绪';
             var specParts = [];
             if (spec.exists && !spec.error) {
               specParts.push('块 ' + specNum(spec.blocks));
@@ -3886,7 +4024,7 @@
                       {
                         variant: spec.exists ? 'default' : 'primary',
                         disabled: manDisabled,
-                        title: stageRunning ? '先停掉正在跑的第 8 阶段' : spec.exists ? '按图表清单重排骨架（会覆盖现有正文）' : '按图表清单生成骨架',
+                        title: stageRunning ? '先停掉正在跑的文稿阶段' : spec.exists ? '按图表清单重排骨架（会覆盖现有正文）' : '按图表清单生成骨架',
                         onClick: function () {
                           if (spec.exists) {
                             setManAsk(true);
@@ -3920,7 +4058,7 @@
                       '正文还没写：「待补」段落要按改稿说明补成真正段落，写进去的每个数字都要能追到 output/models/ 或 output/dataset/analysis.csv。'                    )                  : spec.exists && !spec.placeholders && !spec.error && !manAsk                    ? h(
                         'div',
                         { className: 'dsa-hint', style: { marginTop: '7px' } },
-                        '正文都写好了：改完 manuscript.json 必须重跑第 8 阶段（生成 output/manuscript.docx），否则交付的还是上一版成稿。'                      )                    : null,
+                        '正文都写好了：改完 manuscript.json 必须重跑文稿阶段（生成 output/manuscript.docx），否则交付的还是上一版成稿。'                      )                    : null,
                 manNote                  ? h('div', { className: 'dsa-hint', role: 'status', 'aria-live': 'polite', style: { marginTop: '7px' } }, manNote)                  : null              )
             );
           }
@@ -3948,7 +4086,8 @@
               h('p', { className: 'dsa-sub' }, current.purpose),
               current.lastRun                ? h(
                     'div',
-                    { className: 'dsa-hint', style: { margin: '-6px 0 0' } },
+                    // 原来是 -6px：想让它贴住上一行，结果两行字压在一起（窄屏/紧凑档都能看出来）
+                    { className: 'dsa-hint', style: { margin: '4px 0 0' } },
                     '最近一次运行 ' + (RUN_WORD[current.lastRun.status] || current.lastRun.status)
                       + ' · ' + fmtTime(current.lastRun.endedAt || current.lastRun.startedAt)
                       + (current.lastRun.endedAt ? ' · ' + fmtSpan(current.lastRun.startedAt, current.lastRun.endedAt) : '')
@@ -3961,9 +4100,9 @@
               h(AiMenu, {
                 busy: busy,
                 primary: !hasScript && !stageRunning,
-                onDraft: STAGE_TASK[current.id]                  ? function () { setDialog({ kind: 'draft', task: STAGE_TASK[current.id] }); }                  : null,
-                onChat: current.id === 'recheck' ? null : function () { doAskAI(current); },
-                onReview: function () { if (current.id === 'recheck') doAskAI(current); else reviewNow(); }
+                onDraft: (current.ui&&current.ui.draftTask)                  ? function () { setDialog({ kind: 'draft', task: (current.ui&&current.ui.draftTask) }); }                  : null,
+                onChat: hasPanel(current,'recheck') ? null : function () { doAskAI(current); },
+                onReview: function () { if (hasPanel(current,'recheck')) doAskAI(current); else reviewNow(); }
               })
             )
           ),
@@ -4167,6 +4306,7 @@
           if (d.kind === 'draft') {
             return h(DraftDialog, {
               memo: draftMemo,
+              tasks:snap&&snap.workflow?snap.workflow.draftTasks||[]:[],
               initialTask: d.task || '',
               onMemo: function (taskId, text, meta) {
                 setDraftMemo(function (prev) {
@@ -4432,19 +4572,12 @@
         );
       }
       function DraftDialog(props) {
-        var fallbackTasks = [
-          { id: 'scope', label: '研究范围与口径', file: 'docs/scope.md' },
-          { id: 'codebook', label: '变量字典与编码规则', file: 'docs/codebook.md' },
-          { id: 'verify', label: '逐格复核说明', file: 'docs/verify-notes.md' },
-          { id: 'figures', label: '图表题注与解读', file: 'docs/figure-notes.md' },
-          { id: 'manuscript', label: '文稿小节', file: 'docs/manuscript-notes.md' },
-          { id: 'qa', label: '质检问题说明', file: 'docs/qa-notes.md' }
-        ];
+        var fallbackTasks = props.tasks || [];
         var catalogState = useState({ loading: true, ok: false, providers: [], tasks: fallbackTasks, default: null, error: '' });
         var catalog = catalogState[0];
         var setCatalog = catalogState[1];
         // 从面板「让 AI 起草」进来时直接落到对应任务，不用再手动选一次
-        var firstTask = props.initialTask || fallbackTasks[0].id;
+        var firstTask = props.initialTask || (fallbackTasks[0]&&fallbackTasks[0].id) || '';
         var taskState = useState(firstTask);
         var taskId = taskState[0];
         var setTaskId = taskState[1];
@@ -4474,7 +4607,7 @@
                 loading: false,
                 ok: Boolean(json.ok),
                 providers: json.providers || [],
-                tasks: json.tasks && json.tasks.length ? json.tasks : fallbackTasks,
+                tasks: Array.isArray(json.tasks) ? json.tasks : [],
                 default: json.default || null,
                 error: json.error || ''              });
             })
@@ -4486,7 +4619,7 @@
         for (var i = 0; i < catalog.tasks.length; i += 1) {
           if (catalog.tasks[i].id === taskId) current = catalog.tasks[i];
         }
-        if (!current) current = catalog.tasks[0] || fallbackTasks[0];
+        if (!current) current = catalog.tasks[0] || {id:'',label:catalog.loading?'正在读取技能任务…':'当前技能没有可用的起草任务',file:''};
         // 切任务时优先恢复这个任务上一次的生成结果；没有才清空
         useEffect(function () {
           var m = (props.memo && props.memo[taskId]) || null;
@@ -4514,7 +4647,7 @@
           setBusy(true);
           setErr('');
           setSaved('');
-          request('POST', '/assistant/draft', { taskId: taskId, instruction: instruction.trim() })
+          request('POST', '/assistant/draft', { taskId: current.id, instruction: instruction.trim() })
             .then(function (json) {
               if (json && json.ok) {
                 setOut(json.text || '');
@@ -4544,7 +4677,7 @@
         function writeOut() {
           setBusy(true);
           setErr('');
-          request('POST', '/assistant/save', { taskId: taskId, text: out })
+          request('POST', '/assistant/save', { taskId: current.id, text: out })
             .then(function (json) {
               if (json && json.ok) {
                 setSaved(t('draftSaved') + '：' + json.file);
@@ -4603,9 +4736,9 @@
             h(
               'div',
               { className: 'dsa-inline' },
-              h(Btn, { variant: 'primary', disabled: busy || !catalog.ok, onClick: generate }, busy ? t('generating') : t('generate')),
+              h(Btn, { variant: 'primary', disabled: busy || !catalog.ok || !current.id, onClick: generate }, busy ? t('generating') : t('generate')),
               h(Btn, { variant: 'ghost', disabled: busy || !out, onClick: copyOut }, t('copy')),
-              h(Btn, { variant: 'ghost', disabled: busy || !out, onClick: writeOut, title: current.file }, t('write')),
+              h(Btn, { variant: 'ghost', disabled: busy || !out || !current.id, onClick: writeOut, title: current.file }, t('write')),
               saved ? h('span', { className: 'dsa-hint' }, saved) : null            ),
             h('pre', { className: 'dsa-draft-out' }, out || t('draftEmpty')),
             meta              ? h(

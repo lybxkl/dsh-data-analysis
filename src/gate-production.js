@@ -21,7 +21,7 @@ function atomic(file, value) {
   finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
 }
 
-export function productionReceipt(root, stage, runId, steps,{environment=null}={}) {
+export function productionReceipt(root, stage, runId, steps,{environment=null,workflow=null}={}) {
   const bound = new Map(), collections = new Map();
   const outputs = new Set(steps.flatMap(s => s.produces || []).map(p => path.resolve(root, p)));
   const succeededOutputs=new Set(),implementation=new Map(),failedSteps=[];
@@ -31,6 +31,11 @@ export function productionReceipt(root, stage, runId, steps,{environment=null}={
     implementation.set(script,{path:script,sha256:hash(script)});
     const manifest=path.resolve(path.dirname(script),'../contracts/gates/package-manifest.json');
     if(fs.existsSync(manifest))implementation.set(manifest,{path:manifest,sha256:hash(manifest)});
+  }
+  if(workflow?.root){
+    for(const relative of ['contracts/workflow/workflow.json','contracts/workflow/workflow.schema.json','contracts/gates/package-manifest.json']){
+      const file=safePath(workflow.root,relative);implementation.set(file,{path:file,sha256:hash(file)});
+    }
   }
   const outputRoots = ['output', 'runs', '.git', '.workbench'];
   function add(file) {
@@ -75,6 +80,7 @@ export function productionReceipt(root, stage, runId, steps,{environment=null}={
     }
   }
   const receipt = {schema:'dsa.production-receipt/1', stage, runId, status:'running',environment,
+    workflow:workflow?{id:workflow.id,version:workflow.version,sha256:workflow.sha256}:null,
     inputs:[...bound.values()], collections:[...collections.values()],implementation:[...implementation.values()],failedSteps,
     outputs:[], startedAt:new Date().toISOString()};
   const file = safePath(root, `output/gates/production/${stage}.json`);

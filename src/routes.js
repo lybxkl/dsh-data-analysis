@@ -180,6 +180,9 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
   const { logger, basePath = '/data-analysis', assistant, tasks = [] } = helpers;
 
   const routes = [
+    {path:`${basePath}/api/workflow`,method:'GET',handler:()=>({ok:true,workflow:workbench.workflow()})},
+    {path:`${basePath}/api/workflow/action`,method:'POST',handler:async body=>({...await workbench.runWorkflowAction(String(body?.actionId||'')),state:workbench.snapshot()})},
+
     {
       path: `${basePath}/api/state`,
       method: 'GET',
@@ -462,7 +465,7 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
       handler: async (_body, query) => {
         if (!assistant) return { ok: false, error: '模型服务不可用' };
         const models = await assistant.models({ force: query?.refresh === '1' });
-        return { ok: models.ok !== false, ...models, tasks, config: workbench.snapshot().config };
+        return { ok: models.ok !== false, ...models, tasks: assistant.tasks(), config: workbench.snapshot().config };
       },
     },
     {

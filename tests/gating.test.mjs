@@ -4,7 +4,7 @@
  * 覆盖三件事：
  *   1) 判定：没登记就是关；绑定项目 / 显式启用 / 父对话已启用才算开；
  *      解绑、移除项目要跟着关；子代理沿用它父对话的启用状态。
- *   2) 注册准入：28 个工具里只有 data_analysis_status 常驻，其余 27 个都带 `when`，
+ *   2) 注册准入：29 个工具里只有 data_analysis_status 常驻，其余 28 个都带 `when`，
  *      且 `when` 对未启用的会话返回 false（该步工具表里根本没有这个工具）。
  *   3) 探路工具不许顺手绑定：否则模型调一次 status 就把门打开，门等于没设。
  *
@@ -180,11 +180,12 @@ check('登记表有上限，不会无界增长', () => {
   assert.ok(Object.keys(env.ledger.armings).length <= 200, `实际 ${Object.keys(env.ledger.armings).length} 条`);
 });
 
-section('注册准入：27 个进门，只有 status 常驻');
-check('工具名单里 28 个，只有 data_analysis_status 不带 when', () => {
+section('注册准入：只有 status 常驻');
+check('所有注册工具中只有 data_analysis_status 不带 when', () => {
   const src = read('src/tools.js');
   const names = [...src.matchAll(/name:\s*'(data_analysis_[a-z_]+)'/g)].map((m) => m[1]);
-  assert.equal(new Set(names).size, 28, `实际 ${new Set(names).size} 个工具`);
+  assert.equal(new Set(names).size,names.length,'注册工具不能重名');
+  assert.ok(names.includes('data_analysis_workflow'),'动态工作流工具也必须经过同一准入');
   const env = makeWorkbench();
   const armed = whenArmed(env.wb);
   const ungated = names.filter((name) => admissionFor(armed, name) === undefined);
@@ -315,11 +316,11 @@ check('store.js：armings 有默认结构（老台账升级不炸）', () => {
   assert.match(read('src/store.js'), /data\.armings = \{\}/);
 });
 check('prompt.js：讲清触发门，且不再把「聊到数据」当启用', () => {
-  assert.match(PROMPT, /### 触发门：这个工作台是「按对话启用」的/);
-  assert.match(PROMPT, /### 已启用后的操作顺序/);
+  assert.match(PROMPT, /按对话启用/);
+  assert.match(PROMPT, /已启用后先读取.*data_analysis_workflow/);
   assert.ok(!PROMPT.includes('### 标准动作'), '旧标题会把它读成常驻指令');
   assert.ok(!PROMPT.includes('用户提到数据/资料/编码/统计/图表/论文'), '旧的触发句必须删掉');
-  assert.match(PROMPT, /不构成启用/);
+  assert.match(PROMPT, /不会自动授权开工/);
   assert.match(PROMPT, /data_analysis_status/, '探路工具要在提示里出现');
 });
 
