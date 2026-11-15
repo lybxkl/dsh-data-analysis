@@ -1703,6 +1703,7 @@
         var unknown = 0;
         for (var i = 0; i < (stage.gates || []).length; i += 1) {
           var gate = stage.gates[i];
+          if (gate.level === 'info') continue;
           if (gate.status !== 'unjudged') continue;
           if (gate.manual) manual += 1;
           else unknown += 1;
@@ -1753,6 +1754,8 @@
       function GateRow(props) {
         var gate = props.gate;
         var face = gateFace(gate, props.stageStatus);
+        var missing = (gate.evidence || []).map(function (item) { return item.actual && typeof item.actual.missing === 'string' ? item.actual.missing : ''; }).filter(Boolean);
+        var detail = gate.status === 'unjudged' && missing.length ? '缺少当前证据：' + missing.join('；') : gate.detail;
         var tag = null;
         if (gate.status === 'fail') {
           tag = h('span', { className: 'dsa-tag ' + (gate.level === 'error' ? 'err' : '') }, gate.level === 'error' ? '拦截' : '提醒');
@@ -1783,7 +1786,7 @@
             h(
               'div',
               { className: 'dsa-gate-detail' },
-              gate.detail || (gate.status === 'unjudged' ? '缺少可读证据，先补齐再判断' : '')
+              detail || (gate.status === 'unjudged' ? '缺少可读证据，先补齐再判断' : '')
             ),
             gate.source ? h('div', { className: 'dsa-hint', style: { fontSize: '11.5px', marginTop: '2px' } }, gate.source==='skill'?'技能体检':gate.source==='workbench'?'工作台核验':String(gate.source)) : null,
             gate.blockingAt?h('div',{className:'dsa-hint'},'生效检查点：'+({'data-ready':'数据准备完成','analysis-ready':'进入分析','figures-ready':'进入成稿','manuscript-ready':'进入质检','delivery-ready':'正式交付'}[gate.blockingAt]||gate.blockingAt)):null,
@@ -2020,6 +2023,16 @@
         var busyState = useState(false);
         var busy = busyState[0];
         var setBusy = busyState[1];
+        var actionCountRef = useRef(0);
+        var gateOpState = useState(null);
+        var gateOp = gateOpState[0];
+        var setGateOp = gateOpState[1];
+        var gateNoteState = useState('');
+        var gateNote = gateNoteState[0];
+        var setGateNote = gateNoteState[1];
+        var gateChecking = (snap && snap.gateChecking) || (gateOp && snap && snap.active && gateOp.projectId === snap.active.id ? gateOp : null);
+        var loadRef = useRef(null);
+        var stateVersionRef = useRef(0);
         var runIdState = useState('');
         var runId = runIdState[0];
         var setRunId = runIdState[1];
@@ -2161,13 +2174,16 @@
           setSnap(state);
         }, []);
         var load = useCallback(function (silent) {
+          if (loadRef.current) return loadRef.current;
+          var version = stateVersionRef.current;
           if (!silent) setLoading(true);
-          return getState()
+          loadRef.current = getState()
             .then(function (json) {
+              if (version !== stateVersionRef.current) return;
               if (json && json.ok && json.state) {
                 // 记进模块级缓存：下次重进面板第一帧直接拿它渲染，不再等这一趟
                 commitState(json.state);
-                setError('');
+                if (!silent) setError('');
                 var pre = json.state.preflight || null;
                 if (pre) setPreflight(pre);
                 if (!pre || pre.status === 'pending') {
@@ -2187,8 +2203,10 @@
               if (SNAPSHOT_CACHE) setSnap(SNAPSHOT_CACHE);
             })
             .then(function () {
+              loadRef.current = null;
               if (!silent) setLoading(false);
             });
+          return loadRef.current;
         }, []);
         useEffect(function () {
           void load(false);
@@ -2238,12 +2256,12 @@
           // 跑着的时候才轮询，而且 5 秒一次就够：每打一次 /state，宿主就要把整项目重算一遍，
           // 跑脚本本身也在写产物——2.5 秒一次等于让宿主一直在算快照，反而拖慢脚本与面板。
           timerRef.current = setInterval(function () {
-            if (running) void load(true);
-          }, 5000);
+            if (running || gateChecking) void load(true);
+          }, gateChecking ? 1000 : 5000);
           return function () {
             if (timerRef.current) clearInterval(timerRef.current);
           };
-        }, [running, load]);
+        }, [running, Boolean(gateChecking), load]);
         var stages = (snap && snap.stages) || [];
         var current = useMemo(function () {
           for (var i = 0; i < stages.length; i += 1) if (stages[i].id === selected) return stages[i];
@@ -2254,17 +2272,18 @@
           if (stages.length) setSelected(stages[0].id);
         }, [stages, current]);
         // 第一次拿到快照时，直接落在「该做的那一步」：已完成的不当前，未开始的不抢眼
-        var landedRef = useRef(false);
+        var landingProjectId = snap && snap.active ? snap.active.id : '';
+        var landedRef = useRef('');
         useEffect(function () {
-          if (landedRef.current || !stages.length) return;
-          landedRef.current = true;
+          if (landedRef.current === landingProjectId || !stages.length) return;
+          landedRef.current = landingProjectId;
           var target = null;
           for (var i = 0; i < stages.length; i += 1) {
-            if (stages[i].status !== 'done') { target = stages[i]; break; }
+            if (stages[i].status !== 'done' && stages[i].status !== 'na') { target = stages[i]; break; }
           }
           if (!target) target = stages[stages.length - 1];
           if (target) setSelected(target.id);
-        }, [stages]);
+        }, [stages, landingProjectId]);
         var refreshLog = useCallback(function (id) {
           if (!id) return;
           request('GET', '/run/log?id=' + encodeURIComponent(id) + '&limit=300')
@@ -2287,8 +2306,15 @@
           if (el && running) el.scrollTop = el.scrollHeight;
         }, [logData.lines, running]);
         var action = useCallback(function (path, body) {
+          actionCountRef.current += 1;
           setBusy(true);
           setError('');
+          var gateOperation = null;
+          if (path === '/gates/control' && body && body.action === 'inspect') {
+            gateOperation = {projectId:activeIdRef.current,stageId:body.stageId||'',startedAt:new Date().toISOString()};
+            setGateOp(gateOperation);
+            setGateNote('');
+          }
           // 用户自己点开的项目：记下「这次是人的选择」，跟着对话走的那条逻辑不要再覆盖它
           if (path === '/project/open' && body && body.dir) {
             FOLLOW_SKIP = { chatId: CURRENT_CHAT.id, path: String(body.dir) };
@@ -2300,10 +2326,13 @@
           return request('POST', path, body)
             .then(function (json) {
               if (json && json.ok) {
-                if (json.state) commitState(json.state);
+                if (json.state) { stateVersionRef.current += 1; commitState(json.state); }
                 else void load(true);
+                if (gateOperation) setGateNote('体检完成，结论见下方判读。');
               } else {
-                setError((json && json.error) || t('actionFail'));
+                if (json && json.state) { stateVersionRef.current += 1; commitState(json.state); }
+                if (gateOperation && json && json.status === 'cancelled') setGateNote('体检已停止，请重新体检后查看当前结论。');
+                else setError((json && json.error) || t('actionFail'));
               }
               return json;
             })
@@ -2312,7 +2341,9 @@
               return { ok: false };
             })
             .then(function (json) {
-              setBusy(false);
+              if (gateOperation) setGateOp(function (previous) { return previous === gateOperation ? null : previous; });
+              actionCountRef.current = Math.max(0, actionCountRef.current - 1);
+              setBusy(actionCountRef.current > 0);
               return json;
             });
         }, [load]);
@@ -2458,6 +2489,7 @@
             // 手稿骨架与契约卡的提示都属于上一个项目，别把它们带到新项目上
             setManNote('');
             setRegNote('');
+            setGateNote('');
           }
         }, [activeId]);
         // 让 AI 装环境：开临时会话投递安装提示词，然后把界面切过去
@@ -3125,7 +3157,7 @@
               h('div', { className: 'dsa-stage-meta' }, matMeta)
             )
           ),
-          h('div', { className: 'dsa-rail-h' }, '阶段 1–9'),
+          h('div', { className: 'dsa-rail-h' }, '阶段 1–' + stages.length),
           stages.map(function (stage) {
             var dotClass = stateDot(stage.status);
             return h(
@@ -3154,10 +3186,12 @@
         );
         /* ---------------- 闸门 ---------------- */
         var gateRank = { fail: 0, manual: 1, todo: 2, unjudged: 2, na: 8, pass: 9 };
-        var orderedGates = (current.gates || []).slice().sort(function (a, b) {
+        var informationalGates = (current.gates || []).filter(function (gate) { return gate.level === 'info'; });
+        var orderedGates = (current.gates || []).filter(function (gate) { return gate.level !== 'info'; }).sort(function (a, b) {
           return gateRank[gateFace(a, current.status).cls] - gateRank[gateFace(b, current.status).cls];
         });
-        var openGates = orderedGates.filter(function (gate) { return gateFace(gate, current.status).cls !== 'pass'; });
+        var openGates = orderedGates.filter(function (gate) { var cls=gateFace(gate, current.status).cls; return cls !== 'pass' && cls !== 'na'; });
+        var notApplicableGates = orderedGates.filter(function (gate) { return gateFace(gate, current.status).cls === 'na'; });
         var passedGates = orderedGates.filter(function (gate) { return gateFace(gate, current.status).cls === 'pass'; });
         var gateRowOf = function (gate) {
           return h(GateRow, {
@@ -3171,20 +3205,24 @@
         var gateList = h(
           'div',
           { className: 'dsa-card' },
-          openGates.length            ? openGates.map(gateRowOf)            : passedGates.length              ? null              : h('div', { className: 'dsa-empty' }, '本阶段还没有可判的闸门'),
+          openGates.length            ? openGates.map(gateRowOf)            : passedGates.length              ? null              : h('div', { className: 'dsa-empty' }, notApplicableGates.length ? '本阶段的要求均已说明不适用。' : '本阶段还没有可判的闸门'),
           passedGates.length            ? h(
                 'details',
                 { className: 'dsa-fold' },
                 h('summary', null, '已通过 ' + passedGates.length + ' 项'),
                 passedGates.map(gateRowOf)
-              )            : null        );
+              )            : null,
+          notApplicableGates.length ? h('details', {className:'dsa-fold'},h('summary',null,'不适用 '+notApplicableGates.length+' 项'),notApplicableGates.map(gateRowOf)) : null,
+          informationalGates.length ? h('details', {className:'dsa-fold'},h('summary',null,'运行来源说明'),informationalGates.map(gateRowOf)) : null
+        );
         gateList = h('div',null,
           h('div',{className:'dsa-inline',style:{gap:'8px',flexWrap:'wrap',marginBottom:'8px'}},
             h('span',{className:'dsa-hint'},'判定来源：'+({legacy:'旧版核验',shadow:'影子验证',compare:'并列验证',skill:'技能体检'}[snap.gateMode||'legacy'])),
-            h(Btn,{variant:'ghost',disabled:busy||Boolean(snap.gateChecking)||Boolean(snap.gateRecoveryNeeded),onClick:function(){action('/gates/control',{action:snap.gateMode&&snap.gateMode!=='legacy'?'inspect':'init'});}},snap.gateChecking?'体检中…':busy?'处理中…':snap.gateMode&&snap.gateMode!=='legacy'?'重新体检':'配置技能体检'),
-            snap.gateChecking?h(Btn,{variant:'ghost',onClick:function(){action('/stage/cancel',{stageId:snap.gateChecking.stageId||current.id});}},'停止体检'):null,
+            h(Btn,{variant:'ghost',disabled:busy||Boolean(gateChecking)||Boolean(snap.gateRecoveryNeeded),onClick:function(){action('/gates/control',{action:snap.gateMode&&snap.gateMode!=='legacy'?'inspect':'init'});}},gateChecking?'体检中…':busy?'处理中…':snap.gateMode&&snap.gateMode!=='legacy'?'重新体检':'配置技能体检'),
+            gateChecking?h(Btn,{variant:'ghost',onClick:function(){action('/stage/cancel',{stageId:gateChecking.stageId||current.id});}},'停止体检'):null,
             snap.gateRecoveryNeeded?h(Btn,{variant:'ghost',disabled:busy,onClick:function(){action('/gates/control',{action:'recover'});}},'恢复中断体检'):null,
             snap.gateMode==='compare'?h(Btn,{variant:'ghost',disabled:busy,onClick:function(){action('/gates/control',{action:'migrate',mode:'skill'});}},'使用技能判定'):null),
+          gateNote ? h('div',{className:'dsa-hint',role:'status'},gateNote) : null,
           gateList,
           current.gateComparison&&current.gateComparison.length?h('details',{className:'dsa-fold'},
             h('summary',null,'技能体检对照 '+current.gateComparison.length+' 项'),
@@ -3638,7 +3676,7 @@
         var hasResearchRegistry = !!(snap && snap.artifacts && snap.artifacts.research          && snap.artifacts.research.registry && snap.artifacts.research.registry.exists);
         for (var ni = 0; ni < stages.length; ni += 1) {
           if (stages[ni].status === 'running') runningStage = stages[ni];
-          if (!nextStage && stages[ni].status !== 'done'            && !(stages[ni].id === 'verify' && !hasResearchRegistry)) nextStage = stages[ni];
+          if (!nextStage && stages[ni].status !== 'done' && stages[ni].status !== 'na'            && !(stages[ni].id === 'verify' && !hasResearchRegistry && snap.gateMode !== 'skill')) nextStage = stages[ni];
         }
         var nextView = null;
         if (runningStage) {
@@ -3673,6 +3711,7 @@
           var unknownCount = 0;
           for (var gi = 0; gi < nextStage.gates.length; gi += 1) {
             var item = nextStage.gates[gi];
+            if (item.level === 'info') continue;
             if (!errGate && item.status === 'fail' && item.level === 'error') errGate = item;
             if (item.status === 'unjudged' && item.manual && !manualGate) manualGate = item;
             if (item.status === 'unjudged' && !item.manual) {

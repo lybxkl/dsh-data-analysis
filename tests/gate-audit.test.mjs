@@ -14,6 +14,7 @@ import {Workbench} from '../src/service.js';
 import {acquireProjectLease} from '../src/gate-lease.js';
 import {syncMaterialRoots} from '../src/gate-material-roots.js';
 import {parseCsv} from '../src/audit.js';
+import {gateTotals} from '../src/gates.js';
 
 const skill=process.env.DSA_SKILL_ROOT;
 assert.ok(skill,'DSA_SKILL_ROOT is required');
@@ -178,6 +179,26 @@ try{
     assert.equal(cli(fresh,'init-policy').status,0);
     assert.equal((await inspectAfterRun({root:fresh,skillRoot:skill,python:path.join(base,'missing-python'),stageIds:['dataset']})).status,'failed');
     assert.equal((await inspectAfterRun({root:fresh,skillRoot:skill,python,stageIds:['dataset']})).status,'completed');
+  });
+  await check('Informational source receipt does not trap a manual scope stage',()=>{
+    write(review,'docs/scope.md','Synthetic scope, authored as an explicit test fixture.');
+    const stages=evaluateHostProject({projectRoot:review,project});
+    const scope=stages.find(s=>s.id==='scope');
+    assert.equal(scope.status,'done');
+    assert.equal(scope.gates.find(g=>g.id==='stage-source').status,'unjudged');
+    assert.notEqual(scope.gates.find(g=>g.id==='stage-source').label,'stage-source');
+    assert.equal(gateTotals([scope]).unjudged,0);
+  });
+  await check('An evidenced tabular-only coding stage stays not applicable without production',()=>{
+    write(review,'output/audit/corpus_files.csv','rel_path,status\na.csv,valid\n');
+    assert.equal(cli(review,'evaluate','--stage','coding').status,0);
+    assert.equal(evaluateHostProject({projectRoot:review,project}).find(s=>s.id==='coding').status,'na');
+  });
+  await check('Public run metadata preserves production and checker outcomes separately',()=>{
+    const bench=new Workbench({getConfig:()=>({}),store:{get:()=>({runs:[{id:'synthetic',projectId:'p1',status:'ok',exitCode:0,gateCheck:{status:'failed',results:[{stage:'audit',exitCode:2,reason:'checker-failed'}]}}]})},runner:{}});
+    const run=bench.recentRuns(1,'p1')[0];
+    assert.equal(run.status,'ok');assert.equal(run.exitCode,0);assert.equal(run.gateCheck.status,'failed');
+    assert.equal(run.gateCheck.results[0].reason,'checker-failed');
   });
   console.log(`audit regressions: ${passed} passed, ${failed} failed`);
   process.exitCode=failed?1:0;

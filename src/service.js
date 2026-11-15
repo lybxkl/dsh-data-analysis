@@ -1661,7 +1661,7 @@ export class Workbench {
       runs: this.recentRuns(200, active.id),
       sources: listSources(this.store),
     });
-    const next = stages.find((item) => item.status !== 'done') || null;
+    const next = stages.find((item) => !['done','na'].includes(item.status)) || null;
     const value = {
       ok: true,
       active: {
@@ -2256,6 +2256,7 @@ export class Workbench {
         signal: run.signal || null,
         logFile: run.logFile,
         error: run.error || '',
+        gateCheck:run.gateCheck?{status:run.gateCheck.status,reason:run.gateCheck.reason||'',results:(run.gateCheck.results||[]).map(r=>({stage:r.stage,exitCode:r.exitCode,reason:r.reason||''}))}:null,
       }));
   }
 

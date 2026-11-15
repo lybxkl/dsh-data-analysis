@@ -2119,6 +2119,7 @@ export function gateTotals(stages) {
     // 未开工的阶段还没被评价：把「产物还没生成」算进「未过」会虚报失败数
     if (stage.status === 'todo') continue;
     for (const g of stage.gates) {
+      if(g.level==='info')continue;
       if (g.status === 'pass') pass += 1;
       else if (g.status === 'fail') fail += 1;
       else if (g.status === 'na') na += 1;

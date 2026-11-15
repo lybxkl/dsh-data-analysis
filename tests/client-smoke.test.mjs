@@ -61,21 +61,29 @@ const React = {
   },
   // 默认不跑 effect：绝大多数场景只看首屏排版，跑起来会真去 fetch。
   // 需要测「挂载后拉数据」的交互（产物中心）时，把 globalThis.__DSA_EFFECTS__ 打开并自带 fetch 桩。
-  useEffect(fn) {
+  useEffect(fn,deps) {
     if (!globalThis.__DSA_EFFECTS__) return;
     const { inst, index } = slot();
     const key = 'fx:' + hookKey(inst, index);
-    if (store.has(key)) return;
-    store.set(key, true);
-    fn();
+    const prior=store.get(key);
+    if(prior&&!globalThis.__DSA_EFFECT_DEPS__)return;
+    if(prior&&deps&&prior.deps&&deps.length===prior.deps.length&&deps.every((value,i)=>Object.is(value,prior.deps[i])))return;
+    if(typeof prior?.cleanup==='function')prior.cleanup();
+    const effect={deps:deps?deps.slice():null,cleanup:null};store.set(key,effect);
+    effect.cleanup=fn();
   },
   useLayoutEffect() {},
   useMemo(fn) {
     slot();
     return fn();
   },
-  useCallback(fn) {
-    slot();
+  useCallback(fn,deps) {
+    const {inst,index}=slot();
+    if(globalThis.__DSA_EFFECT_DEPS__){
+      const key='callback:'+hookKey(inst,index),previous=store.get(key);
+      if(previous&&deps&&previous.deps&&deps.length===previous.deps.length&&deps.every((value,i)=>Object.is(value,previous.deps[i])))return previous.fn;
+      store.set(key,{fn,deps:deps?deps.slice():null});
+    }
     return fn;
   },
   useRef(value) {
@@ -1839,6 +1847,74 @@ await (async function cachedRemount() {
     globalThis.fetch = realFetch;
     globalThis.__DSA_EFFECTS__ = false;
     globalThis.__DSA__ = Object.assign({}, globalThis.__DSA__, { snap: SNAP, loading: false });
+  }
+})();
+
+scenario('真实宿主回归：不适用和说明项不占待处理与下一步',{
+  selected:'coding',snap:Object.assign({},SNAP,{gateMode:'skill',stages:[
+    stage('scope',1,'范围与口径','done',['pass']),
+    Object.assign(stage('coding',3,'编码与抽取','na',['na']),{gates:[{id:'coding-applicable',status:'na',label:'纯表格不适用',level:'error',applicability:{rule:'all-tabular'}},{id:'stage-source',status:'unjudged',level:'info',label:'运行来源说明'}]}),
+    stage('dataset',4,'数据集','todo',['unjudged'])
+  ]})
+},(tree,text)=>{
+  check(textOf(findAllByClass(tree,'dsa-next')[0]).includes('数据集'),'下一步跳过有证据的不适用阶段');
+  check(!text.includes('项待处理'),'说明项和不适用项不计入待处理');
+  check(text.includes('不适用 1 项')&&text.includes('运行来源说明'),'保留适用依据和来源信息入口');
+  check(text.includes('阶段 1–3'),'阶段范围使用实际列表长度');
+});
+scenario('真实宿主回归：正式技能模式不隐藏尚缺登记的全格复核',{
+  snap:Object.assign({},SNAP,{gateMode:'skill',artifacts:{},stages:[stage('scope',1,'范围与口径','done',['pass']),stage('verify',5,'全格复核','review',['unjudged']),stage('stats',6,'统计分析','todo',[])]})
+},tree=>check(textOf(findAllByClass(tree,'dsa-next')[0]).includes('全格复核'),'缺登记时指向复核缺口，不误指向统计运行'));
+scenario('真实宿主回归：未判原因直接展示实际缺证据',{
+  snap:Object.assign({},SNAP,{stages:[Object.assign(stage('scope',1,'范围与口径','review',[]),{gates:[{id:'fixture',status:'unjudged',label:'登记数据',detail:'登记数据',evidence:[{actual:{missing:'research_registry.json'}}]}]})]})
+},(tree,text)=>check(text.includes('缺少当前证据：research_registry.json'),'路径缺口无须打开 JSON 才能看到'));
+
+await (async()=>{
+  process.stdout.write('\n真实宿主回归：体检异步状态、轮询、停止与项目切换\n');
+  const original={fetch:globalThis.fetch,setInterval:globalThis.setInterval,clearInterval:globalThis.clearInterval};
+  const intervals=new Map();let timerId=0,finishInspection,finishRead,reads=0,holdRead=false;
+  let server=Object.assign({},SNAP,{gateMode:'skill',gateChecking:null,focus:null});
+  try{
+    globalThis.setInterval=(fn,delay)=>{const id=++timerId;intervals.set(id,{fn,delay});return id;};
+    globalThis.clearInterval=id=>intervals.delete(id);
+    globalThis.__DSA_EFFECTS__=true;globalThis.__DSA_EFFECT_DEPS__=true;globalThis.__DSA_SVC__={};
+    globalThis.__DSA__={snap:server,pre:server.preflight,loading:false,dialog:null,width:'wide',theme:'light',selected:'audit'};
+    globalThis.fetch=async(url,init={})=>{
+      let payload={ok:true};
+      if(String(url).endsWith('/state')){
+        reads++;const captured=server;
+        if(holdRead)await new Promise(resolve=>{finishRead=resolve;});
+        payload={ok:true,state:captured};
+      }else if(String(url).endsWith('/gates/control')){
+        payload=await new Promise(resolve=>{finishInspection=resolve;});
+      }else if(String(url).endsWith('/stage/cancel')){
+        server=Object.assign({},server,{gateChecking:null});payload={ok:true,state:server};
+      }
+      return {ok:true,status:200,json:async()=>payload};
+    };
+    PANEL=loadPanel().panel;const view=mountPanel({});await flush();await flush();view.render();
+    check(view.click('重新体检'),'能从真实面板动作启动独立体检');
+    check(view.buttons().includes('停止体检'),'服务端尚未回最终结果时立即出现停止入口');
+    check(view.text().includes('体检中…'),'独立体检不依赖生产 activeRuns 才显示运行态');
+    const poll=[...intervals.values()].find(timer=>timer.delay===1000);
+    check(Boolean(poll),'独立体检期间设置进度轮询');
+    server=Object.assign({},server,{gateChecking:{stageId:'audit',startedAt:'2026-11-15T00:00:00Z'}});
+    holdRead=true;const before=reads;poll.fn();poll.fn();await flush();
+    check(reads===before+1,'慢状态请求期间不堆积重复轮询',`before=${before}, after=${reads}, timers=${[...intervals.values()].map(t=>t.delay)}`);
+    check(view.click('停止体检'),'服务端回执未完成时可以停止');
+    await flush();view.render();
+    finishInspection({ok:false,status:'cancelled',state:server});await flush();await flush();view.render();
+    check(!view.buttons().includes('停止体检')&&view.buttons().includes('重新体检'),'停止后恢复可重试入口');
+    check(view.text().includes('体检已停止')&&!view.text().includes('操作失败'),'主动停止有明确反馈，不误报操作失败');
+    holdRead=false;finishRead();await flush();await flush();view.render();
+    check(!view.buttons().includes('停止体检'),'较晚返回的旧运行快照不会复活已停止状态');
+    server=Object.assign({},server,{active:Object.assign({},server.active,{id:'new-synthetic',name:'新项目'}),focus:null,stages:[stage('scope',1,'范围与口径','todo',['unjudged']),stage('audit',2,'资料审计','todo',[])]});
+    view.click('刷新');await flush();await flush();view.render();
+    check(textOf(findAllByClass(view.tree(),'dsa-h1')[0]).includes('范围与口径'),'项目变化后重新定位该做的阶段',textOf(findAllByClass(view.tree(),'dsa-h1')[0]));
+  }catch(error){check(false,'真实宿主异步回归',String(error?.stack||error));}
+  finally{
+    globalThis.fetch=original.fetch;globalThis.setInterval=original.setInterval;globalThis.clearInterval=original.clearInterval;
+    globalThis.__DSA_EFFECTS__=false;globalThis.__DSA_EFFECT_DEPS__=false;
   }
 })();
 

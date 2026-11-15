@@ -184,10 +184,17 @@ export function evaluateHostProject(context) {
   stage('recheck').gates.push(fact('recheck-coverage',complete&&state==='pass'?'pass':'unjudged','覆盖记录不能覆盖机器事实，也不能继承旧快照'));
   for(const s of stages){
     if(activeRuns[s.id])continue;
-    if(s.gates.some(g=>g.status==='fail'&&g.level==='error'))s.status='blocked';
-    else if(s.gates.some(g=>g.status==='unjudged'))s.status='review';
-    else s.status=s.gates.every(g=>g.status==='na')?'na':'done';
-    if(!s.lastRun&&!(s.artifacts||[]).some(rel=>exists(root,rel))&&!s.gates.some(g=>g.manual&&g.status==='pass'))s.status='todo';
+    const assessed=s.gates.filter(g=>g.level!=='info');
+    if(assessed.some(g=>g.status==='fail'&&g.level==='error'))s.status='blocked';
+    else if(assessed.some(g=>g.status==='unjudged'))s.status='review';
+    else s.status=assessed.length&&assessed.every(g=>g.status==='na')?'na':'done';
+    if(s.status!=='na'&&!s.lastRun&&!(s.artifacts||[]).some(rel=>exists(root,rel))&&!s.gates.some(g=>g.manual&&g.status==='pass'))s.status='todo';
   }
+  // Labels share the catalog with skill facts; host ids are never UI copy.
+  try{
+    const catalog=strictJson(fs.readFileSync(safePath(packageRoot(project),'contracts/gates/catalog.json'),'utf8'));
+    const labels=new Map(catalog.gates.map(g=>[g.id,g.label]));
+    for(const s of stages)for(const g of s.gates)if(g.source==='workbench')g.label=labels.get(g.id)||g.label;
+  }catch{/* applyGateReports has already surfaced an invalid policy/catalog. */}
   return stages;
 }
