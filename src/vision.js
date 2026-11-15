@@ -43,8 +43,14 @@ export const VISION_PROMPT = [
 
 export const LOG_FIELDS = [
   'rel_path', 'page', 'input_sha256', 'model', 'prompt_version', 'at', 'tokens',
-  'status', 'human_verified', 'derived_rel', 'error',
+  'status', 'human_verified', 'derived_rel', 'error','source_sha256','derived_sha256',
 ];
+
+function contentHash(file){
+  const fd=fs.openSync(file,'r'),digest=crypto.createHash('sha256'),buffer=Buffer.alloc(1024*1024);
+  try{let count;while((count=fs.readSync(fd,buffer,0,buffer.length,null)))digest.update(buffer.subarray(0,count));return digest.digest('hex');}
+  finally{fs.closeSync(fd);}
+}
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const RENDER_SCRIPT = path.join(MODULE_DIR, '..', 'assets', 'render_pages.py');
@@ -60,6 +66,8 @@ export function readVisionLog(projectRoot) {
     rel_path: row.rel_path || '',
     page: Number(row.page) || 0,
     input_sha256: row.input_sha256 || '',
+    source_sha256:row.source_sha256||'',
+    derived_sha256:row.derived_sha256||'',
     model: row.model || '',
     prompt_version: row.prompt_version || '',
     at: row.at || '',
@@ -306,9 +314,12 @@ export function buildPlan({ projectRoot, materials, sources, cacheDir }) {
     const abs = path.join(path.resolve(projectRoot), 'data', ...relPath.split('/'));
     const pages = kind === 'image' ? 1 : Number(row.pages) || 0;
     const donePages = [];
+    let sourceHash='';try{sourceHash=contentHash(abs);}catch{}
     for (let page = 1; page <= Math.max(1, pages || 1); page += 1) {
       const record = log.get(logKey(relPath, page));
-      if (record && record.status === 'ok') donePages.push(page);
+      if(record?.status==='ok'&&sourceHash&&record.source_sha256===sourceHash&&record.derived_sha256){
+        try{if(contentHash(path.join(projectRoot,'data',record.derived_rel))===record.derived_sha256)donePages.push(page);}catch{}
+      }
     }
     items.push({
       relPath,
@@ -505,6 +516,9 @@ export class Vision {
           remainingPages.push(page);
         }
         if (!remainingPages.length) continue;
+        try{item.sourceSha256=contentHash(item.abs);}catch(error){
+          state.failedPages++;pending.push(this.logRow(item,remainingPages[0],{status:'error',error:'原件无法绑定：'+error.message}));continue;
+        }
 
         state.current = item.relPath;
         state.files += 1;
@@ -599,6 +613,7 @@ export class Vision {
             continue;
           }
           const suffix = item.kind === 'image' ? '.txt' : `.p${String(page.page).padStart(4, '0')}.txt`;
+          if(contentHash(item.abs)!==item.sourceSha256)throw Error('识图期间原件已变化，不能发布识别结果');
           const target = derivedFile(this.cacheDir, item.sourceId, item.pathInSource, suffix);
           const header = [
             `# 识别稿 · ${item.relPath}${item.kind === 'pdf' ? ` 第 ${page.page} 页` : ''}`,
@@ -627,6 +642,7 @@ export class Vision {
             model: answer.model || capability.model,
             tokens: answer.tokens || 0,
             derived_rel: derivedRelPath(item, suffix),
+            derived_sha256:contentHash(target),
           }));
           appendLog(projectRoot, pending.splice(0, pending.length));
           onTick?.({ ...state });
@@ -658,6 +674,8 @@ export class Vision {
       rel_path: item.relPath,
       page,
       input_sha256: extra.sha || '',
+      source_sha256:item.sourceSha256||'',
+      derived_sha256:extra.derived_sha256||'',
       model: extra.model || this.state?.model || '',
       prompt_version: PROMPT_VERSION,
       at: new Date().toISOString(),

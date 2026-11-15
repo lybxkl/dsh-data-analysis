@@ -14,9 +14,12 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { DEFAULT_PYTHON } from './defaults.js';
+import { productionReceipt } from './gate-production.js';
+import {currentEnvironment} from './gate-report.js';
+import {resolveSkillRoot} from './skill.js';
 
 const LIVE = new Map();
-const STEP_KEYS = ['script', 'args', 'continueOnError'];
+const STEP_KEYS = ['script', 'args', 'continueOnError', 'whenFile', 'produces'];
 
 function nowIso() {
   return new Date().toISOString();
@@ -111,7 +114,7 @@ export class Runner {
    * steps: [{ script, argv, continueOnError }]
    * argv 已经展开成绝对脚本路径 + 参数。
    */
-  start({ project, stageId, steps }) {
+  start({ project, stageId, steps, projectLease = null }) {
     const config = this.getConfig();
     const projectRoot = project.path;
     const python = config.pythonPath || DEFAULT_PYTHON;
@@ -119,6 +122,9 @@ export class Runner {
     if (!list.length) return null;
 
     const id = runId();
+    let environment=null;
+    if(projectLease){try{const skill=resolveSkillRoot(config.skillRoot);if(skill.ok)environment=currentEnvironment(skill.packageDir,python);}catch{}}
+    const gateProduction = projectLease ? productionReceipt(projectRoot, stageId, id, list,{environment}) : null;
     const logDir = path.join(projectRoot, 'runs');
     fs.mkdirSync(logDir, { recursive: true });
     const logFile = path.join(logDir, `${id}.log`);
@@ -140,7 +146,7 @@ export class Runner {
       logFile: path.relative(projectRoot, logFile).replace(/\\/g, '/'),
       logLines: [],
       cancelRequested: false,
-      steps: list.map((step) => ({ script: step.script || '', status: 'pending', exitCode: null })),
+      steps: list.map((step) => ({ script: step.script || '', status: 'pending', exitCode: null, whenFile: step.whenFile || '' })),
     };
 
     const live = {
@@ -155,11 +161,14 @@ export class Runner {
       steps: list,
       command: run.command,
       index: -1,
+      executed: 0,
       cancelRequested: false,
       logLines: [],
       decoder: null,
       decoderErr: null,
       stream,
+      projectLease,
+      gateProduction,
     };
     LIVE.set(id, live);
     this.pushRun(run);
@@ -173,12 +182,28 @@ export class Runner {
       return;
     }
     if (index >= live.steps.length) {
-      this.finish(live, { exitCode: 0, signal: null, status: 'ok', stepIndex: index });
+      // 全部步骤都因 whenFile 缺失被跳过：这不是「跑成功」，要说清楚。
+      this.finish(live, { exitCode: 0, signal: null, status: live.executed ? 'ok' : 'skipped', stepIndex: index });
       return;
     }
     const step = live.steps[index];
+    // 条件步骤在**执行到这一步时**才判断：同一阶段里前一步刚生成的产物
+    //（例如 assemble_manuscript 写的 figure_map.json）才能被后一步看见。
+    // 以前在阶段启动前统一判断，首次组稿永远跳过 export_pdf_hires。
+    if (step.whenFile) {
+      const gateAbs = path.isAbsolute(String(step.whenFile))
+        ? String(step.whenFile)
+        : path.join(live.projectRoot, String(step.whenFile));
+      if (!fs.existsSync(gateAbs)) {
+        this.appendLog(live, `[跳过] 缺 ${step.whenFile}：按条件不执行这一步\n`);
+        this.markStep(live, index, { status: 'skipped', exitCode: null, whenFile: step.whenFile });
+        this.next(live, index + 1);
+        return;
+      }
+    }
     const argv = step.argv;
     live.index = index;
+    live.executed = (live.executed || 0) + 1;
     live.decoder = new StringDecoder('utf8');
     live.decoderErr = new StringDecoder('utf8');
     this.appendLog(live, `${index ? '\n' : ''}$ ${[live.python, ...argv].join(' ')}\n`);
@@ -197,6 +222,16 @@ export class Runner {
     }
 
     live.child = child;
+    let processError='';
+    const stop=()=>{
+      try{
+        if(process.platform==='win32'&&child.pid){
+          const killer=spawn('taskkill',['/pid',String(child.pid),'/t','/f'],{windowsHide:true,stdio:'ignore'});
+          killer.on('error',()=>child.kill());
+        }else child.kill('SIGTERM');
+      }catch(error){this.appendLog(live,`[stop error] ${error.message}\n`);}
+    };
+    if(child.pid&&live.projectLease){try{live.projectLease.registerChild(child.pid);}catch(error){processError=error.message;stop();}}
     const maxLines = Math.max(100, Number(this.getConfig().maxLogLines) || 800);
 
     const pump = (chunk, decoder) => {
@@ -221,10 +256,11 @@ export class Runner {
           : `\n[提示] 找不到 Python 命令「${live.python}」：macOS 上通常要写 python3 或它的绝对路径。\n`)
         : '';
       this.appendLog(live, `\n[spawn error] ${error.message}${hint}\n`);
-      this.finish(live, { exitCode: null, signal: null, status: 'failed', error: error.message, stepIndex: index });
+      processError=error.message;
     });
 
     child.on('close', (code, signal) => {
+      if(child.pid&&live.projectLease){try{live.projectLease.childClosed(child.pid);}catch(error){processError=error.message;}}
       if (live.decoder) {
         const tail = live.decoder.end();
         if (tail) live.stream?.write(tail);
@@ -233,8 +269,13 @@ export class Runner {
         const tail = live.decoderErr.end();
         if (tail) live.stream?.write(tail);
       }
-      this.markStep(live, index, { status: live.cancelRequested ? 'cancelled' : code === 0 ? 'ok' : 'failed', exitCode: live.cancelRequested ? null : code });
+        this.markStep(live, index, { status: live.cancelRequested ? 'cancelled' : code === 0&&!processError ? 'ok' : 'failed', exitCode: live.cancelRequested||processError ? null : code });
+        try{live.gateProduction?.stepFinished(step,live.cancelRequested||processError?null:code);}catch(error){processError=error.message;}
       live.child = null;
+        if(processError){
+          this.finish(live,{exitCode:null,signal:signal||null,status:'failed',error:processError,stepIndex:index});
+          return;
+        }
       if (live.cancelRequested) {
         this.appendLog(live, `\n[已取消 · signal=${signal || 'none'}]\n`);
         // 取消是用户动作，不是进程失败：不能把 taskkill 的退出码 1 记成「失败」的证据
@@ -276,6 +317,10 @@ export class Runner {
     // spawn 的 'error' 与 'close' 可能都触发（ENOENT 就是如此）：只允许结算一次
     if (live.finished) return;
     live.finished = true;
+    if (live.gateProduction) {
+      try { live.gateProduction.finish(status); }
+      catch (bindingError) { status = 'failed'; error = '生产输入或产物绑定失败'; }
+    }
     const endedAt = nowIso();
     const record = {
       status,
@@ -310,7 +355,8 @@ export class Runner {
     this.onChange({ kind: 'run', runId: live.id, status });
     const settled = state.runs.find((run) => run.id === live.id) || null;
     try {
-      this.onFinish(settled || { id: live.id, stageId: live.stageId, projectId: live.projectId, status, exitCode, error });
+      Promise.resolve(this.onFinish(settled || { id: live.id, stageId: live.stageId, projectId: live.projectId, status, exitCode, error }))
+        .catch(failure=>this.onChange({kind:'run-finalization-error',runId:live.id,error:String(failure?.message||failure)}));
     } catch {
       /* 收尾回调不能影响运行记录本身 */
     }

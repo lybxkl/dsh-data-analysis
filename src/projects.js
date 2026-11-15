@@ -10,6 +10,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { STAGE_DEFS } from './defaults.js';
+import { validateSchema } from './gate-schema.js';
+import { strictJson } from './gate-report.js';
 
 export const PROJECT_FILE = 'project.json';
 export const PROJECT_DIRS = ['data', 'docs', 'output', 'scripts', 'runs'];
@@ -30,7 +32,11 @@ export function defaultProjectFile({ name, root, skill }) {
     };
   }
   return {
-    schemaVersion: 1,
+    // 契约版本：2 = 新项目默认严格（没有 research_registry.json 就拦住，
+    // 统计前必须有 stage=final / status=verified / error_count=0 的全格复核）。
+    // 旧项目是 schemaVersion 1（legacy）：缺注册表只判「判不了」，不拦，避免升级插件把旧项目搞红。
+    schemaVersion: 2,
+    contract: { version: 2, mode: 'strict', createdAt: new Date().toISOString() },
     name,
     root: path.resolve(root),
     createdAt: new Date().toISOString(),
@@ -88,12 +94,22 @@ export function createProject({ dir, name, scope, skill }) {
 
   const created = [];
   try {
+    // Consume the package-owned profile; the host does not duplicate its rules.
+    let gatePolicy = null;
+    const profile = skill?.packageDir && path.join(skill.packageDir, 'contracts/gates/policy-template.json');
+    if (profile && fs.existsSync(profile)) {
+      gatePolicy = strictJson(fs.readFileSync(profile, 'utf8'));
+      validateSchema(gatePolicy, strictJson(fs.readFileSync(path.join(skill.packageDir, 'contracts/gates/policy.schema.json'), 'utf8')));
+      const catalog = fs.readFileSync(path.join(skill.packageDir, 'contracts/gates/catalog.json'));
+      if (crypto.createHash('sha256').update(catalog).digest('hex') !== gatePolicy.catalogSha256) throw new Error('技能策略模板与判据目录不匹配');
+    }
     for (const sub of PROJECT_DIRS) {
       const full = path.join(root, sub);
       fs.mkdirSync(full, { recursive: true });
       created.push(`${sub}/`);
     }
     const project = defaultProjectFile({ name: label, root, skill });
+    if(gatePolicy)project.gatePolicy={schema:'dsa.gate-policy-required/1',required:true};
     if (scope && typeof scope === 'object') {
       for (const key of Object.keys(project.scope)) {
         if (scope[key] !== undefined && scope[key] !== null && scope[key] !== '') project.scope[key] = scope[key];
@@ -101,6 +117,12 @@ export function createProject({ dir, name, scope, skill }) {
     }
     fs.writeFileSync(path.join(root, PROJECT_FILE), `${JSON.stringify(project, null, 2)}\n`, 'utf8');
     created.push(PROJECT_FILE);
+    if (gatePolicy) {
+      const policyDir = path.join(root, '.workbench/gates');
+      fs.mkdirSync(policyDir, {recursive:true});
+      fs.writeFileSync(path.join(policyDir, 'policy.json'), JSON.stringify(gatePolicy, null, 2)+'\n', {flag:'wx'});
+      created.push('.workbench/gates/policy.json');
+    }
     return { ok: true, root, created, project };
   } catch (error) {
     return { ok: false, error: `建骨架失败：${error?.message || error}` };

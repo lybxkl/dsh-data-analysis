@@ -3,12 +3,20 @@
  *
  * 一切「状态」都从磁盘现算：project.json + 产物文件 + 台账。
  * 不缓存判定结果，避免面板显示的是上一轮的旧绿灯。
+ * 允许的只有「同一轮计算内的读盘去重」：一次快照里 analysis.csv 会被闸门、复核、图表各读一遍，
+ * 内容在这一轮里不会变，重复读只是把同样的字节再解析一次——那份去重作用域算完即丢（见 audit.js 的 withReadCache）。
  */
 
 import fs from 'node:fs';
+import { reportBlockers, gateAdmission, readGatePolicy, resolveGateResource,safePath } from './gate-report.js';
+import { inspectAfterRun, invalidateGateReports } from './gate-inspection.js';
+import { acquireProjectLease } from './gate-lease.js';
+import { gateCommand } from './gate-control.js';
+import { syncMaterialRoots } from './gate-material-roots.js';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 import {
   DEFAULT_CONFIG,
@@ -19,10 +27,10 @@ import {
   normalizeConfig,
   resolveArgs,
 } from './defaults.js';
-import { evaluateProject, summarizeStages, gateTotals } from './gates.js';
+import { evaluateProject, summarizeStages, gateTotals, contractMode } from './gates.js';
 import { createProject, projectId, readProject, writeProject, runsDir } from './projects.js';
 import { fingerprint, resolveSkillRoot, resolveStageScript, listScripts } from './skill.js';
-import { clearCorpusScan, readCsv, readFigures, readManuscriptSpec, scanArtifacts } from './audit.js';
+import { clearCorpusScan, readCsv, readFigures, readManuscriptSpec, scanArtifacts, withReadCache } from './audit.js';
 import { adoptLegacy } from './adopt.js';
 import {
   addClaim,
@@ -35,7 +43,7 @@ import {
 } from './registry.js';
 import { runPreflight } from './preflight.js';
 import { buildTaskCard } from './taskcard.js';
-import { applyPatch, buildEvidence, fileHash, readIssues, recheckSummary, writeIssues } from './recheck.js';
+import { applyPatch, buildEvidence, fileHash, readIssues,readIssueLedger, readCoverage, recheckSummary, writeIssues } from './recheck.js';
 import {
   addSource as registerSource,
   derivedMountName,
@@ -66,6 +74,7 @@ import {
   visionSummary,
 } from './vision.js';
 import { isLink, readMountMarker, removeTree, runProcess } from './platform.js';
+import { MAX_INHERIT_DEPTH } from './gating.js';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ASSETS_DIR = path.join(MODULE_DIR, '..', 'assets');
@@ -76,6 +85,9 @@ const ARTIFACT_EXTS = new Set([
   '.docx', '.csv', '.tsv', '.json', '.jsonl', '.md', '.txt', '.log', '.html',
 ]);
 const ARTIFACT_MAX_BYTES = 32 * 1024 * 1024;
+
+/** armings 表的上限：会话删掉后没人来销号，不设上限会一直长。 */
+const ARMING_LIMIT = 200;
 
 const EMPTY_SKILL = { ok: false, reason: '未配置 skillRoot', root: '', packageDir: '', version: '', sha256: '', scripts: [] };
 
@@ -155,18 +167,39 @@ function normalizeEntry(value) {
   return rel;
 }
 
+/**
+ * 两个路径是不是同一个目录。
+ * Windows / macOS 的盘符与文件名大小写不敏感，Linux 敏感——一律 lowercase 会把
+ * /a/Data 与 /a/data 当成同一个，那是两个不同的项目。
+ */
+function samePath(a, b) {
+  if (!a || !b) return false;
+  const left = path.resolve(String(a));
+  const right = path.resolve(String(b));
+  if (process.platform === 'win32' || process.platform === 'darwin') return left.toLowerCase() === right.toLowerCase();
+  return left === right;
+}
+
 export class Workbench {
-  constructor({ getConfig, store, runner, onChange, materials }) {
+  constructor({ getConfig, store, runner, onChange, materials, hostCtx }) {
     this.getConfig = getConfig;
     this.store = store;
     this.runner = runner;
     this.onChange = typeof onChange === 'function' ? onChange : () => {};
+    // 工具调用带着「哪条对话」进来时，active() 读的是这条对话绑定的项目，
+    // 而不是左栏最近点开的那个——否则在对话里说「接着跑」，跑的是别人刚打开的项目。
+    // 单线程里多个会话可能同时跑，所以用 AsyncLocalStorage 而不是一个全局字段。
+    this.sessionScope = new AsyncLocalStorage();
+    // 宿主 context：只用来读「这条会话的 cwd」这类只读事实，缺了也不影响绑定
+    this.hostCtx = hostCtx || null;
     this.skillCache = null;
     this.skillCacheKey = '';
     this.preflightState = { value: null, at: 0, promise: null };
     // 材料库的外部依赖：识图执行器（只被工具显式调用，不做自动流水线）+ 派生缓存目录
     this.materials = materials || null;
     this.summaryCache = null;
+    this.gateLeases = new Map();
+    this.gateChecks = new Map();
   }
 
   /* ------------------------------ 技能包 ------------------------------ */
@@ -300,6 +333,9 @@ export class Workbench {
         path: item.path,
         name: item.name || (read.ok ? read.project.name : path.basename(item.path)),
         openedAt: item.openedAt,
+        // 每个项目对应的那条 DSH 会话：左栏要能一眼看出「这个项目有没有研究对话」，
+        // 并直接点进去接着聊。只回 id，不校验会话是否还在（由 client 侧 retain 时判断）。
+        sessionId: item.sessionId || '',
         exists: read.ok,
         error: read.ok ? '' : read.error,
       });
@@ -320,6 +356,16 @@ export class Workbench {
     };
     // 会话绑定跟着项目走：重新打开项目不该丢掉「研究对话」的会话
     if (previous?.sessionId) entry.sessionId = previous.sessionId;
+    if (!entry.sessionId) {
+      // 反向表里有这条项目的研究对话就沿用，别让「重开项目」把绑定丢了
+      const stored = state.bindings || {};
+      for (const sid of Object.keys(stored)) {
+        if (stored[sid] && stored[sid].projectId === id) {
+          entry.sessionId = sid;
+          break;
+        }
+      }
+    }
     projects.unshift(entry);
     this.store.set({
       projects: projects.slice(0, 20),
@@ -362,8 +408,19 @@ export class Workbench {
     delete adjudications[key];
     const recheckChains = { ...(state.recheckChains || {}) };
     delete recheckChains[key];
+    // 反向表跟着条目一起清：留下的会话→项目指针会指向一个不存在的项目
+    const bindings = {};
+    for (const sid of Object.keys(state.bindings || {})) {
+      if (state.bindings[sid] && state.bindings[sid].projectId === key) continue;
+      bindings[sid] = state.bindings[sid];
+    }
+    // 指向这个项目的会话被清掉了，它们的启用登记也不能留下
+    const armings = this.armings();
+    for (const sid of Object.keys(state.bindings || {})) {
+      if (state.bindings[sid] && state.bindings[sid].projectId === key) delete armings[sid];
+    }
 
-    const patch = { projects, runs, adjudications, recheckChains };
+    const patch = { projects, runs, adjudications, recheckChains, bindings, armings };
     const wasActive = state.activeProjectId === key;
     if (wasActive) {
       // 移除当前项目 = 回到「没选项目」，不要偷偷切到另一个项目让用户以为切错了
@@ -388,20 +445,399 @@ export class Workbench {
   }
 
   /**
-   * 把面板里建好的 DSH 会话绑到当前项目。
+   * 把面板里建好的 DSH 会话绑到当前项目（兼容旧路由：没给 projectId 就是当前项目）。
    * 只记 sessionId，不校验会话是否存在——会话由 client 侧持有，宿主这里不猜测。
    */
   bindSession(sessionId) {
-    const active = this.active();
-    if (!active.ok) return { ok: false, error: active.error };
-    const next = String(sessionId || '').trim();
+    const result = this.bindSessionTo(sessionId, '', { force: true });
+    if (!result.ok) return result;
+    return { ...result, state: undefined };
+  }
+
+  /* ---------------------- 项目 ⇄ 研究对话（会话绑定） ---------------------- */
+
+  /**
+   * 会话 → 项目 的反向表。
+   * 老台账只有 projects[].sessionId，先按它推一份，再叠上 bindings（新写法优先）。
+   */
+  sessionBindings() {
     const state = this.store.get();
-    const projects = (state.projects || []).map((item) =>
-      item.id === active.id ? { ...item, sessionId: next } : item
-    );
-    this.store.set({ projects });
-    this.onChange({ kind: 'session', projectId: active.id, sessionId: next });
-    return { ok: true, sessionId: next, projectId: active.id };
+    const map = {};
+    for (const item of state.projects || []) {
+      if (item.sessionId) map[item.sessionId] = item.id;
+    }
+    const stored = state.bindings || {};
+    for (const sid of Object.keys(stored)) {
+      const pid = stored[sid] && stored[sid].projectId;
+      if (pid) map[sid] = pid;
+      else delete map[sid];
+    }
+    return map;
+  }
+
+  /** 某条会话关联的项目（含 name/path），没绑过就是 null。 */
+  sessionBinding(sessionId) {
+    const key = String(sessionId || '').trim();
+    if (!key) return null;
+    const projectIdOf = this.sessionBindings()[key] || '';
+    if (!projectIdOf) return null;
+    const entry = this.ledgerProject(projectIdOf);
+    if (!entry) return null;
+    return {
+      sessionId: key,
+      projectId: projectIdOf,
+      project: {
+        id: projectIdOf,
+        path: entry.path,
+        name: entry.name || path.basename(entry.path),
+      },
+    };
+  }
+
+  /** 给面板/对话徽章用：这条会话属于哪个项目（没绑也回 ok，只是 bound:false）。 */
+  projectForSession(sessionId) {
+    const key = String(sessionId || '').trim();
+    if (!key) return { ok: false, error: '没有会话 id' };
+    const bound = this.sessionBinding(key);
+    if (!bound) return { ok: true, bound: false, sessionId: key };
+    const read = readProject(bound.project.path);
+    return {
+      ok: true,
+      bound: true,
+      sessionId: key,
+      project: {
+        id: bound.projectId,
+        path: bound.project.path,
+        name: bound.project.name,
+        exists: read.ok,
+        error: read.ok ? '' : read.error,
+      },
+    };
+  }
+
+  /* ---------------------- 触发门：这条对话启用工作台了吗 ---------------------- */
+
+  /** 显式启用登记（sessionId → { at, reason }）。绑定项目算启用，但只往这里记「显式」那一份。 */
+  armings() {
+    const state = this.store.get();
+    const map = state.armings && typeof state.armings === 'object' && !Array.isArray(state.armings) ? state.armings : {};
+    return { ...map };
+  }
+
+  armedByFlag(sessionId) {
+    const key = String(sessionId || '').trim();
+    return Boolean(key) && Boolean(this.armings()[key]);
+  }
+
+  /**
+   * 子代理沿用父对话的启用状态。
+   * 不继承的话，已启用的对话派个子代理去干活，子代理突然没有 data_analysis_* 工具，
+   * 看起来像「模型忘了怎么用」；继承也不写台账，会话没了就自然消失。
+   */
+  armedByParent(sessionId, depth = MAX_INHERIT_DEPTH, seen = new Set()) {
+    const key = String(sessionId || '').trim();
+    if (!key || depth <= 0 || seen.has(key)) return false;
+    seen.add(key);
+    const session = this.liveSession(key);
+    const parent = session && session.header ? String(session.header.parentSession || '').trim() : '';
+    if (!parent) return false;
+    if (this.armedByFlag(parent) || Boolean(this.sessionBinding(parent))) return true;
+    return this.armedByParent(parent, depth - 1, seen);
+  }
+
+  /**
+   * 子代理应该落在哪个项目作用域里：沿 parentSession 链找最近一条「有绑定」的父对话。
+   *
+   * 子代理自己不记绑定（不占项目那唯一一条研究对话的名额），但它替父对话干活，
+   * 读写必须落在父对话的项目里；否则面板当前项目是 B 时，子代理会把 A 的产物写到 B 上。
+   */
+  delegatedScopeSession(sessionId, depth = MAX_INHERIT_DEPTH, seen = new Set()) {
+    const key = String(sessionId || '').trim();
+    if (!key || depth <= 0 || seen.has(key)) return '';
+    seen.add(key);
+    const session = this.liveSession(key);
+    const parent = session && session.header ? String(session.header.parentSession || '').trim() : '';
+    if (!parent) return '';
+    if (this.sessionBinding(parent)) return parent;
+    return this.delegatedScopeSession(parent, depth - 1, seen);
+  }
+
+  /**
+   * 触发门的唯一判定：显式启用 / 关联了项目 / 父对话已启用。
+   * 默认必须是 false——任何「查不到就当能用」的写法都会把门关回去。
+   */
+  isArmed(sessionId) {
+    const key = String(sessionId || '').trim();
+    if (!key) return false;
+    if (this.armedByFlag(key)) return true;
+    if (this.sessionBinding(key)) return true;
+    return this.armedByParent(key);
+  }
+
+  /**
+   * 显式启用一条对话（不要求先有项目）。
+   * 面板的「让 AI 装环境」开的是临时会话，装完要调 doctor/configure，所以它必须先启用。
+   */
+  armSession(sessionId, reason = 'panel') {
+    const key = String(sessionId || '').trim();
+    if (!key) return { ok: false, error: '没有会话 id' };
+    const map = this.armings();
+    map[key] = { at: new Date().toISOString(), reason: String(reason || 'panel') };
+    const keys = Object.keys(map);
+    if (keys.length > ARMING_LIMIT) {
+      // 只留最近的若干条：旧会话大概率已经不在了，留着只会让台账越来越长
+      keys.sort((a, b) => String(map[a] && map[a].at || '').localeCompare(String(map[b] && map[b].at || '')));
+      for (const stale of keys.slice(0, keys.length - ARMING_LIMIT)) delete map[stale];
+    }
+    this.store.set({ armings: map });
+    this.store.flushSoon?.(120);
+    this.onChange({ kind: 'session', sessionId: key, armed: true, reason: String(reason || 'panel') });
+    const bound = this.sessionBinding(key);
+    return { ok: true, sessionId: key, armed: true, project: bound ? bound.project : null, reason: String(reason || 'panel') };
+  }
+
+  /** 停用：只清显式登记。还关联着项目的会话仍然是启用的（要停就先解绑）。 */
+  disarmSession(sessionId) {
+    const key = String(sessionId || '').trim();
+    if (!key) return { ok: false, error: '没有会话 id' };
+    const map = this.armings();
+    const had = Boolean(map[key]);
+    delete map[key];
+    this.store.set({ armings: map });
+    this.store.flushSoon?.(120);
+    this.onChange({ kind: 'session', sessionId: key, armed: false });
+    return { ok: true, sessionId: key, armed: this.isArmed(key), removed: had };
+  }
+
+  /**
+   * 绑定会话与项目——唯一的写入口。
+   *
+   * 规则就是用户要的「不能随意切换」：
+   *   - 一个项目只挂一条研究对话，一条会话也只属于一个项目；
+   *   - 会话已经绑在别的项目上时，除非显式 force（用户点了「改绑」，或在对话里明确让切到另一个项目），
+   *     一律拒绝并把原来的项目回传，让调用方去问人，而不是偷偷改。
+   */
+  bindSessionTo(sessionId, projectId, options = {}) {
+    const key = String(sessionId || '').trim();
+    if (!key) return { ok: false, error: '没有会话 id' };
+    const wanted = String(projectId || '').trim();
+    const activeNow = this.active();
+    const targetId = wanted || (activeNow.ok ? activeNow.id : '');
+    if (!targetId) return { ok: false, error: '还没有打开项目' };
+    const target = this.ledgerProject(targetId);
+    if (!target) return { ok: false, error: '台账里没有这个项目（可能已经被移除）' };
+
+    const state = this.store.get();
+    const current = this.sessionBinding(key);
+    if (current && current.projectId !== targetId && options.force !== true) {
+      return {
+        ok: false,
+        code: 'SESSION_BOUND_ELSEWHERE',
+        error: `这条对话已经关联「${current.project.name || current.project.path}」，要改绑请明确确认`,
+        bound: current.project,
+      };
+    }
+
+    const bindings = {};
+    for (const sid of Object.keys(state.bindings || {})) {
+      const pid = state.bindings[sid] && state.bindings[sid].projectId;
+      if (pid) bindings[sid] = { projectId: pid, at: state.bindings[sid].at || '' };
+    }
+    // 一个项目只留一条研究对话：新绑的这条顶掉旧的。
+    // 老台账只有 projects[].sessionId，所以「这个项目原来那条会话」要从解析后的表里找，
+    // 否则顶掉的只是新表里的记录，老字段会在下一次读取时把旧会话又复活回来。
+    const resolved = this.sessionBindings();
+    const evicted = new Set();
+    for (const sid of Object.keys(bindings)) {
+      if (bindings[sid].projectId === targetId && sid !== key) {
+        evicted.add(sid);
+        delete bindings[sid];
+      }
+    }
+    for (const sid of Object.keys(resolved)) {
+      if (resolved[sid] === targetId && sid !== key) evicted.add(sid);
+    }
+    bindings[key] = { projectId: targetId, at: new Date().toISOString() };
+
+    // 绑定 = 启用：这条对话从此看得见整套 data_analysis_* 工具（触发门的第一个入口）
+    const armings = this.armings();
+    armings[key] = { at: new Date().toISOString(), reason: 'bind' };
+    // 被顶掉的会话已经不是「研究对话」了：它的启用登记也要一起清。
+    // 留着的话它仍然看得见整套工具，下一次调用还会被 ensureSessionBinding 绑回当前项目——两条会话来回抢。
+    for (const sid of evicted) {
+      if (sid !== key) delete armings[sid];
+    }
+
+    const projects = (state.projects || []).map((item) => {
+      if (item.id === targetId) return { ...item, sessionId: key };
+      // 被顶掉的会话在项目那一侧也不能留着：否则下次看「这条项目有没有对话」会读到旧 id
+      if (item.sessionId === key || evicted.has(item.sessionId)) return { ...item, sessionId: '' };
+      return item;
+    });
+
+    this.store.set({ bindings, projects, armings });
+    const project = { id: targetId, path: target.path, name: target.name || path.basename(target.path) };
+    const movedFrom = current && current.projectId !== targetId ? current.projectId : '';
+    this.onChange({ kind: 'session', projectId: targetId, sessionId: key, movedFrom });
+    return { ok: true, sessionId: key, projectId: targetId, project, movedFrom, already: false };
+  }
+
+  /** 解绑（会话被删了、或用户要重新开始）：只清登记，不动任何会话与文件。 */
+  unbindSession(projectId) {
+    const wanted = String(projectId || '').trim();
+    const activeNow = this.active();
+    const targetId = wanted || (activeNow.ok ? activeNow.id : '');
+    if (!targetId) return { ok: true, projectId: '', cleared: 0 };
+    const state = this.store.get();
+    const projects = (state.projects || []).map((item) => (item.id === targetId ? { ...item, sessionId: '' } : item));
+    const bindings = {};
+    const armings = this.armings();
+    let cleared = 0;
+    for (const sid of Object.keys(state.bindings || {})) {
+      const pid = state.bindings[sid] && state.bindings[sid].projectId;
+      if (pid === targetId) {
+        cleared += 1;
+        // 解绑 = 停用：用户点「解绑」就是不希望这条对话再带着工作台跑
+        delete armings[sid];
+        continue;
+      }
+      if (pid) bindings[sid] = { projectId: pid, at: state.bindings[sid].at || '' };
+    }
+    this.store.set({ bindings, projects, armings });
+    this.onChange({ kind: 'session', projectId: targetId, sessionId: '' });
+    return { ok: true, projectId: targetId, cleared };
+  }
+
+  /**
+   * 工具碰到工作台时顺手把「这条对话」绑到当前项目——只在还没绑过时绑，不抢别人的。
+   * 这样「对话里让 AI 建的项目」也会自动关联，不用再去工作台点一次。
+   */
+  ensureSessionBinding(sessionId) {
+    const key = String(sessionId || '').trim();
+    if (!key) return { ok: false, error: '没有会话 id' };
+    const existing = this.sessionBinding(key);
+    if (existing) {
+      return { ok: true, already: true, sessionId: key, projectId: existing.projectId, project: existing.project };
+    }
+    const activeNow = this.active();
+    if (!activeNow.ok) return { ok: false, error: activeNow.error };
+    const result = this.bindSessionTo(key, activeNow.id, { force: false });
+    if (!result.ok) return result;
+    return { ...result, already: false };
+  }
+
+  /**
+   * 在「某个登记项目」里跑一段代码。
+   *
+   * 后台回调（运行结束、重跑链续跑）没有「当前会话」，也不能拿全局当前项目凑数：
+   * 用户在面板里点开了 B 不等于刚才跑完的那次是 B 的。所以按运行记录里的 projectId 定作用域。
+   */
+  runInProject(projectId, fn) {
+    const run = typeof fn === 'function' ? fn : () => undefined;
+    const key = String(projectId || '').trim();
+    if (!key) return run();
+    const entry = this.ledgerProject(key);
+    if (!entry) return run();
+    const read = readProject(entry.path);
+    if (!read.ok) return run();
+    const scope = { ok: true, path: path.resolve(entry.path), project: read.project, id: key, sessionId: '' };
+    return this.sessionScope.run(scope, run);
+  }
+
+  /**
+   * 在「某条会话自己的项目」里跑一段代码。
+   * 没绑定、或绑定的目录没了，就照老路用全局当前项目——不抛错、也不改台账。
+   */
+  runForSession(sessionId, fn) {
+    const run = typeof fn === 'function' ? fn : () => undefined;
+    const bound = this.sessionBinding(String(sessionId || '').trim());
+    if (!bound) return run();
+    const read = readProject(bound.project.path);
+    if (!read.ok) return run();
+    const scope = {
+      ok: true,
+      path: path.resolve(bound.project.path),
+      project: read.project,
+      id: bound.projectId,
+      sessionId: bound.sessionId,
+    };
+    return this.sessionScope.run(scope, run);
+  }
+
+  /** 会话的 cwd（宿主会话服务里读，读不到就空串）。只用于「目录正好是项目根」这种强信号的自动关联。 */
+  sessionCwd(sessionId) {
+    const session = this.liveSession(sessionId);
+    const cwd = session && session.header && session.header.cwd;
+    return typeof cwd === 'string' ? cwd : '';
+  }
+
+  /** 宿主里活着的会话对象（读 header 这类只读事实用；读不到就是 null）。 */
+  liveSession(sessionId) {
+    const key = String(sessionId || '').trim();
+    if (!key || !this.hostCtx) return null;
+    try {
+      const sessions = this.hostCtx.get('sessions');
+      return sessions && typeof sessions.get === 'function' ? sessions.get(key) || null : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 子代理会话不参与绑定：它不该占用项目那唯一一条「研究对话」。 */
+  sessionIsDelegated(sessionId) {
+    const session = this.liveSession(sessionId);
+    const header = session && session.header;
+    if (!header) return false;
+    if (header.origin === 'subagent') return true;
+    const depth = Number(header.delegationDepth || 0);
+    return Number.isFinite(depth) && depth > 0;
+  }
+
+  /**
+   * 面板/对话把「现在屏幕上是哪条对话」告诉宿主。
+   *
+   * 只记事实（meta.focus），不自动改绑定：绑定是用户与工具的动作，切面板不该改它。
+   * 唯一的例外是强信号——这条对话的 cwd 正好就是当前项目的根目录，那它就是这个项目的对话。
+   */
+  focusSession(sessionId) {
+    const key = String(sessionId || '').trim();
+    const state = this.store.get();
+    if (!key) {
+      if ((state.meta || {}).focusSessionId) {
+        this.store.set({ meta: { ...(state.meta || {}), focusSessionId: '' } });
+        this.store.flushSoon?.(150);
+      }
+      return { ok: true, sessionId: '', bound: null };
+    }
+    let bound = this.sessionBinding(key);
+    if (!bound && !this.sessionIsDelegated(key)) {
+      const activeNow = this.active();
+      const cwd = this.sessionCwd(key);
+      if (activeNow.ok && cwd && samePath(cwd, activeNow.path)) {
+        const result = this.bindSessionTo(key, activeNow.id, { force: false });
+        if (result.ok) bound = this.sessionBinding(key);
+      }
+    }
+    if ((state.meta || {}).focusSessionId !== key) {
+      this.store.set({ meta: { ...(state.meta || {}), focusSessionId: key } });
+      // focus 只是「现在看的是哪条对话」，但它要跨面板重开活着：落一次盘
+      this.store.flushSoon?.(150);
+    }
+    return { ok: true, sessionId: key, bound: bound ? bound.project : null };
+  }
+
+  /** 快照里的「当前对话」：面板要靠它跟着对话走，而不是跟着上次点开的项目走。 */
+  focusSnapshot() {
+    const state = this.store.get();
+    const sessionId = (state.meta || {}).focusSessionId || '';
+    if (!sessionId) return null;
+    const bound = this.sessionBinding(sessionId);
+    return {
+      sessionId,
+      projectId: bound ? bound.projectId : '',
+      projectName: bound ? bound.project.name : '',
+      projectPath: bound ? bound.project.path : '',
+    };
   }
 
   /** 生成某阶段的任务卡（供面板投递到原生会话）。 */
@@ -413,6 +849,7 @@ export class Workbench {
 
     const artifacts = scanAll(active.path);
     const stages = evaluateProject({
+      pythonPath: this.getConfig().pythonPath,
       projectRoot: active.path,
       project: active.project,
       artifacts,
@@ -446,6 +883,9 @@ export class Workbench {
   }
 
   active() {
+    // 会话作用域优先：工具调用把自己的项目带进来，读的就是它。
+    const scoped = this.sessionScope.getStore();
+    if (scoped) return scoped;
     const state = this.store.get();
     let root = state.activeProjectPath || '';
     if (!root) {
@@ -1102,6 +1542,12 @@ export class Workbench {
   /* ------------------------------ 状态快照 ------------------------------ */
 
   snapshot() {
+    // 整段计算包进「读盘去重」作用域：同一批产物在 scanArtifacts 与闸门里被反复读，
+    // 一次快照只解析一遍。结果仍是现读的——作用域一结束就丢，判定不缓存。
+    return withReadCache(() => this.buildSnapshot());
+  }
+
+  buildSnapshot() {
     const config = this.getConfig();
     const skill = this.skill();
     const active = this.active();
@@ -1120,6 +1566,7 @@ export class Workbench {
         summary: { done: 0, blocked: 0, review: 0, todo: 9, running: 0 },
         totals: { pass: 0, fail: 0, unjudged: 0 },
         artifacts: null,
+        focus: this.focusSnapshot(),
         runs: this.recentRuns(8),
         adjudications: {},
         materials: this.publicMaterials(null),
@@ -1131,6 +1578,7 @@ export class Workbench {
     const adjudications = this.adjudicationsFor(active.id);
     const activeRuns = this.runner.activeFor(active.id);
     const stages = evaluateProject({
+      pythonPath: this.getConfig().pythonPath,
       projectRoot: active.path,
       project: active.project,
       artifacts,
@@ -1141,6 +1589,7 @@ export class Workbench {
     });
     const summary = summarizeStages(stages);
     const totals = gateTotals(stages);
+    const deliveryBlockers = reportBlockers(stages, active.path, 'delivery-ready');
 
     return {
       config: this.publicConfig(config),
@@ -1163,12 +1612,20 @@ export class Workbench {
       stages,
       summary,
       totals,
+      gateMode: readGatePolicy(active.path)?.mode || 'legacy',
+      gateChecking: this.gateChecks.has(active.id) ? {stageId:this.gateChecks.get(active.id).stageId,startedAt:this.gateChecks.get(active.id).startedAt} : null,
+      gateRecoveryNeeded: fs.existsSync(path.join(active.path,'output/gates/publication.lock'))&&!this.gateLeases.has(active.id),
+      deliveryReady: readGatePolicy(active.path)?.mode === 'skill' && deliveryBlockers.length === 0,
+      deliveryBlockers,
+      admission: gateAdmission(stages,active.path,'delivery-ready'),
       artifacts: this.publicArtifacts(artifacts),
       runs: this.recentRuns(12, active.id),
       adjudications,
       activeRuns,
       materials: this.publicMaterials(active),
       registry: this.publicRegistry(artifacts.registry || readRegistry(active.path), active.path),
+      // 现在屏幕上是哪条对话（可能属于另一个项目）：面板据此跟着对话走
+      focus: this.focusSnapshot(),
     };
   }
 
@@ -1178,6 +1635,11 @@ export class Workbench {
 
   /** 原生对话里的徽章每 8–10 秒轮询一次：只回摘要，不搬图表清单与产物明细。 */
   summary() {
+    // 与 snapshot 同一套读盘去重：摘要是「何时刷新」的判定依据，必须现读，但不能读两遍
+    return withReadCache(() => this.buildSummary());
+  }
+
+  buildSummary() {
     const active = this.active();
     if (!active.ok) return { ok: true, active: null, summary: null, totals: null, next: null, running: false };
     const running = Object.keys(this.runner.activeFor(active.id)).length > 0;
@@ -1190,6 +1652,7 @@ export class Workbench {
     }
     const artifacts = scanAll(active.path);
     const stages = evaluateProject({
+      pythonPath: this.getConfig().pythonPath,
       projectRoot: active.path,
       project: active.project,
       artifacts,
@@ -1205,10 +1668,17 @@ export class Workbench {
         id: active.id,
         name: active.project.name,
         path: active.path,
+        // 契约版本：strict = 新项目（缺注册表/复核就拦），legacy = 旧项目（只判「判不了」）
+        contract: contractMode(active.project),
+        schemaVersion: active.project.schemaVersion || 1,
+        stageApplicability: {
+          coding: active.project?.stages?.coding?.applicability || 'auto',
+        },
         sessionId: this.ledgerProject(active.id)?.sessionId || '',
       },
       summary: summarizeStages(stages),
       totals: gateTotals(stages),
+      contract: contractMode(active.project),
       next: next
         ? { id: next.id, index: next.index, name: next.name, status: next.status, script: next.script || null, args: next.args || [] }
         : null,
@@ -1638,8 +2108,11 @@ export class Workbench {
     return { ok: true, adapter: name, result: payload, log: tail, state: this.snapshot() };
   }
 
-  runSweep() {
-    return this.runAdapter('sweep_models');
+  runSweep({ maxOutcomes = 0 } = {}) {
+    // 普查只做诊断：结局清单来自 codebook / registry / 已登记模型，列名提示只补位。
+    const args = [];
+    if (Number(maxOutcomes) > 0) args.push('--max-outcomes', String(Math.trunc(Number(maxOutcomes))));
+    return this.runAdapter('sweep_models', { args });
   }
 
   runVerifySource({ mode = 'build', datasetId = '' } = {}) {
@@ -1650,6 +2123,120 @@ export class Workbench {
 
   runFigureCheck() {
     return this.runAdapter('figure_check');
+  }
+
+  /**
+   * 直接跑 skill 包里的脚本（不经过阶段登记表）。
+   * 用途：逐格复核的 final、研究总闸门、判断台账、复核包——它们要按需单独触发，
+   * 不适合塞进固定阶段（final 必须等人把 review_template 核完才能跑）。
+   */
+  async runSkillScript({ script, args = [], outFile = '', timeoutMs = 1800000 } = {}) {
+    const active = this.active();
+    if (!active.ok) return { ok: false, error: active.error };
+    const skill = this.skill();
+    const found = resolveStageScript({ projectRoot: active.path, skill, script });
+    if (!found.ok) {
+      return { ok: false, error: `找不到技能脚本 ${script}（${found.code}）${skill?.ok ? '' : '：技能包还没配置好'}` };
+    }
+    const python = this.getConfig().pythonPath || DEFAULT_PYTHON;
+    const result = await runProcess(python, [found.abs, ...args], { timeoutMs, cwd: active.path });
+    const log = [result.stdout, result.stderr].filter(Boolean).join('\n').trim();
+    let payload = null;
+    if (outFile) {
+      try {
+        payload = JSON.parse(fs.readFileSync(path.join(active.path, outFile), 'utf8').replace(/^\uFEFF/, ''));
+      } catch {
+        payload = null;
+      }
+    }
+    return {
+      ok: result.code === 0,
+      code: result.code,
+      log,
+      result: payload,
+      outFile,
+      script,
+      argv: [found.abs, ...args],
+    };
+  }
+
+  /** 逐格复核：prepare 生成快照与待核模板；final 校验复核回执与版本指纹。 */
+  runDatasetVerification({ stage = 'prepare' } = {}) {
+    const args = [
+      '--registry', 'research_registry.json',
+      '--root', '.',
+      '--out', 'output/data_verification',
+      '--stage', stage === 'final' ? 'final' : 'prepare',
+    ];
+    if (stage === 'final') args.push('--snapshot', 'output/data_verification/verification_snapshot.json');
+    return this.runSkillScript({
+      script: 'scripts/verify_dataset.py',
+      args,
+      outFile: 'output/data_verification/dataset_verification.json',
+    });
+  }
+
+  /** 研究总闸门：来源覆盖 / 模型终态 / 补数回查 / 运行回执 / 复核版本。 */
+  runResearchGate() {
+    return this.runSkillScript({
+      script: 'scripts/research_gate.py',
+      args: [
+        '--registry', 'research_registry.json',
+        '--root', '.',
+        '--verification', 'output/data_verification/dataset_verification.json',
+        '--out', 'output/research_gate.json',
+      ],
+      outFile: 'output/research_gate.json',
+    });
+  }
+
+  /** 判断台账校验：重复 target、缺证据、needs_human、extract 取值不在候选里。 */
+  runDecisionCheck() {
+    const active = this.active();
+    if (!active.ok) return { ok: false, error: active.error };
+    const args = [
+      // 判断台账的 target/evidence 是相对语料根（--root data）写的，和编码/审计同一套路径。
+      '--root', 'data',
+      '--decisions', 'decisions.jsonl',
+      '--out', 'output/qa/decision_issues.csv',
+    ];
+    if (fs.existsSync(path.join(active.path, 'output/coding/extraction_review.csv'))) {
+      args.push('--review', 'output/coding/extraction_review.csv');
+    }
+    return this.runSkillScript({ script: 'scripts/check_decisions.py', args });
+  }
+
+  /** 复核包：把图、表、模型、未关闭问题、缺失项排成一页给人看。 */
+  runReviewPack() {
+    const active = this.active();
+    if (!active.ok) return { ok: false, error: active.error };
+    const has = (rel) => fs.existsSync(path.join(active.path, rel));
+    // review_pack 的 --figures/--qa/--verify 都是文件：传目录会被 isfile 判定
+    // 静默跳过，复核包里就少了图表/终检/数字三节。
+    const manifest = ['output/chart_pack/chart_manifest.csv', 'output/figures/paper_figures_manifest.csv']
+      .filter((rel) => has(rel))
+      .sort((a, b) => (fs.statSync(path.join(active.path, b)).mtimeMs || 0) - (fs.statSync(path.join(active.path, a)).mtimeMs || 0))[0]
+      || 'output/chart_pack/chart_manifest.csv';
+    // 宽表规范位置是 output/dataset/analysis.csv；旧项目仍在 data/ 时按同一套回退，
+    // 否则复核包会拿一份不存在的表去算描述统计。
+    const dataRel = has('output/dataset/analysis.csv')
+      ? 'output/dataset/analysis.csv'
+      : has('data/analysis.csv')
+        ? 'data/analysis.csv'
+        : 'output/dataset/analysis.csv';
+    const args = [
+      '--data', dataRel,
+      '--stats', 'output/models',
+      '--figures', manifest,
+      '--qa', 'output/qa/qa_report.json',
+      '--verify', 'output/verify/number_issues.csv',
+      '--sample-flow', has('output/coding/sample_flow.csv') ? 'output/coding/sample_flow.csv' : 'output/audit/sample_flow.csv',
+      '--out', 'output/review/review_pack.md',
+    ];
+    // 可选材料：缺了就不传，别让「还没做这一步」变成 review_pack 的参数错误
+    if (has('decisions.jsonl')) args.push('--decisions', 'decisions.jsonl');
+    if (has('output/research_gate.json')) args.push('--research-gate', 'output/research_gate.json');
+    return this.runSkillScript({ script: 'scripts/review_pack.py', args });
   }
 
   recentRuns(limit, forProjectId) {
@@ -1680,7 +2267,8 @@ export class Workbench {
 
   /**
    * 把项目里的 stage 覆盖与 skill 路径合成可执行的步骤列表。
-   * 一个阶段可以是多步（终检 = qa_outputs + verify_numbers），顺序执行、日志合并。
+   * 一个阶段可以是多步（终检 = qa_outputs + verify_numbers + research_gate + review_pack），
+   * 顺序执行、日志合并；whenFile 缺文件时整步跳过，optionalArgs 缺文件时不追加参数。
    */
   commandFor(projectRoot, project, stage) {
     const override = project?.stages?.[stage.id] || {};
@@ -1695,58 +2283,163 @@ export class Workbench {
     if (Array.isArray(override.steps)) {
       for (const step of override.steps) spec.push(step);
     } else if (stageSteps && untouched) {
-      // 阶段本身是多步（终检），项目里没改过它 → 按默认的多步跑
+      // 阶段本身是多步，项目里没改过它 → 按默认的多步跑
       for (const step of stageSteps) spec.push(step);
     } else {
       spec.push({ script: override.script === undefined ? stage.script : override.script, args: Array.isArray(override.args) ? override.args : stage.args });
     }
 
+    const exists = (rel) => Boolean(rel) && fs.existsSync(path.join(projectRoot, String(rel)));
+    const skipped = [];
+
+    /**
+     * 图表清单可能来自 auto_chart_pack（output/chart_pack/chart_manifest.csv + figures/ 子目录），
+     * 也可能来自 paper_figures（output/figures/paper_figures_manifest.csv，图与清单同目录）。
+     * 写死 chart_pack 会让多面板项目在终检里查错文件，所以按「实际存在的清单」改写路径。
+     */
+    const manifestRel = ['output/chart_pack/chart_manifest.csv', 'output/figures/paper_figures_manifest.csv']
+      .map((rel) => { let mtimeMs = 0; try { mtimeMs = fs.statSync(path.join(projectRoot, rel)).mtimeMs; } catch {} return { rel, mtimeMs }; })
+      .filter((item) => exists(item.rel))
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+      .map((item) => item.rel)[0] || 'output/chart_pack/chart_manifest.csv';
+    const figuresRel = manifestRel === 'output/chart_pack/chart_manifest.csv'
+      ? 'output/chart_pack/figures'
+      : path.posix.dirname(manifestRel.replace(/\\/g, '/'));
+    const mapArtifactPaths = (arg) => {
+      if (arg === 'output/chart_pack/chart_manifest.csv') return manifestRel;
+      if (arg === 'output/chart_pack/figures') return figuresRel;
+      // 注意：不要映射 `output/chart_pack` 目录本身——那是 auto_chart_pack 的
+      // --out 参数；一旦项目里存在 paper 清单，它会被改写成 output/figures，
+      // 把清单写错目录。review_pack 已改成吃清单文件，不需要这条。
+      return arg;
+    };
+
+    const optionals = (resolved, item, extras) => {
+      const has = (flag) => resolved.includes(flag) || extras.includes(flag);
+      for (const opt of Array.isArray(item?.optionalArgs) ? item.optionalArgs : []) {
+        if (!opt || !opt.flag || has(opt.flag)) continue;
+        if (opt.file) {
+          if (!exists(opt.file)) continue;
+          extras.push(opt.flag, opt.file);
+        } else if (opt.whenFile) {
+          if (!exists(opt.whenFile)) continue;
+          extras.push(opt.flag);
+        }
+      }
+      for (const opt of Array.isArray(item?.optionalFlags) ? item.optionalFlags : []) {
+        if (!opt || !opt.flag || has(opt.flag)) continue;
+        if (opt.whenFile && !exists(opt.whenFile)) continue;
+        extras.push(opt.flag);
+      }
+    };
+
     const steps = [];
+    const deferred = [];
+    const produced = new Set();
+    const normalizeRel = (rel) => String(rel || '').replace(/\\/g, '/').replace(/^\.\//, '');
     for (const item of spec) {
       const scriptRel = item?.script;
       if (!scriptRel) return { ok: false, error: `${stage.name} 没有登记脚本：这一步由人/模型完成，面板只做验收`, steps: [] };
 
+      // 条件步骤不在启动前统一跳过：同一阶段里前一步的产物（例如 assemble_manuscript
+      // 写的 figure_map.json）要等它真的跑完才知道在不在。这里只登记 whenFile，
+      // 由 runner 在执行到该步时判断。
+      const whenFile = item.whenFile ? normalizeRel(item.whenFile) : '';
       const found = resolveStageScript({ projectRoot, skill, script: scriptRel });
-      if (!found.ok) return { ok: false, error: scriptErrorMessage(stage, scriptRel, found, projectRoot, skill), steps: [] };
+      if (!found.ok) {
+        // 条件步骤 + 文件现在不在 + 本阶段没有任何一步声明会产出它 → 这次本来就不跑，
+        // 不该让「技能包少一个可选脚本」把整个阶段判死。
+        const maybeLater = whenFile && produced.has(whenFile);
+        const existsNow = whenFile ? exists(whenFile) : true;
+        if (whenFile && !existsNow && !maybeLater) {
+          skipped.push({ script: scriptRel, whenFile });
+          continue;
+        }
+        return { ok: false, error: scriptErrorMessage(stage, scriptRel, found, projectRoot, skill), steps: [] };
+      }
       const scriptAbs = found.abs;
 
       const args = Array.isArray(item.args) ? item.args : [];
       // 宽表规范位置是 output/dataset/analysis.csv；旧项目仍在 data/ 时自动回退，
       // 不让「升级插件」等于「旧项目立刻跑不动」。
       const resolved = resolveArgs(args, { dataDir: 'data', outputDir: 'output', root: projectRoot }).map((arg) => {
-        if (arg !== 'output/dataset/analysis.csv') return arg;
-        if (fs.existsSync(path.join(projectRoot, arg))) return arg;
-        return fs.existsSync(path.join(projectRoot, 'data', 'analysis.csv')) ? 'data/analysis.csv' : arg;
-      });
-      // 可选参数：项目根上确实有这个配置文件才带上（chart_config.json / model_spec.json）。
-      // 不传的后果很实在——统计不到模型、图表推断不出结局变量直接退出 2。
-      const extras = [];
-      if (scriptRel === stage.script) {
-        for (const opt of Array.isArray(stage.optionalArgs) ? stage.optionalArgs : []) {
-          if (!opt || !opt.flag || !opt.file) continue;
-          if (resolved.indexOf(opt.flag) >= 0) continue;
-          if (!fs.existsSync(path.join(projectRoot, opt.file))) continue;
-          extras.push(opt.flag, opt.file);
+        const mapped = mapArtifactPaths(arg);
+        // 样本流程优先用编码阶段的漏斗（含复审排除/最终数据集），它才是模型 N
+        // 的对账口径；只跑了审计、还没编码时回退到审计漏斗。
+        if (mapped === 'output/coding/sample_flow.csv' && !fs.existsSync(path.join(projectRoot, mapped))) {
+          return 'output/audit/sample_flow.csv';
         }
-      }
+        if (mapped !== 'output/dataset/analysis.csv') return mapped;
+        if (fs.existsSync(path.join(projectRoot, mapped))) return mapped;
+        // 注册表驱动的多数据集项目：没有 analysis.csv 时用登记的第一份数据集当主表，
+        // 而不是让 stats/figures 对着一个不存在的路径报错。
+        const registered = this.primaryDatasetFile(projectRoot);
+        if (registered) return registered;
+        return fs.existsSync(path.join(projectRoot, 'data', 'analysis.csv')) ? 'data/analysis.csv' : mapped;
+      });
+      // 可选参数：项目里确实有这个文件才带上。
+      // 不传的后果很实在——统计不到模型、图表推断不出结局变量直接退出 2；
+      // qa 不传 --min-fontsize 则字号永远「未核」。
+      const extras = [];
+      optionals(resolved, item, extras);
+      if (scriptRel === stage.script) optionals(resolved, stage, extras);
       const argv = [scriptAbs, ...resolved, ...extras];
-      steps.push({
+      for (const rel of Array.isArray(item.produces) ? item.produces : []) produced.add(normalizeRel(rel));
+      const step = {
         script: scriptRel,
         scriptAbs,
+        produces: (Array.isArray(item.produces)?item.produces:[]).map(normalizeRel),
         argv,
+        whenFile,
         display: [python, ...argv].join(' '),
         continueOnError: item.continueOnError === true,
-      });
+      };
+      if (whenFile) {
+        deferred.push({ script: scriptRel, whenFile });
+        step.display += `  [条件：${whenFile} 不存在则跳过]`;
+      }
+      steps.push(step);
     }
 
-    if (!steps.length) return { ok: false, error: `${stage.name} 没有可执行的命令`, steps: [] };
-    return { ok: true, steps, script: steps[0].script, display: steps.map((item) => item.display).join('  &&  ') };
+    if (!steps.length) {
+      const missing = skipped.map((item) => item.whenFile).filter(Boolean);
+      return {
+        ok: false,
+        error: missing.length
+          ? `${stage.name} 没有可执行的步骤：缺 ${missing.join('、')}（按契约补齐后再跑，或显式改 project.json 的 stages.${stage.id}.steps）`
+          : `${stage.name} 没有可执行的命令`,
+        steps: [],
+      };
+    }
+    const skippedNote = skipped.length
+      ? `  [跳过 ${skipped.map((item) => item.whenFile).join('、')}：文件不存在]`
+      : '';
+    return {
+      ok: true,
+      steps,
+      skipped,
+      deferred,
+      script: steps[0].script,
+      display: steps.map((item) => item.display).join('  &&  ') + skippedNote,
+    };
+  }
+
+  /** 注册表里第一份「文件真实存在」的数据集：没有 analysis.csv 时用它当主表。 */
+  primaryDatasetFile(projectRoot) {
+    try {
+      const registry = readRegistry(projectRoot);
+      const row = (registry.datasets.rows || []).find((item) => item.file && fs.existsSync(registryPath(projectRoot, item.file)));
+      return row ? row.file : '';
+    } catch {
+      return '';
+    }
   }
 
   /** 前置闸门：前面阶段不许留着 blocked / 未裁定的人工项。 */
   blockers(projectRoot, project, stageId, adjudications) {
     const artifacts = scanAll(projectRoot);
     const stages = evaluateProject({
+      pythonPath: this.getConfig().pythonPath,
       projectRoot,
       project,
       artifacts,
@@ -1757,6 +2450,17 @@ export class Workbench {
     });
     const index = stages.findIndex((item) => item.id === stageId);
     const reasons = [];
+    const targetCheckpoint = ({ stats: 'analysis-ready', figures: 'analysis-ready', manuscript: 'figures-ready', qa: 'manuscript-ready', recheck: 'delivery-ready' })[stageId];
+    if (readGatePolicy(projectRoot)?.mode === 'skill') {
+      if(stageId==='audit')return stages.find(s=>s.id==='scope')?.gates.filter(g=>g.level==='error'&&!['pass','na'].includes(g.status)).map(g=>g.detail)||[];
+      const checkpoint=({coding:'data-ready',verify:'data-ready',stats:'analysis-ready',figures:'analysis-ready',manuscript:'figures-ready',qa:'manuscript-ready',recheck:'manuscript-ready'})[stageId];
+      if(!checkpoint)return [];
+      if(stageId==='coding'){
+        return reportBlockers(stages,projectRoot,checkpoint,{reportStages:['scope','audit']});
+      }
+      return reportBlockers(stages,projectRoot,checkpoint);
+    }
+    if (targetCheckpoint) reasons.push(...reportBlockers(stages, projectRoot, targetCheckpoint));
     for (let i = 0; i < index; i += 1) {
       const stage = stages[i];
       if (stage.status === 'blocked') {
@@ -1765,6 +2469,24 @@ export class Workbench {
       }
       const manual = stage.gates.filter((g) => g.manual && g.status === 'unjudged');
       if (manual.length) reasons.push(`${stage.name}：${manual.map((g) => g.label).join('、')} 待人工裁定`);
+    }
+    // 研究层是硬前置：registry 一旦存在，统计前必须 final + verified + 0 error。
+    // 没有 registry 的老项目这一层 unjudged，保持「不拦」。
+    // 新项目（contract.mode=strict）没有 registry 就是拦：不能拿「兼容旧项目」当默认放行。
+    const research = artifacts.research;
+    const verifyIndex = stages.findIndex((item) => item.id === 'verify');
+    const strictContract = contractMode(project) === 'strict';
+    if (verifyIndex >= 0 && index > verifyIndex) {
+      if (!research?.registry?.exists) {
+        if (strictContract) reasons.push('严格契约（project.json contract.mode=strict）：缺 research_registry.json，先登记数据集、逐格复核到 final 再统计');
+      } else {
+        const verifyStage = stages[verifyIndex];
+        const finalGate = verifyStage.gates.find((item) => item.id === 'verification-final');
+        const freshGate = verifyStage.gates.find((item) => item.id === 'verification-fresh');
+        const blocker = [finalGate, freshGate].find((item) => item && item.status === 'fail')
+          || [finalGate, freshGate].find((item) => item && item.status === 'unjudged');
+        if (blocker) reasons.push(`全格复核：${blocker.detail || blocker.label}`);
+      }
     }
     return reasons;
   }
@@ -1785,28 +2507,38 @@ export class Workbench {
     if (busyStages.length) {
       const names = busyStages.map((id) => (STAGE_BY_ID.get(id) || {}).name || id);
       const error = `${names.join('、')} 正在运行，等它结束再跑这一步（确需并行请显式 force）`;
-      if (!force) return { ok: false, error, blockers: [error] };
+      if (!force || readGatePolicy(active.path)?.mode === 'skill') return { ok: false, error, blockers: [error] };
     }
 
-    const command = this.commandFor(active.path, active.project, stage);
-    if (!command.ok) return { ok: false, error: command.error };
-
-    if (!force) {
-      const reasons = this.blockers(active.path, active.project, stageId, this.adjudicationsFor(active.id));
-      if (reasons.length) {
-        return {
-          ok: false,
-          error: `前置阶段未过：${reasons.join('；')}。确需跳过请显式 force。`,
-          blockers: reasons,
-        };
+    let lease = null;
+    if (readGatePolicy(active.path)) {
+      try {
+        lease = acquireProjectLease(active.path);
+        this.gateLeases.set(active.id, lease);
+      } catch (error) {
+        return {ok: false, error: '项目正在写入或体检；先等待完成，或恢复已中断的运行', blockers: ['project-lease']};
       }
     }
-
-    const run = this.runner.start({
-      project: { id: active.id, path: active.path },
-      stageId,
-      steps: command.steps,
-    });
+    let run, command;
+    try {
+      if(lease)syncMaterialRoots(active.path,active.project,listSources(this.store),this.cacheDir());
+      command=this.commandFor(active.path,active.project,stage);
+      if(!command.ok)return {ok:false,error:command.error};
+      if(!force||readGatePolicy(active.path)?.mode==='skill'){
+        const reasons=this.blockers(active.path,active.project,stageId,this.adjudicationsFor(active.id));
+        if(reasons.length)return {ok:false,error:`前置阶段未过：${reasons.join('；')}`,blockers:reasons};
+      }
+      invalidateGateReports(active.path);
+      run = this.runner.start({
+        project: { id: active.id, path: active.path },
+        stageId, steps: command.steps, projectLease: lease,
+      });
+    } catch (error) {
+      return {ok: false, error: String(error.message || error)};
+    } finally {
+      if(!run&&lease)this.releaseGateLease(active.id,lease);
+    }
+    if (!run) return {ok: false, error: '没有可执行的阶段步骤'};
     this.onChange({ kind: 'run-start', runId: run.id, stageId });
     return { ok: true, run, command: command.display };
   }
@@ -1815,6 +2547,8 @@ export class Workbench {
     const active = this.active();
     if (!active.ok) return { ok: false, error: active.error };
     this.invalidateSummary();
+    const checking=this.gateChecks.get(active.id);
+    if(checking){checking.controller.abort();return {ok:true,cancelled:['gate-check']};}
     const cancelled = this.runner.cancelStage(active.id, stageId);
     if (!cancelled.length) return { ok: false, error: '当前没有在跑的进程' };
     return { ok: true, cancelled };
@@ -1829,9 +2563,9 @@ export class Workbench {
   /* ----------------------------- 手稿骨架 ----------------------------- */
 
   /**
-   * 第 7 阶段吃的是 manuscript.json，而这个文件只有人/模型能写。
+   * 第 8 阶段吃的是 manuscript.json，而这个文件只有人/模型能写。
    * 这里把「机械的部分」拼好：图表清单里的每个 section、图块与题注、模型表。
-   * 正文段落留成「待补」占位——骨架不放任何自己编的数字，第 8 阶段报出来的
+   * 正文段落留成「待补」占位——骨架不放任何自己编的数字，第 9 阶段报出来的
    * 数字问题就都是真的，不会被骨架自己制造的假错淹掉。
    */
   manuscriptScaffold({ overwrite = false } = {}) {
@@ -1873,9 +2607,9 @@ export class Workbench {
     };
     const allRows = (figureSource.rows || []).filter((row) => row && row.png);
     // 画图失败的行（status=error*/skipped*）不会出现在骨架里；把它和「png 不存在」
-    // 分开数——两种原因要用户做的事完全不同（重跑第 5 阶段 vs 把图补齐）。
-    const badStatus = allRows.filter((row) => String(row.status || 'ok') !== 'ok');
-    const candidateRows = allRows.filter((row) => String(row.status || 'ok') === 'ok');
+    // 分开数——两种原因要用户做的事完全不同（重跑第 7 阶段 vs 把图补齐）。
+    const badStatus = allRows.filter((row) => row.deliverable === false);
+    const candidateRows = allRows.filter((row) => row.deliverable !== false);
     // png 缺了就别写进骨架：assemble_manuscript 遇到不存在的图会直接 SpecError，
     // 骨架把一个坏引用塞进去，等于把「图没画出来」伪装成「文稿写不出来」。
     const figureRows = candidateRows.filter((row) => row.pngExists !== false);
@@ -1897,9 +2631,9 @@ export class Workbench {
     const cnLabel = (index) => (CN_NUM[index] ? CN_NUM[index] : String(index + 1));
     const warnings = [];
     if (!figureSource.file) {
-      warnings.push('还没找到图表清单（第 6 阶段的输出）——骨架里暂时没有图；先跑第 6 阶段，再点「重排骨架」。');
+      warnings.push('还没找到图表清单（第 7 阶段的输出）——骨架里暂时没有图；先跑第 7 阶段，再点「重排骨架」。');
     } else if (!figureRows.length) {
-      warnings.push('图表清单里没有可用的图（png 缺失或 status 不是 ok）——骨架里暂时没有图；先把第 6 阶段跑通再重排。');
+      warnings.push('图表清单里没有可用的图（png 缺失或 status 不是 ok）——骨架里暂时没有图；先把第 7 阶段跑通再重排。');
     }
     let headingIndex = 1;
     for (const group of groups) {
@@ -1993,32 +2727,34 @@ export class Workbench {
       stateLine = '还没有 manuscript.json —— 先生成骨架';
     } else if (state.error) {
       stateLine = state.errorKind === 'structure'
-        ? `跑不了：${state.error} —— 先按上面的结构改好，再跑第 7 阶段`
-        : `解析失败：${state.error} —— 先把 JSON 改对，再跑第 7 阶段`;
+        ? `跑不了：${state.error} —— 先按上面的结构改好，再跑第 8 阶段`
+        : `解析失败：${state.error} —— 先把 JSON 改对，再跑第 8 阶段`;
     } else {
       stateLine = `${state.blocks} 块（图 ${state.figures} / 表 ${state.tables} / 待补段落 ${state.placeholders}）`;
       if (state.invalidBlocks) {
-        stateLine += `；有 ${state.invalidBlocks} 块结构不对（type 不认识、table 缺 csv 或 csv 没有数据行），第 7 阶段会直接报错`;
+        stateLine += `；有 ${state.invalidBlocks} 块结构不对（type 不认识、table 缺 csv 或 csv 没有数据行），第 8 阶段会直接报错`;
       }
       if (state.figuresMissing) {
-        stateLine += `；有 ${state.figuresMissing} 个图块的 png 找不到（第 7 阶段会直接报 figure image not found）`;
+        stateLine += `；有 ${state.figuresMissing} 个图块的 png 找不到（第 8 阶段会直接报 figure image not found）`;
       }
     }
     const text = [
-      '【手稿正文】把第 7 阶段（文稿组装）的骨架写成正文',
+      '【手稿正文】把第 8 阶段（文稿组装）的骨架写成正文',
       '',
       `项目目录：${root}`,
       `manuscript.json：${stateLine}`,
       '',
       '怎么做：',
-      '1. 读 manuscript.json。figure 块的 png / caption 不要改；N 已经写在题注里（或 n 字段里），不要重复加，也不要把题注里的 N 删掉——它是第 8 阶段核对的统计口径。补 note 可以。',
+      '1. 读 manuscript.json。figure 块的 png / caption 不要改；N 已经写在题注里（或 n 字段里），不要重复加，也不要把题注里的 N 删掉——它是第 9 阶段核对的统计口径。补 note 可以。',
       '2. 把每个「待补」的 para 换成真正的段落（问题、数据、方法、发现、局限）。每个数字都要能在 output/models/*.csv 或 output/dataset/analysis.csv 里找到原值；找不到就补一张表，不要在正文里估一个数出来。',
-      '3. 正文至少引用每个图号一次（图1、图2…），图号从 1 连续；要加表就写 {"type":"table","csv":"output/models/coef_m1_probation.csv","caption":"…"}，数字由脚本从 CSV 取，不要抄进正文。',
+      '3. 正文至少引用每个图号一次（图1、图2…），图号从 1 连续；要加表就写 {"type":"table","csv":"output/models/coef_m1_probation.csv","caption":"…","columns":[{"col":"term","label":"变量"},{"col":"beta","label":"系数","fmt":".3f"}]}，数字由脚本从 CSV 取，不要抄进正文。',
+      '   表的列选择写在 table 块的顶层 columns（不是 presentation.columns）：只选要发表的列，别把整张原始输出贴进论文。',
       '   注意：正文里的「图N」按块序自动编号——你调换 figure 块的顺序，图号就跟着变，正文引用必须同步改，否则图与正文会错配。',
       '4. 只改 manuscript.json，写完自己 JSON.parse 一遍；不要动 output/ 下的产物，也不要改 data/ 里的资料。',
       '5. 写完跑 data_analysis_run_stage(stageId="manuscript")，再跑终检，按 qa 报告逐条修。',
       '',
-      '产物落点：output/manuscript.docx；第 7 阶段的闸门只认这个 docx（manuscript.json 是它的输入，不是闸门证据）。',
+      '产物落点：output/manuscript.docx（另写 manuscript_numbers.csv 与 figure_map.json）；第 8 阶段的闸门只认这个 docx（manuscript.json 是它的输入，不是闸门证据）。',
+      '导 PDF：本阶段会自动跑 export_pdf_hires.py 回填 600dpi 图（需要本机 Word）；失败不影响 docx，但 qa 的 --pdf 检查会缺席。',
     ].join('\n');
     return { ok: true, text, spec: state };
   }
@@ -2042,12 +2778,15 @@ export class Workbench {
     if (!gate.manual) {
       return { ok: false, error: `闸门 ${gateId} 由脚本判定，不能被人工裁定改写（只有「人工」闸门可以）` };
     }
+    if(status!=='unjudged'&&readGatePolicy(active.path)?.mode==='skill'&&!gate.snapshotHash){
+      return {ok:false,error:'当前体检证据尚不完整或已失效，请先重新体检，再对当前快照裁定'};
+    }
 
     const state = this.store.get();
     const all = { ...(state.adjudications || {}) };
     const mine = { ...(all[active.id] || {}) };
     if (status === 'unjudged') delete mine[gateId];
-    else mine[gateId] = { status, note: String(note || ''), at: new Date().toISOString(), stageId };
+    else mine[gateId] = { status, note: String(note || ''), at: new Date().toISOString(), stageId, ...(gate.snapshotHash?{snapshotHash:gate.snapshotHash}:{}) };
     all[active.id] = mine;
     this.store.set({ adjudications: all });
     this.onChange({ kind: 'adjudicate', stageId, gateId, status });
@@ -2061,13 +2800,16 @@ export class Workbench {
     const active = this.active();
     if (!active.ok) return { ok: false, error: active.error };
     const runs = this.recentRuns(200, active.id);
-    const state = recheckSummary(active.path, { project: active.project, runs });
+    const state = readGatePolicy(active.path)?.mode==='skill'
+      ? this.skillRecheckState(active)
+      : recheckSummary(active.path, { project: active.project, runs });
     return {
       ok: true,
       projectId: active.id,
       checks: state.checks,
       issues: state.issues,
       coverage: state.coverage,
+      snapshotHash: state.snapshotHash || null,
       openErrors: state.openErrors,
       openOthers: state.openOthers,
       report: state.report,
@@ -2080,21 +2822,131 @@ export class Workbench {
     const active = this.active();
     if (!active.ok) return { ok: false, error: active.error };
     const runs = this.recentRuns(200, active.id);
-    const state = recheckSummary(active.path, { project: active.project, runs });
+    const state = readGatePolicy(active.path)?.mode==='skill'
+      ? this.skillRecheckState(active)
+      : recheckSummary(active.path, { project: active.project, runs });
     const evidence = buildEvidence(active.path, {
       project: active.project,
       runs,
       checks: state.checks,
       issues: state.issues,
     });
-    return { ok: true, projectId: active.id, chars: evidence.length, evidence };
+    return { ok: true, projectId: active.id, chars: evidence.length, evidence, snapshotHash: state.snapshotHash || null };
+  }
+
+  skillRecheckState(active) {
+    const stages=this.snapshot().stages;
+    const recheck=stages.find(s=>s.id==='recheck');
+    const checks=recheck?.gates.find(g=>g.id==='recheck-machine')?.checks||[];
+    const issues=readIssues(active.path);
+    return {checks,issues,coverage:readCoverage(active.path),
+      openErrors:issues.filter(i=>i.status==='open'&&i.severity==='error').length,
+      openOthers:issues.filter(i=>i.status==='open'&&i.severity!=='error').length,
+      report:fs.existsSync(path.join(active.path,'output/recheck/report.md')),
+      snapshotHash:stages.find(s=>s.id==='qa')?.gates.find(g=>g.id==='qa-signoff')?.snapshotHash||null};
+  }
+
+  releaseGateLease(projectId,lease) {
+    try{lease.release();return '';}
+    catch(error){const message=String(error?.message||error);this.onChange({kind:'gate-lease-error',projectId,error:message});return message;}
+    finally{this.gateLeases.delete(projectId);}
+  }
+
+  async gateControl({action='inspect',stageId,mode}={}) {
+    const active=this.active();
+    if(!active.ok)return {ok:false,error:active.error};
+    if(Object.keys(this.runner.activeFor(active.id)).length||this.gateLeases.has(active.id))return {ok:false,error:'生产或体检正在运行，不能同时修改策略'};
+    const skill=this.skill();
+    if(!skill.ok)return {ok:false,error:skill.reason};
+    const common={root:active.path,skillRoot:skill.packageDir,python:this.getConfig().pythonPath};
+    let result;
+    if(action==='inspect'){
+      const policy=readGatePolicy(active.path);
+      if(!policy||policy.invalid)return {ok:false,error:'先初始化有效的门禁策略'};
+      let lease;
+      try{
+        lease=acquireProjectLease(active.path);this.gateLeases.set(active.id,lease);
+        syncMaterialRoots(active.path,active.project,listSources(this.store),this.cacheDir());
+        const checked=await this.inspectGates(active.id,{...common,lease,stageIds:stageId?[stageId]:null});
+        result={ok:checked.status==='completed',...checked};
+      }catch(error){result={ok:false,error:error.message};}
+      finally{if(lease){const error=this.releaseGateLease(active.id,lease);if(error)result={ok:false,error,status:'failed'};}}
+    } else {
+      const verb={init:'init-policy',migrate:'migrate-policy',recover:'recover'}[action];
+      if(!verb)return {ok:false,error:'未知体检操作'};
+      if(action==='recover')result=await gateCommand({...common,action:verb,mode});
+      else {
+        let lease;
+        try{
+          lease=acquireProjectLease(active.path);this.gateLeases.set(active.id,lease);
+          syncMaterialRoots(active.path,active.project,listSources(this.store),this.cacheDir());
+          result=await gateCommand({...common,action:verb,mode,lease});
+          if(result.ok){
+            const previous=active.project.skill||{};
+            const pinned={root:skill.packageDir,version:skill.version||'',sha256:skill.sha256||''};
+            const id=randomUUID();
+            const directory=path.join(active.path,'.workbench/gates/migrations');
+            fs.mkdirSync(directory,{recursive:true});
+            fs.writeFileSync(path.join(directory,`pin-${id}.json`),JSON.stringify({schema:'dsa.skill-pin-migration/1',at:new Date().toISOString(),before:previous,after:pinned}),{flag:'wx'});
+            const target=path.join(active.path,'project.json'),temporary=target+'.'+id+'.tmp';
+            try{fs.writeFileSync(temporary,JSON.stringify({...active.project,skill:pinned,gatePolicy:{schema:'dsa.gate-policy-required/1',required:true},updatedAt:new Date().toISOString()},null,2)+'\n');fs.renameSync(temporary,target);}
+            finally{if(fs.existsSync(temporary))fs.unlinkSync(temporary);}
+          }
+        }catch(error){result={ok:false,error:error.message};}
+        finally{if(lease){const error=this.releaseGateLease(active.id,lease);if(error)result={ok:false,error,status:'failed'};}}
+      }
+    }
+    this.invalidateSummary();
+    this.onChange({kind:'gate-control',action,result});
+    return {...result,state:this.snapshot()};
+  }
+
+  gateEvidence({stageId,gateId}={}) {
+    const stage=this.snapshot().stages.find(s=>s.id===stageId);
+    const gate=stage?.gateComparison?.find(g=>g.id===gateId)||stage?.gates.find(g=>g.id===gateId);
+    if(!gate)return {ok:false,error:'当前阶段没有此判据'};
+    return {ok:true,gate};
+  }
+
+  async inspectGates(projectId, options) {
+    const controller=new AbortController();
+    this.gateChecks.set(projectId,{controller,stageId:options.run?.stageId||options.stageIds?.[0]||'',startedAt:new Date().toISOString()});
+    this.onChange({kind:'gate-check-start',projectId});
+    try{return await inspectAfterRun({...options,signal:controller.signal});}
+    finally{this.gateChecks.delete(projectId);this.invalidateSummary();this.onChange({kind:'gate-check-finish',projectId});}
+  }
+
+  async recoverGateLeases() {
+    const skill=this.skill();if(!skill.ok)return [];
+    const results=[];
+    for(const project of this.store.get().projects||[]){
+      if(!project.path||!fs.existsSync(path.join(project.path,'output/gates/publication.lock')))continue;
+      const result=await gateCommand({root:project.path,skillRoot:skill.packageDir,python:this.getConfig().pythonPath,action:'recover'});
+      results.push({projectId:project.id,...result});
+    }
+    if(results.length){this.invalidateSummary();this.onChange({kind:'gate-recovery',results});}
+    return results;
+  }
+
+  gateResource({stageId,gateId,resourceId}={}) {
+    const active=this.active();
+    if(!active.ok)return {ok:false,error:active.error};
+    const view=this.gateEvidence({stageId,gateId});
+    const resource=view.gate?.resources?.find(r=>r.id===resourceId);
+    if(!resource)return {ok:false,error:'当前报告中没有该证据引用'};
+    try{return {ok:true,abs:resolveGateResource(active.path,active.project,resource)};}
+    catch(error){return {ok:false,error:error.message};}
   }
 
   /** 模型审计交上来的一条问题：只写清单，不改产物。 */
+  issuesForMutation(root) {
+    return readGatePolicy(root)?.mode==='skill'&&fs.existsSync(safePath(root,'output/recheck/issues.jsonl'))?readIssueLedger(root):readIssues(root);
+  }
+
   recordIssue(issue) {
     const active = this.active();
     if (!active.ok) return { ok: false, error: active.error };
-    const issues = readIssues(active.path);
+    let issues;try{issues=this.issuesForMutation(active.path);}catch(error){return {ok:false,error:'问题台账损坏，先修复原始记录：'+error.message};}
     const at = issues.findIndex((item) => item.id === issue.id);
     if (at >= 0) {
       // 模型重录同一个 id 是常规动作；不能让它把人工裁定过的 fixed/wontfix/deferred 打回 open
@@ -2119,7 +2971,7 @@ export class Workbench {
     if (!active.ok) return { ok: false, error: active.error };
     const allowed = new Set(['open', 'fixed', 'wontfix', 'deferred']);
     if (!allowed.has(status)) return { ok: false, error: '问题状态只能是 open / fixed / wontfix / deferred' };
-    const issues = readIssues(active.path);
+    let issues;try{issues=this.issuesForMutation(active.path);}catch(error){return {ok:false,error:'问题台账损坏，先修复原始记录：'+error.message};}
     const at = issues.findIndex((issue) => issue.id === id);
     if (at < 0) return { ok: false, error: `没有这条问题：${id}` };
     issues[at] = { ...issues[at], status, note: String(note ?? issues[at].note ?? ''), updatedAt: new Date().toISOString() };
@@ -2137,7 +2989,7 @@ export class Workbench {
     if (!active.ok) return { ok: false, error: active.error };
     const chain = this.chainStatus();
     if (chain && chain.status === 'running') return { ok: false, error: '上一轮重跑还没结束，先等它跑完或取消' };
-    const issues = readIssues(active.path);
+    let issues;try{issues=this.issuesForMutation(active.path);}catch(error){return {ok:false,error:'问题台账损坏，先修复原始记录：'+error.message};}
     const at = issues.findIndex((issue) => issue.id === id);
     if (at < 0) return { ok: false, error: `没有这条问题：${id}` };
     const issue = issues[at];
@@ -2167,19 +3019,50 @@ export class Workbench {
     return { ok: true, file: applied.file, backup: applied.backup, chain: this.chainStatus() };
   }
 
-  /** 改哪个层级的文件，就从哪个阶段开始重跑（保守：数据变了就全链重跑）。 */
+  /**
+   * 改哪个层级的文件，就从哪个阶段开始重跑。
+   *
+   * 依赖链：原始资料 → 审计 → 编码 → 数据集 → 全格复核 → 模型 → 图 → 文稿 → 终检。
+   * 旧版漏了三件事：改 data/ 不重跑审计、改注册表/数据集不重跑全格复核、改模型产物却重跑统计
+   * （会把刚套用的补丁覆盖掉）。人工步骤（verify 的 final、dataset 的宽表）不硬跑，变成等待点。
+   */
   downstreamStages(file) {
-    const rel = String(file).replace(/\\/g, '/');
-    if (/^(data\/|scripts\/|output\/(coding|audit)\/)/.test(rel)) return ['coding', 'dataset', 'stats', 'figures', 'manuscript', 'qa'];
-    // output/dataset/analysis.csv 是规范宽表，stats / figures / qa 都拿它当 --data；
-    // 漏掉它会让「补丁改了宽表」被报成「不影响下游阶段，未触发重跑」。
-    if (/^output\/dataset\//.test(rel)) return ['stats', 'figures', 'manuscript', 'qa'];
-    if (/^output\/(models|tables)\//.test(rel)) return ['stats', 'figures', 'manuscript', 'qa'];
-    if (/^(model_spec\.json|chart_config\.json)$/.test(rel)) return ['stats', 'figures', 'manuscript', 'qa'];
+    const rel = String(file).replace(/\\/g, '/').replace(/^\.\//, '');
+    const all = ['audit', 'coding', 'dataset', 'verify', 'stats', 'figures', 'manuscript', 'qa'];
+    // 原始资料变了：审计结论、编码、数据集、复核全部失效
+    if (/^data\//.test(rel)) return all.slice();
+    // 项目脚本变了：审计/编码/统计都可能变，从审计重来最保守
+    if (/^scripts\//.test(rel)) return all.slice();
+    // skill 注册表：数据集身份/主键/证据账变了 → 复核必须先重来
+    if (/^research_registry\.json$/.test(rel)) return ['verify', 'dataset', 'stats', 'figures', 'manuscript', 'qa'];
+    // 登记的数据集或 index.json：数据变了 → 复核作废
+    if (/^output\/datasets\//.test(rel)) return ['verify', 'dataset', 'stats', 'figures', 'manuscript', 'qa'];
+    if (/^output\/(datasets|data_verification)\//.test(rel)) return ['verify', 'stats', 'figures', 'manuscript', 'qa'];
+    if (/^output\/audit\//.test(rel)) return ['coding', 'dataset', 'verify', 'stats', 'figures', 'manuscript', 'qa'];
+    // 编码漏斗 / 判断台账：它们直接改变「哪些行算样本」，数据集与复核都要重来。
+    if (/^output\/coding\//.test(rel)) return ['dataset', 'verify', 'stats', 'figures', 'manuscript', 'qa'];
+    if (/^decisions\.jsonl$/.test(rel)) return ['coding', 'dataset', 'verify', 'stats', 'figures', 'manuscript', 'qa'];
+    if (/^output\/dataset\//.test(rel)) return ['verify', 'stats', 'figures', 'manuscript', 'qa'];
+    if (/^(model_spec\.json|chart_config\.json|methods\.json)$/.test(rel)) return ['stats', 'figures', 'manuscript', 'qa'];
+    // 模型产物被修（补丁/手改）时不能「重跑统计」——那会把修好的系数表覆盖回原样。
+    if (/^output\/(models|methods)\//.test(rel)) return ['figures', 'manuscript', 'qa'];
     if (/^output\/chart_pack\//.test(rel)) return ['figures', 'manuscript', 'qa'];
-    if (/^(output\/manuscript|manuscript\.json)/.test(rel)) return ['manuscript', 'qa'];
-    if (/^(output\/qa|output\/verify)\//.test(rel)) return ['qa'];
+    if (/^output\/figures\//.test(rel)) return ['figures', 'manuscript', 'qa'];
+    if (/^(output\/manuscript|manuscript\.json|output\/figure_map\.json)/.test(rel)) return ['manuscript', 'qa'];
+    if (/^output\/(qa|verify)\//.test(rel)) return ['qa'];
     return [];
+  }
+
+  /** 阶段有没有可执行脚本（没有 = 人工步骤，重跑链必须停下来等人）。 */
+  stageRunnable(stageId) {
+    const active = this.active();
+    if (!active.ok) return false;
+    const stage = this.stageById(stageId);
+    if (!stage) return false;
+    const hasScript = Boolean(stage.script) || (Array.isArray(stage.steps) && stage.steps.some((step) => step && step.script));
+    if (!hasScript) return false;
+    const command = this.commandFor(active.path, active.project, stage);
+    return Boolean(command.ok && command.steps.length);
   }
 
   startChain(projectIdValue, steps, issueId) {
@@ -2208,14 +3091,87 @@ export class Workbench {
       return;
     }
     const stageId = chain.steps[chain.index];
-    const result = this.runStage(stageId, { force: true });
+    // 没有脚本的阶段（dataset / recheck）是人工步骤：明确停下等人，不要 force 一个空命令，
+    // 也不要「静悄悄跳过」——这两种都会让链看起来跑完了。
+    if (!this.stageRunnable(stageId)) {
+      const stage = this.stageById(stageId);
+      this.patchChain({
+        status: 'waiting',
+        waitingFor: stageId,
+        error: `${stage ? stage.name : stageId} 没有可执行脚本（人工步骤）：先按面板提示完成，再用 action=chain resume 继续`,
+      });
+      return;
+    }
+    // 不带 force：前置闸门没过就停下来等人看，而不是把「没过的阶段」当没事发生。
+    const result = this.runStage(stageId, { force: false });
     if (!result.ok) {
-      this.patchChain({ status: 'stopped', error: `${stageId} 无法启动：${result.error}` });
+      const blockers = Array.isArray(result.blockers) ? result.blockers : [];
+      this.patchChain({
+        status: 'waiting',
+        waitingFor: stageId,
+        blockers,
+        error: blockers.length
+          ? `${stageId} 的前置阶段未过：${blockers.join('；')}。处理后再 action=chain resume；确需跳过用 force=true`
+          : `${stageId} 无法启动：${result.error}`,
+      });
     }
   }
 
+  /** 重跑链的人工续跑：resume 重新尝试当前步骤；force=true 才跳过前置闸门。 */
+  resumeChain({ force = false } = {}) {
+    const chain = this.chainStatus();
+    if (!chain) return { ok: false, error: '没有重跑链' };
+    if (chain.status === 'running') return { ok: false, error: '重跑链正在跑' };
+    if (!['waiting', 'stopped', 'interrupted', 'cancelled'].includes(chain.status)) {
+      return { ok: false, error: `当前状态 ${chain.status} 不需要续跑` };
+    }
+    this.patchChain({ status: 'running', error: '', blockers: [] });
+    if (force) {
+      // 只在这一步显式 force：用户已经看过 blockers 并决定跳过。
+      const stageId = chain.steps[chain.index];
+      const stage = this.stageById(stageId);
+      if (stage && this.commandFor(this.active().path, this.active().project, stage).ok) {
+        const result = this.runStage(stageId, { force: true });
+        if (!result.ok) {
+          this.patchChain({ status: 'waiting', error: result.error });
+          return { ok: false, error: result.error, chain: this.chainStatus() };
+        }
+        return { ok: true, chain: this.chainStatus() };
+      }
+    }
+    this.beginChainStep();
+    return { ok: true, chain: this.chainStatus() };
+  }
+
   /** 由 runner 在每次运行结束时回调。 */
+  /**
+   * 运行结束的回调。
+   *
+   * 这里没有「当前会话」，但面板可能正开着别的项目：整段放进这次运行自己的项目作用域里，
+   * 否则读到的是别人项目的闸门——重跑链会据此走错下一步，或者停在莫名其妙的地方。
+   */
   onRunFinished(run) {
+    return this.runInProject(run && run.projectId, async () => {
+      const active = this.active();
+      const lease = this.gateLeases.get(run?.projectId);
+      try {
+        if (active.ok && readGatePolicy(active.path)) {
+          const gateCheck = await this.inspectGates(active.id,{root: active.path, skillRoot: this.skill().packageDir, python: this.getConfig().pythonPath, run, lease});
+          const state = this.store.get();
+          this.store.set({runs: (state.runs || []).map(r => r.id === run.id ? {...r, gateCheck} : r)});
+          this.onChange({kind: 'gate-check', runId: run.id, gateCheck});
+        }
+      } catch (error) {
+        this.patchChain({status: 'stopped', error: '体检收尾失败，旧报告不可采信'});
+        this.onChange({kind: 'gate-check', runId: run?.id, error: String(error?.message || error)});
+      } finally {
+        if(lease){const error=this.releaseGateLease(run.projectId,lease);if(error){this.patchChain({status:'stopped',error:'写锁收尾失败，请恢复后重新体检'});return;}}
+      }
+      this.applyRunToChain(run);
+    });
+  }
+
+  applyRunToChain(run) {
     this.invalidateSummary();
     const chain = this.chainStatus();
     if (!chain || chain.status !== 'running') return;
@@ -2226,12 +3182,42 @@ export class Workbench {
     // 阶段是 blocked，链必须停，不能因为「进程成功」就当这一步过了。
     const stageState = (this.snapshot().stages || []).find((stage) => stage.id === run.stageId);
     const stageStatus = stageState?.status || '';
-    if (!stageStatus || stageStatus === 'blocked' || run.status === 'cancelled') {
+    if (run.status === 'skipped') {
+      this.patchChain({
+        status: 'waiting',
+        waitingFor: run.stageId,
+        error: `${run.stageId} 的步骤全部因缺条件文件被跳过：补齐后 action=chain resume`,
+      });
+      return;
+    }
+    const currentActive = this.active();
+    if(run.stageId==='verify'&&stageState?.gates?.find(g=>g.id==='verification-final')?.status!=='pass'){
+      this.patchChain({status:'waiting',waitingFor:'verify',error:'prepare 已生成待核模板：实际逐格复读并完成 final 校验后再续跑'});
+      return;
+    }
+    const reportStages=run.stageId==='audit'?['scope','audit']:run.stageId==='coding'?['scope','audit','coding']:null;
+    const gateReasons = currentActive.ok ? reportBlockers(this.snapshot().stages || [], currentActive.path,
+      ({dataset:'data-ready',verify:'analysis-ready',stats:'analysis-ready',figures:'figures-ready',manuscript:'manuscript-ready',qa:'manuscript-ready',recheck:'delivery-ready'})[run.stageId] || 'data-ready',{reportStages}) : ['项目不可访问'];
+    if (!stageStatus || stageStatus === 'blocked' || run.status === 'cancelled' || gateReasons.length) {
       const why = run.status === 'cancelled'
         ? '被取消'
         : stageStatus === 'blocked' ? '被 error 级闸门拦住' : '阶段状态读不到';
       this.patchChain({ status: 'stopped', error: `${expected} 运行${why}（退出码 ${run.exitCode ?? '—'}）` });
       return;
+    }
+    // 全格复核的 final 只能由人/模型逐格复读后产生：prepare 跑完就停下等人，
+    // 不能顺着链把还没 final 的数据送进统计。
+    if (run.stageId === 'verify') {
+      const verification = (this.snapshot().stages || []).find((stage) => stage.id === 'verify')
+        ?.gates?.find((gateItem) => gateItem.id === 'verification-final');
+      if (!verification || verification.status !== 'pass') {
+        this.patchChain({
+          status: 'waiting',
+          waitingFor: 'verify',
+          error: 'prepare 已生成待核模板：逐格复读并跑 data_analysis_verify_dataset(action=final)，再 action=chain resume',
+        });
+        return;
+      }
     }
     this.patchChain({
       index: chain.index + 1,

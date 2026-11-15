@@ -9,6 +9,9 @@ import fs from 'node:fs';
 
 import { defineTool } from '@deepseek-ai/dsh-tools';
 
+import { sessionIdOf, wrapExecute } from './binding.js';
+import { admissionFor, isArmedSession, whenArmed } from './gating.js';
+
 const STATUS_LABEL = {
   done: '已完成',
   blocked: '被拦住',
@@ -88,11 +91,21 @@ export function registerTools(ctx, workbench, helpers = {}) {
   const { logger, assistant } = helpers;
   const disposers = [];
 
-  function register(definition) {
+  /**
+   * 触发门（档②）：除探路工具外，其余工具一律带 `when` 准入。
+   * `when` 由宿主在每个模型步求值一次；返回 false 时该步的工具表里没有这个工具，
+   * 模型连它的名字和描述都看不到——比「调用时才拒绝」彻底。
+   */
+  const armedInStep = whenArmed(workbench);
+
+  function register(definition, options = {}) {
     try {
       const original = definition.execute;
-      definition.execute = async (args) => jsonSafe(await original(args));
-      const dispose = ctx.tools.register(definition);
+      definition.execute = async (args, exec) => jsonSafe(await wrapExecute({ name: definition.name, workbench, original })(args, exec));
+      // 探路工具（只读的 status）始终在场：它是「这条对话还没启用」时唯一的入口。
+      // options.ungated 留给将来需要常驻的只读工具，默认仍按 PROBE_TOOLS 判定。
+      const admission = admissionFor(armedInStep, definition.name, options);
+      const dispose = admission ? ctx.tools.register(definition, admission) : ctx.tools.register(definition);
       if (typeof dispose === 'function') disposers.push(dispose);
       return dispose;
     } catch (error) {
@@ -111,13 +124,18 @@ export function registerTools(ctx, workbench, helpers = {}) {
   register(defineTool({
     name: 'data_analysis_status',
     description:
-      '查看实证研究工作台当前状态：skill 是否就位、当前项目 9 个阶段各自的闸门判定（✓通过 / ✗未过 / ?判不了）、'
-      + '最近运行记录、图表清单摘要。任何涉及「下一步跑什么」「为什么被拦住」的问题先调它。',
+      '查看实证研究工作台当前状态：skill 是否就位、当前项目 10 个阶段各自的闸门判定（✓通过 / ✗未过 / ?判不了）、'
+      + '最近运行记录、图表清单摘要。只读：不会建项目、不会绑定对话、不会启用工作台。'
+      + '这是未启用工作台的对话里唯一可见的工具，用来回答「现在什么状态 / 为什么被拦住」。',
     parameters: {
       verbose: { type: 'boolean', description: '是否逐条列出闸门明细（默认只列阶段汇总）' },
     },
     output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '已获取工作台状态') },
-    async execute(args) {
+    async execute(args, exec) {
+      // 这条对话有没有启用工作台：没有就读不到别的工具，得把「怎么启用」讲清楚。
+      // 判定必须和触发门用同一个函数，否则会出现「status 说已启用、工具却被挡着」。
+      const sessionId = sessionIdOf(exec);
+      const armed = isArmedSession(workbench, sessionId);
       const snap = workbench.snapshot();
       const compactSkill = { ok: snap.skill.ok, version: snap.skill.version, packageDir: snap.skill.packageDir, reason: snap.skill.reason };
       const lines = [];
@@ -129,9 +147,18 @@ export function registerTools(ctx, workbench, helpers = {}) {
       if (!snap.active) {
         lines.push(`项目：未打开${snap.error ? `（${snap.error}）` : ''}`);
         if (snap.projects.length) lines.push(`已知项目：${snap.projects.map((p) => p.path).join('、')}`);
-        return { ok: true, text: lines.join('\n'), skill: compactSkill, preflight: snap.preflight, active: null, projects: snap.projects.map((p) => p.path), summary: snap.summary, stages: [] };
+        if (!armed) {
+          lines.push('这条对话还没启用工作台：除本工具外，其余 data_analysis_* 工具都不会出现。');
+          lines.push('→ 要开工：让用户在工作台面板里打开或新建项目，并把这条对话关联上（面板里有这个操作），然后继续。');
+        }
+        return { ok: true, text: lines.join('\n'), armed, skill: compactSkill, preflight: snap.preflight, active: null, projects: snap.projects.map((p) => p.path), summary: snap.summary, stages: [] };
       }
-      lines.push(`项目：${snap.active.name}（${snap.active.path}）`);
+      lines.push(armed
+        ? `项目：${snap.active.name}（${snap.active.path}）`
+        : `项目（面板当前项目，不属于这条对话）：${snap.active.name}（${snap.active.path}）`);
+      if (!armed) {
+        lines.push('注意：这条对话还没启用工作台（未关联项目）：除本工具外的 data_analysis_* 工具都不会出现；先让用户在工作台面板里关联这条对话，别自己建项目。');
+      }
       if (snap.active.skillDrift) lines.push('注意：项目的 SKILL.md 指纹与当前 skill 不一致，旧产物可能来自旧版本。');
       const matLine = materialsLine(snap.materials);
       if (matLine) lines.push(matLine);
@@ -144,12 +171,16 @@ export function registerTools(ctx, workbench, helpers = {}) {
         lines.push(`数字溯源：error ${snap.artifacts.verify.counts.error} / warning ${snap.artifacts.verify.counts.warning} / V-05 待复核 ${snap.artifacts.verify.counts.deferred}`);
       }
       if (snap.artifacts?.figures?.rows?.length) {
-        lines.push(`图表：${snap.artifacts.figures.rows.length} 张（清单 ${snap.artifacts.figures.file}）`);
+        const figs = snap.artifacts.figures;
+        const deliverable = Array.isArray(figs.deliverable) ? figs.deliverable.length : figs.rows.length;
+        const extra = figs.rows.length - deliverable;
+        lines.push(`图表：${deliverable} 张可交付${extra ? `（另有 ${extra} 行 status≠ok）` : ''}（清单 ${figs.file}）`);
       }
       // 只回摘要与闸门，不回整份产物快照：模型不需要 60 张图的每一列
       return {
         ok: true,
         text: lines.join('\n'),
+        armed,
         skill: compactSkill,
         preflight: snap.preflight,
         active: { id: snap.active.id, name: snap.active.name, path: snap.active.path, skillDrift: Boolean(snap.active.skillDrift) },
@@ -179,9 +210,8 @@ export function registerTools(ctx, workbench, helpers = {}) {
     name: 'data_analysis_doctor',
     description:
       '检查运行环境：技能包是否就位（SKILL.md、阶段脚本是否齐全）、Python 是否可用及版本、'
-      + '依赖是否装齐（pandas/numpy/scipy/statsmodels/matplotlib/PyMuPDF/python-docx/openpyxl/Pillow）、'
-      + 'Word→PDF（pywin32）是否可用。启动时会自动查一次；用户问「插件装好了吗」「环境对不对」'
-      + '「为什么脚本跑不起来」时调它。refresh=true 强制重新探测。',
+      + '依赖是否装齐（pandas/numpy/scipy/statsmodels/matplotlib/PyMuPDF/python-docx/openpyxl/Pillow/jsonschema）、'
+      + 'Word→PDF（pywin32）是否可用。启动时也会自动查一次；refresh=true 强制重新探测。',
     parameters: {
       refresh: { type: 'boolean', description: '忽略缓存，重新探测一次（改过 Python 路径或刚装完依赖时用）' },
     },
@@ -210,7 +240,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
 
   register(defineTool({
     name: 'data_analysis_list_stages',
-    description: '列出工作台的 9 个阶段、每个阶段的用途、绑定的 skill 脚本与预期产物；用于向用户解释流程。',
+    description: '列出工作台的 10 个阶段、每个阶段的用途、绑定的 skill 脚本与预期产物；用于向用户解释流程。',
     parameters: {},
     output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '已列出阶段') },
     async execute() {
@@ -229,7 +259,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
   register(defineTool({
     name: 'data_analysis_figures',
     description:
-      '查看图表清单与每张图的合规徽章（文件 / 有效 dpi / 最小字号 / 配色 / N），三态：pass、fail、unjudged（判不了≠通过）。'
+      '查看图表清单与每张图的合规徽章（文件 / 有效 dpi / 最小字号 / 配色 / N），三态：pass、fail、unjudged（判不了≠通过）。多份清单会合并成一个检查视图。'
       + '用于回答「哪些图不达标」「为什么字号是未核」。',
     parameters: {
       onlyProblems: { type: 'boolean', description: '只看 fail 或 unjudged 的图（默认 false）' },
@@ -325,7 +355,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
       + '前置阶段有 error 闸门未过或待人工裁定时会被拦住；返回 runId 后用 data_analysis_run_log 查看输出。'
       + '注意：退出码 0 不等于阶段完成，完成与否看闸门与产物。',
     parameters: {
-      stageId: { type: 'string', required: true, description: 'scope | audit | coding | dataset | stats | figures | manuscript | qa' },
+      stageId: { type: 'string', required: true, description: 'scope | audit | coding | dataset | verify | stats | figures | manuscript | qa | recheck' },
       force: { type: 'boolean', description: '跳过前置闸门检查（只在确认要跳过时用）' },
     },
     output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '已启动运行') },
@@ -409,16 +439,22 @@ export function registerTools(ctx, workbench, helpers = {}) {
   register(defineTool({
     name: 'data_analysis_recheck',
     description:
-      '第 9 阶段复核：先跑机器复算（12 项：数据血缘、in_analysis 生效、模型 N、图与数据新旧、图注 N、'
+      '第 10 阶段复核：先跑机器复算（R1–R12：数据血缘、in_analysis 生效、模型 N、图与数据新旧、图注 N、'
       + '数字溯源、项目脚本静默丢样、终检报告、文稿图表数、产物新鲜度、覆盖表），再返回问题清单与证据包。'
+      + '汇总严格三态：有 fail 判 fail、有 unjudged 判 unjudged（判不了不等于通过），全过才 pass。'
       + 'action=status 只看复算；action=evidence 取受控证据包（给模型审计用）；'
-      + 'action=issues 列问题；action=set 改一条问题的状态；action=apply 套用补丁并按下游重跑。',
+      + 'action=issues 列问题；action=set 改一条问题的状态；action=apply 套用补丁并按下游重跑；'
+      + 'action=chain 看/续跑重跑链（人工步骤停在 waiting，补齐后 resume；skill 正式模式的 force 不能跳过质量准入）。'
+      + 'skill 模式的 coverage 每条需写实际核查 note 和 evidence 返回的当前 snapshotHash，不能只填 checked。',
     parameters: {
-      action: { type: 'string', required: true, description: 'status | evidence | issues | set | apply' },
+      action: { type: 'string', required: true, description: 'status | evidence | issues | set | apply | chain' },
       id: { type: 'string', description: '问题 id（set / apply 必填）' },
       status: { type: 'string', description: 'set 时的新状态：open | fixed | wontfix | deferred' },
       note: { type: 'string', description: 'set 时的备注（为什么撤销/延后）' },
       advance: { type: 'boolean', description: 'apply 后是否自动重跑下游阶段（默认 true）' },
+      resume: { type: 'boolean', description: 'chain：true 续跑停在 waiting 的链' },
+      cancel: { type: 'boolean', description: 'chain：true 取消当前链' },
+      force: { type: 'boolean', description: 'chain：续跑时跳过前置闸门（只在看过 blockers 后显式使用）' },
     },
     output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '复核完成') },
     execute(args) {
@@ -450,8 +486,32 @@ export function registerTools(ctx, workbench, helpers = {}) {
             : `已应用 ${result.file}（备份 ${result.backup}）${result.note ? `；${result.note}` : ''}`,
         };
       }
+      if (action === 'chain') {
+        if (isTrue(args.cancel)) {
+          const cancelled = workbench.cancelChain();
+          return cancelled.ok
+            ? { ok: true, text: '已取消当前重跑链' }
+            : { ok: false, error: cancelled.error, text: `取消失败：${cancelled.error}` };
+        }
+        const chain = workbench.chainStatus();
+        if (!chain) return { ok: false, text: '当前项目没有重跑链（套用补丁时才会创建）' };
+        if (!isTrue(args.resume)) {
+          const lines = [
+            `链 ${chain.id}：${chain.status}${chain.index !== undefined ? `（第 ${chain.index + 1}/${chain.steps.length} 步）` : ''}`,
+            `步骤：${chain.steps.join(' → ')}`,
+            chain.waitingFor ? `停在：${chain.waitingFor}（人工步骤或前置未过）` : '',
+            chain.error ? `原因：${chain.error}` : '',
+            Array.isArray(chain.blockers) && chain.blockers.length ? `blockers：${chain.blockers.join('；')}` : '',
+            chain.status === 'waiting' ? '处理完后用 action=chain resume=true 继续。' : '',
+          ].filter(Boolean);
+          return { ok: true, chain, text: lines.join('\n') };
+        }
+        const resumed = workbench.resumeChain({ force: isTrue(args.force) });
+        if (!resumed.ok) return { ok: false, error: resumed.error, chain: resumed.chain, text: `续跑失败：${resumed.error}` };
+        return { ok: true, chain: resumed.chain, text: `已续跑：${resumed.chain ? `${resumed.chain.status}（第 ${(resumed.chain.index || 0) + 1}/${resumed.chain.steps.length} 步）` : '已启动'}` };
+      }
       if (!['status', 'issues'].includes(action)) {
-        return { ok: false, text: `不认识的 action：${action}（status|evidence|issues|set|apply）` };
+        return { ok: false, text: `不认识的 action：${action}（status|evidence|issues|set|apply|chain）` };
       }
       const state = workbench.recheckState();
       if (!state.ok) return { ok: false, error: state.error, text: `复核状态不可用：${state.error}` };
@@ -540,12 +600,12 @@ export function registerTools(ctx, workbench, helpers = {}) {
     name: 'data_analysis_draft',
     description:
       '让工作台用「DSH 当前默认模型」（或面板设置里指定的模型）为一个阶段起草文本：scope=研究范围、'
-      + 'codebook=变量字典、figures=图表题注与解读、manuscript=文稿小节、qa=质检问题说明。'
+      + 'codebook=变量字典、figures=图表题注与解读、verify=逐格复核说明、manuscript=文稿小节、qa=质检问题说明。'
       + '工作台只读项目产物拼上下文，模型没有工具、不会运行脚本；返回可编辑的 Markdown。'
       + 'save=true 时同时写入该任务固定的 docs/ 落点（scope.md / codebook.md / figure-notes.md / '
-      + 'manuscript-notes.md / qa-notes.md）。',
+      + 'verify-notes.md / manuscript-notes.md / qa-notes.md）。',
     parameters: {
-      task: { type: 'string', required: true, description: '起草任务：scope | codebook | figures | manuscript | qa' },
+      task: { type: 'string', required: true, description: '起草任务：scope | codebook | figures | verify | manuscript | qa' },
       instruction: { type: 'string', description: '补充要求（口吻、篇幅、重点变量、要讨论的图号等）' },
       save: { type: 'boolean', description: '是否直接写入项目 docs/ 下的固定文件（默认 false，只返回文本）' },
     },
@@ -637,13 +697,13 @@ export function registerTools(ctx, workbench, helpers = {}) {
 
   /** manuscript.json 的一行现状：没有 / 解析不了 / 结构有问题 / 有但还没写正文 / 已经改过。 */
   function manifestStatusLine(spec) {
-    if (!spec || !spec.exists) return 'manuscript.json：还没有 —— 第 7 阶段会报「spec not found」，先 action=scaffold 生成骨架';
-    if (spec.error) return `manuscript.json：跑不了（${spec.error}）—— 先修 JSON 再跑第 7 阶段`;
+    if (!spec || !spec.exists) return 'manuscript.json：还没有 —— 第 8 阶段会报「spec not found」，先 action=scaffold 生成骨架';
+    if (spec.error) return `manuscript.json：跑不了（${spec.error}）—— 先修 JSON 再跑第 8 阶段`;
     const parts = [`${spec.blocks} 块`, `图 ${spec.figures}`, `表 ${spec.tables}`];
     if (spec.invalidBlocks) parts.push(`${spec.invalidBlocks} 块结构不对`);
     if (spec.figuresMissing) parts.push(`${spec.figuresMissing} 个图缺 png`);
     if (spec.invalidBlocks) {
-      return `manuscript.json：${parts.join(' / ')} —— 这些块会让第 7 阶段直接报错（type 不认识 / table 缺 csv 或 csv 没有数据行），先修好`;
+      return `manuscript.json：${parts.join(' / ')} —— 这些块会让第 8 阶段直接报错（type 不认识 / table 缺 csv 或 csv 没有数据行），先修好`;
     }
     if (spec.placeholders) {
       parts.push(`${spec.placeholders} 段待补`);
@@ -755,12 +815,12 @@ export function registerTools(ctx, workbench, helpers = {}) {
   register(defineTool({
     name: 'data_analysis_manuscript',
     description:
-      '第 7 阶段（文稿组装）的入场券：这一阶段吃的是项目根的 manuscript.json，工作台不会替你写它。'
+      '第 8 阶段（文稿组装）的入场券：这一阶段吃的是项目根的 manuscript.json，工作台不会替你写它。'
       + 'action=scaffold 按图表清单与模型表拼一份骨架（figure 块的 png/caption 照抄清单，题注里已有 N= 就不再重复写 n，'
       + '正文段落留「待补」占位；png 缺失或 status 不是 ok 的图会跳过；不覆盖已有文件，要重排得显式 overwrite，原文件先备份成 manuscript.json.bak-*）；'
       + 'action=brief 取一段「怎么把骨架写成正文」的说明（哪些字段不许改、数字从哪来、跑完看什么）；'
       + 'action=status 只看 manuscript.json 现状（块数 / 图 / 表 / 还有几段待补 / 结构不对的块）。'
-      + '骨架不放任何自己编的数字：写完第 8 阶段报出来的数字问题都是真的。',
+      + '骨架不放任何自己编的数字：写完第 9 阶段报出来的数字问题都是真的。',
     parameters: {
       action: { type: 'string', required: true, description: 'scaffold | brief | status' },
       overwrite: { type: 'boolean', description: 'scaffold：覆盖已有的 manuscript.json（会冲掉人工/模型改过的稿子）' },
@@ -784,7 +844,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
         const skipped = [];
         if (result.skippedNoPng) skipped.push(`${result.skippedNoPng} 张图的 png 不在（先把图补齐再重排）`);
         if (result.skippedBadStatus) {
-          skipped.push(`${result.skippedBadStatus} 张图在清单里是失败状态${result.skippedBadExample ? `（如 ${result.skippedBadExample}）` : ''}——先重跑第 5 阶段，别在骨架里放坏图`);
+          skipped.push(`${result.skippedBadStatus} 张图在清单里是失败状态${result.skippedBadExample ? `（如 ${result.skippedBadExample}）` : ''}——先重跑第 7 阶段，别在骨架里放坏图`);
         }
         const briefText = result.brief && result.brief.ok ? result.brief.text : '';
         return {
@@ -794,7 +854,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
             result.warning ? `注意：${result.warning}` : '',
             ...skipped,
             result.backup ? `原文件已备份成 ${result.backup}` : '',
-            '骨架只保证结构可跑；正文要靠人/模型按 brief 改，改完再跑第 7 阶段。',
+            '骨架只保证结构可跑；正文要靠人/模型按 brief 改，改完再跑第 8 阶段。',
             '',
             briefText,
           ].filter(Boolean).join('\n'),
@@ -937,24 +997,34 @@ export function registerTools(ctx, workbench, helpers = {}) {
   register(defineTool({
     name: 'data_analysis_sweep',
     description:
-      '模型族普查（不估参数）：读数据集注册表里的结局变量，逐个判断「哪些族估了 / 可估 / 估不了（缺什么）」，'
-      + '写 output/models/sweep.json。闸门 models-sweep 只要求每个族表态，不要求都估——但 blocked 必须写 why。'
-      + '拿到结果后按 available/blocked 决定补哪些模型，再用 data_analysis_register 登记 model。',
-    parameters: {},
+      '模型族普查（只做诊断，不估参数）：结局清单读 codebook 的 outcome/outcome_type、registry 的 outcomes、'
+      + '已登记模型的 outcome；没有声明时才按列名提示「疑似」候选。每个结局给出类型、N、事件数、零值比例、'
+      + '离散度与「该考虑哪些族」，族状态只有 estimated / available / blocked / not_needed。'
+      + '小样本只写提醒、不判 blocked；blocked 只用于结构性不可估（缺时点、缺分母、缺配对）且必须写 why。'
+      + '闸门 models-sweep 只要求每个族表态；补不补哪个族由你按研究问题决定，再用 data_analysis_register 登记 model。',
+    parameters: {
+      maxOutcomes: { type: 'integer', description: '每份数据集最多诊断多少个「疑似」结局（0=不限；只作用于没被 codebook/模型声明的列）' },
+    },
     output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '普查完成') },
-    async execute() {
-      const result = await workbench.runSweep();
+    async execute(args) {
+      const result = await workbench.runSweep({ maxOutcomes: Number(args.maxOutcomes) || 0 });
       if (!result.ok) return { ok: false, error: result.error, text: `普查失败：${result.error}\n${result.log || ''}`.trim() };
       const payload = result.result || {};
       const lines = [`普查完成：${payload.written || 'output/models/sweep.json'}`];
+      const scope = payload.scope || {};
+      if (scope.datasets) {
+        lines.push(`扫描 ${scope.datasets} 份数据集 / ${scope.columns} 列；结局来源：${(scope.outcomeSources || []).join('、') || '—'}`);
+      }
       for (const dataset of Array.isArray(payload.datasets) ? payload.datasets : []) {
-        lines.push(`数据集 ${dataset.id}（${dataset.rows} 行）`);
+        lines.push(`数据集 ${dataset.id}（${dataset.rows} 行${dataset.codebook ? `，codebook ${dataset.codebook}` : '，无 codebook'}）`);
         for (const outcome of dataset.outcomes || []) {
-          const families = (outcome.families || []).map((family) => `${family.family}=${family.status}${family.why ? `（${family.why}）` : ''}`);
-          lines.push(`  ${outcome.name} [${outcome.type}] N=${outcome.n}：${families.join(' · ')}`);
+          const families = (outcome.families || []).map((item) => `${item.family}=${item.status}${item.why ? `（${item.why}）` : ''}`);
+          lines.push(`  ${outcome.name} [${outcome.type}] N=${outcome.n}${outcome.source ? ` 来源=${outcome.source}` : ''}：${families.join(' · ')}`);
+          for (const note of outcome.diagnostics || []) lines.push(`    · ${note}`);
         }
       }
       for (const warning of payload.warnings || []) lines.push(`注意：${warning}`);
+      lines.push('下一步：按 available 决定补哪些族，估完用 data_analysis_register 登记 model（estimator 要与这里列出的族名对得上）。');
       return { ok: true, text: lines.join('\n'), result: payload };
     },
   }));
@@ -986,6 +1056,111 @@ export function registerTools(ctx, workbench, helpers = {}) {
       if (payload.cells) lines.push(`cell_checks：pass ${payload.cells.pass} / noise ${payload.cells.noise} / missing ${payload.cells.missing}`);
       for (const warning of payload.warnings || []) lines.push(`注意：${warning}`);
       return { ok: true, text: lines.join('\n'), result: payload };
+    },
+  }));
+
+  register(defineTool({
+    name: 'data_analysis_verify_dataset',
+    description:
+      '全格复核（skill 的 verify_dataset.py）：action=prepare 生成数据集快照与逐格待核模板（review_template_<hash>.jsonl），'
+      + 'action=final 校验复核回执、来源复读、哈希与版本指纹。只有 stage=final、status=verified、error_count=0 的快照'
+      + '才能让数据进入正式计算——prepare 只是「模板已生成」，不是通过。'
+      + 'final 之前必须真的逐格回读原件并填写回执；禁止抽样代替全检、禁止批量盖章。',
+    parameters: {
+      action: { type: 'string', description: 'prepare（默认）| final' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '复核已执行') },
+    async execute(args) {
+      const stage = String(args?.action || 'prepare').toLowerCase() === 'final' ? 'final' : 'prepare';
+      const result = await workbench.runDatasetVerification({ stage });
+      const payload = result.result || {};
+      const lines = [
+        `逐格复核 ${stage}：${result.ok ? '完成' : '未通过'}（script ${payload.script_version || '?'}）`,
+        payload.cell_count !== undefined ? `覆盖 ${payload.cell_count} 格` : '',
+        payload.error_count !== undefined ? `error ${payload.error_count}` : '',
+        payload.stage ? `报告状态：stage=${payload.stage} / status=${payload.status}` : '',
+      ].filter(Boolean);
+      if (!result.ok) {
+        lines.push(payload.limitations || '');
+        lines.push('看 output/data_verification/cell_issues.csv 逐条修；final 需要先把 review_template_*.jsonl 核完。');
+        if (result.log) lines.push(result.log.split('\n').slice(-6).join('\n'));
+      }
+      return { ok: result.ok, error: result.ok ? undefined : result.error || '复核未通过', text: lines.filter(Boolean).join('\n'), result: payload, code: result.code };
+    },
+  }));
+
+  register(defineTool({
+    name: 'data_analysis_research_gate',
+    description:
+      '研究总闸门（skill 的 research_gate.py）：统一检查来源覆盖、数据集终态、模型补数回查、运行回执、复核版本与样本键，'
+      + '写 output/research_gate.json。有 error 时返回非零。它检查的是「已登记的覆盖」，不等于穷尽了所有变量与模型。',
+    parameters: {},
+    output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '闸门已执行') },
+    async execute() {
+      const result = await workbench.runResearchGate();
+      const payload = result.result || {};
+      const lines = [
+        `研究总闸门：${payload.status || (result.ok ? 'verified' : 'error')} · error ${payload.error_count ?? '?'}`,
+        payload.source_count !== undefined ? `来源 ${payload.source_count} / 数据集 ${payload.dataset_count} / 模型 ${payload.model_count}` : '',
+      ].filter(Boolean);
+      for (const issue of (payload.issues || []).slice(0, 6)) {
+        lines.push(`- ${String(issue.where || '').trim()} ${issue.message || issue.detail || ''}`.trim());
+      }
+      if (!result.ok && result.log) lines.push(result.log.split('\n').slice(-6).join('\n'));
+      return { ok: result.ok, error: result.ok ? undefined : '研究总闸门未通过', text: lines.join('\n'), result: payload };
+    },
+  }));
+
+  register(defineTool({
+    name: 'data_analysis_decisions',
+    description:
+      '判断台账（skill 的 check_decisions.py）：校验 decisions.jsonl 的必填字段、重复 target 是否有 supersedes、'
+      + '证据 span 是否对得上、extract 取值是否在候选里、needs_human 是否清掉；写 output/qa/decision_issues.csv。'
+      + 'action=check 跑一次；action=status 只读当前台账（不跑脚本）。',
+    parameters: {
+      action: { type: 'string', description: 'check（默认）| status' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '已读取判断台账') },
+    async execute(args) {
+      const action = String(args?.action || 'check').toLowerCase();
+      if (action === 'status') {
+        const snap = workbench.snapshot();
+        const decisions = snap?.artifacts?.research?.decisions;
+        if (!decisions) return { ok: false, error: '服务没有提供研究层视图' };
+        if (!decisions.exists) return { ok: true, text: '还没有 decisions.jsonl：筛选、排除、取值、方法选择都要留一条带证据的判断。' };
+        const lines = [
+          `${decisions.total ?? 0} 条判断${decisions.needsHuman ? `，其中 ${decisions.needsHuman} 条 needs_human=true` : ''}`,
+          decisions.issuesExists ? `decision_issues.csv：error ${decisions.counts.error} / warning ${decisions.counts.warning}` : '还没跑过 check_decisions.py',
+        ];
+        if (decisions.issuesExists && Number(decisions.mtimeMs) > Number(decisions.issuesMtimeMs) + 1000) {
+          lines.push('注意：decisions.jsonl 比 decision_issues.csv 新——校验结果已过期，先重跑 check_decisions.py。');
+        }
+        for (const issue of (decisions.issues || []).slice(0, 6)) {
+          lines.push(`- ${issue.severity || ''} ${issue.check || ''} ${issue.target || ''} ${issue.detail || ''}`.trim());
+        }
+        return { ok: true, text: lines.join('\n'), decisions };
+      }
+      const result = await workbench.runDecisionCheck();
+      const lines = [`判断台账校验：${result.ok ? '通过' : '有 error'}`];
+      if (result.log) lines.push(result.log.split('\n').slice(-8).join('\n'));
+      return { ok: result.ok, error: result.ok ? undefined : '判断台账有 error（见 output/qa/decision_issues.csv）', text: lines.join('\n') };
+    },
+  }));
+
+  register(defineTool({
+    name: 'data_analysis_review_pack',
+    description:
+      '生成复核包（skill 的 review_pack.py）：把图、表、模型、未关闭问题、缺失项排成一页 output/review/review_pack.md，'
+      + '供人逐项核对。它只汇总已有产物，不重新计算、不改任何数据。',
+    parameters: {},
+    output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '复核包已生成') },
+    async execute() {
+      const result = await workbench.runReviewPack();
+      return {
+        ok: result.ok,
+        error: result.ok ? undefined : result.error || '复核包生成失败',
+        text: result.ok ? '复核包已生成：output/review/review_pack.md' : `复核包生成失败：${result.error || ''}\n${(result.log || '').split('\n').slice(-6).join('\n')}`.trim(),
+      };
     },
   }));
 
@@ -1135,6 +1310,23 @@ export function registerTools(ctx, workbench, helpers = {}) {
       }
       if (result.note) lines.push('', result.note);
       return { ok: true, text: lines.filter(Boolean).join('\n'), safe: result.safe, applied: result.applied, report: result.report, done: result.done };
+    },
+  }));
+
+  register(defineTool({
+    name: 'data_analysis_gates',
+    description: '运行唯一技能体检、初始化或迁移门禁策略、恢复已死亡进程留下的锁，以及读取判据证据。体检不重跑研究生产步骤；人工签收不能由此工具代签。',
+    parameters: {
+      action: {type:'string',enum:['inspect','init','migrate','recover','evidence']},
+      stageId: {type:'string',description:'可选阶段；不填则检查全部技能报告'},
+      gateId: {type:'string',description:'查看证据时的稳定判据标识'},
+      mode: {type:'string',enum:['legacy','shadow','compare','skill'],description:'仅显式初始化或迁移时使用'},
+    },
+    output: {schema:{type:'json'},render:(_args,value)=>okText(value?.ok?'体检操作已完成；质量结论见当前门禁状态':value?.error||'体检未完成')},
+    async execute(args) {
+      return args.action==='evidence'
+        ? workbench.gateEvidence(args)
+        : await workbench.gateControl(args);
     },
   }));
 

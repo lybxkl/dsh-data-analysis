@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { isInside } from './skill.js';
-import { analysisFile } from './audit.js';
+import { analysisFile, readFigures } from './audit.js';
 import { recheckSummary } from './recheck.js';
 
 /** 起草任务：每一项对应「人/模型负责」的一步，落点固定在项目 docs/ 下。 */
@@ -34,6 +34,14 @@ export const DRAFT_TASKS = [
     file: 'docs/codebook.md',
     brief: '写变量字典：每个变量一行（变量名、含义、类型、取值/编码、来源字段、缺失处理、是否进分析）。只写材料里能看到的列。',
     need: ['analysis.csv 表头与样本行', 'docs/scope.md', '编码/审计摘要'],
+  },
+  {
+    id: 'verify',
+    stage: 'verify',
+    label: '逐格复核说明',
+    file: 'docs/verify-notes.md',
+    brief: '按 dataset_verification.json 与 cell_issues.csv 写复核说明：每个数据集的主键与单位、复核了多少格、哪些格退回、退回原因（缺来源/定位不到/派生规则不成立）、以及 prepare→final 之间改了哪些原件。**不要把「prepare 生成了模板」写成「已经复核通过」**。',
+    need: ['research_registry.json', 'output/data_verification/dataset_verification.json', 'output/data_verification/cell_issues.csv', 'output/source_coverage.jsonl'],
   },
   {
     id: 'figures',
@@ -164,16 +172,36 @@ export function buildContext(projectRoot, project, task) {
   take('研究范围 docs/scope.md', 'docs/scope.md', 4000);
 
   if (task.id === 'figures' || task.id === 'manuscript') {
-    take('图表清单 chart_manifest.csv', 'output/chart_pack/chart_manifest.csv', 3500);
-    const figs = listFiles(path.join(projectRoot, 'output/chart_pack/figures'), projectRoot).slice(0, 40);
+    // 清单可能是 chart_pack，也可能是 paper_figures：以 readFigures 实际选中的那份为准，
+    // 否则多面板项目起草时看不到图。
+    const figSet = readFigures(projectRoot);
+    if (figSet.file) take('图表清单', figSet.file, 3500);
+    else missing.push('output/chart_pack/chart_manifest.csv');
+    const figDir = figSet.file ? path.posix.dirname(String(figSet.file).replace(/\\/g, '/')) : 'output/chart_pack/figures';
+    const figs = listFiles(path.join(projectRoot, ...figDir.split('/')), projectRoot)
+      .filter((f) => /\.(png|pdf|tiff?)$/i.test(f.rel))
+      .slice(0, 40);
     if (figs.length) push('图文件', figs.map((f) => `${f.rel}（${f.size} 字节）`).join('\n'));
-    else missing.push('output/chart_pack/figures');
+    else missing.push(figDir);
   }
   if (task.id === 'manuscript' || task.id === 'qa') {
+    // auto_stats 的实际产物是 fit.csv / coef_all.csv（旧会话可能是分模型文件）：
+    // 先拿合并表，再补常见分表，缺哪个就记哪个。
+    take('模型拟合 fit.csv', 'output/models/fit.csv', 3000);
+    take('模型系数 coef_all.csv', 'output/models/coef_all.csv', 5000);
     for (const name of ['fit_ols.csv', 'fit_logit.csv', 'coef_ols.csv', 'coef_logit.csv']) {
       take(`模型输出 ${name}`, `output/models/${name}`, 2500);
     }
     take('变量描述 descriptives.csv', 'output/models/descriptives.csv', 2000);
+  }
+  if (task.id === 'verify') {
+    // 复核说明必须贴着证据账写：登记表、报告、逐格问题、覆盖、模型计划、判断台账。
+    take('研究登记表 research_registry.json', 'research_registry.json', 6000);
+    take('复核报告 dataset_verification.json', 'output/data_verification/dataset_verification.json', 4000);
+    take('逐格问题 cell_issues.csv', 'output/data_verification/cell_issues.csv', 5000);
+    take('来源覆盖 source_coverage.jsonl', 'output/source_coverage.jsonl', 5000);
+    take('模型计划 model_plan.jsonl', 'output/model_plan.jsonl', 4000);
+    take('判断台账 decisions.jsonl', 'decisions.jsonl', 4000);
   }
   if (task.id === 'qa') {
     take('终检报告', 'output/qa/qa_report.json', 5000);

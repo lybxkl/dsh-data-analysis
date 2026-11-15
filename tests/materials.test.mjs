@@ -14,6 +14,8 @@ import { fileURLToPath } from 'node:url';
 import { Workbench } from '../src/service.js';
 import { Runner } from '../src/runner.js';
 import { Vision, readVisionLog } from '../src/vision.js';
+import {evaluateHostProject} from '../src/gate-host.js';
+import {syncMaterialRoots} from '../src/gate-material-roots.js';
 import { createDirLink, mirrorDir, pruneMirror, readMountMarker, removeMirror, removeTree } from '../src/platform.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -313,6 +315,7 @@ section('五、识图：计划、数页、留痕、派生稿、人工核对');
     const log = readVisionLog(bench.proj);
     check('vision_log 记了一行', log.length === 1, JSON.stringify(log[0] || {}));
     check('留了页图 sha256', /^[0-9a-f]{64}$/.test(log[0]?.input_sha256 || ''));
+    check('分别绑定原始 PDF 与识别稿', /^[0-9a-f]{64}$/.test(log[0]?.source_sha256||'')&&/^[0-9a-f]{64}$/.test(log[0]?.derived_sha256||''));
     check('默认未人工核对', log[0]?.human_verified === false);
 
     const derivedHit = fs.existsSync(path.join(bench.proj, 'data', '扫描件__识别稿', '笔录.pdf.p0001.txt'));
@@ -330,6 +333,18 @@ section('五、识图：计划、数页、留痕、派生稿、人工核对');
     bench.wb.verifyVision({ all: true });
     const gateAfter = (bench.wb.snapshot().stages.find((s) => s.id === 'qa')?.gates || []).find((g) => g.id === 'qa-vision');
     check('核对后 → qa-vision 通过', gateAfter?.status === 'pass', gateAfter?.detail || '');
+    const active=bench.wb.active();
+    syncMaterialRoots(bench.proj,active.project,bench.ledger.sources,bench.wb.cacheDir());
+    const formal=()=>evaluateHostProject({projectRoot:bench.proj,project:active.project,sources:bench.ledger.sources});
+    const formalStages=formal();
+    check('正式路径识图核验比较原件哈希与识别稿哈希',formalStages.find(s=>s.id==='qa').gates.find(g=>g.id==='qa-vision').status==='pass');
+    check('正式来源登记接受真实派生稿挂载',formalStages.find(s=>s.id==='audit').gates.find(g=>g.id==='materials-provenance-cover').status==='pass');
+    fs.appendFileSync(path.join(bench.proj,'data',log[0].derived_rel),'changed derivative\n');
+    check('识别稿变化会让正式识图核验失效',formal().find(s=>s.id==='qa').gates.find(g=>g.id==='qa-vision').status==='unjudged');
+    const refreshed=bench.wb.visionPlan();
+    check('识别稿变化后计划不继承旧的已完成页',!(refreshed.items?.[0]?.donePages||[]).includes(1));
+    fs.unlinkSync(path.join(bench.proj,'output/audit/vision_log.csv'));
+    check('存在识图派生稿时不能因日志缺失而判不适用',formal().find(s=>s.id==='qa').gates.find(g=>g.id==='qa-vision').status==='unjudged');
   }
 }
 

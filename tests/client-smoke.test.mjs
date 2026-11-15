@@ -277,6 +277,12 @@ function loadPanel() {
   // apply 只执行「注册型」effect；装样式那类需要 DOM，失败忽略
   const registered = new Map();
   exported.apply({
+    // 宿主服务：默认一个都没有（老断言靠「会话服务不可用」也能跑），
+    // 需要测会话桥的场景自己往 globalThis.__DSA_SVC__ 里塞 sessions / uiWorkspace
+    get(name) {
+      const table = globalThis.__DSA_SVC__ || {};
+      return table[name] || null;
+    },
     effect(fn) {
       try {
         fn();
@@ -494,6 +500,13 @@ scenario('环境齐全', {}, (tree, text) => {
   check(textOf(selRows[0]).includes('测试项目'), '当前项目是选中那个');
   check(railText.includes('另一个项目'), '其他项目也可见，能直接点着切');
   check(railText.includes('+ 新建') && railText.includes('打开…'), '项目区带新建/打开入口');
+  // 项目 = 目录 + 它那条研究对话：列表里必须能看见、点得进，不能只给「切项目」
+  const projChats = findAllByClass(tree, 'dsa-proj-chat');
+  check(projChats.length === 2, '每个项目行都带一条研究对话入口');
+  check(textOf(projChats[0]).includes('研究对话'), '入口写的是「研究对话」');
+  check(projChats.every((row) => !String(row.props.className).includes('bound')), '没有绑定时不谎报「已绑定」');
+  check(projChats.every((row) => Boolean(findByClass(row, 'dsa-proj-chat-go'))), '入口带箭头（看得出是跳转）');
+  check(projChats.every((row) => String(row.props.title || '').length > 0), '每行都有悬停说明');
   // 方向 C：hero 卡 + KPI 条 + 「资料/阶段」独立滚动容器（项目再多也不许把它们挤走）
   check(hasClass(tree, 'dsa-hero'), '主区顶部有 hero 卡');
   const kpis = findAllByClass(tree, 'dsa-kpi');
@@ -505,6 +518,30 @@ scenario('环境齐全', {}, (tree, text) => {
   check(findAllByClass(railBody, 'dsa-stage').length >= 6, '阶段都排在这个容器里');
   check(!findByClass(tree, 'dsa-proj-more'), '不再用「还有 N 个…」把项目藏起来');
 });
+
+/* 2b. 每个项目那条会话：绑过的写「已绑定」，没绑的不许写成一样 */
+scenario(
+  '项目会话状态',
+  {
+    snap: Object.assign({}, SNAP, {
+      projects: [
+        { id: 'p1', name: '测试项目', path: 'C:/work/p1', exists: true, sessionId: 's1' },
+        { id: 'p2', name: '另一个项目', path: 'C:/work/p2', exists: true, sessionId: '' },
+        { id: 'p3', name: '老项目', path: 'C:/work/p3', exists: false, sessionId: 's3' },
+      ],
+    }),
+  },
+  (tree) => {
+    const rows = findAllByClass(tree, 'dsa-proj-chat');
+    check(rows.length === 3, '三个项目各一条会话入口');
+    check(String(rows[0].props.className).includes('bound'), '绑过会话的项目标成 bound');
+    check(textOf(rows[0]).includes('已绑定'), '状态写「已绑定」');
+    check(String(rows[0].props.title).includes('s1'), '悬停能看到会话 id');
+    check(!String(rows[1].props.className).includes('bound') && textOf(rows[1]).includes('还没有'), '没绑的写「还没有」');
+    check(rows[2].props.disabled === true, '目录不见的项目入口不可点');
+    check(textOf(rows[2]).includes('目录不见了'), '并说明为什么点不了');
+  },
+);
 
 /* 3. 自检未跑完 / macOS 只有 warn 与 unjudged：不拦 */
 scenario('自检为空', { pre: null }, (tree, text) => {
@@ -588,6 +625,9 @@ for (const [kind, label] of [
     );
     check(picks.length === 1, '有一个「选择…」按钮');
     check(text.includes('项目目录') || text.includes('材料目录'), '路径字段的标签还在');
+    // 填了一半的路径不能被一次误点清空：表单类弹窗不跟着点空白关
+    const mask = findByClass(tree, 'dsa-mask');
+    check(Boolean(mask) && !mask.props.onMouseDown, label + '不点空白关（有输入要保护）');
   });
 }
 
@@ -596,6 +636,8 @@ scenario('弹窗：产物中心', { dialog: { kind: 'artifacts' } }, (tree, text
   check(Boolean(findByClass(tree, 'dsa-modal')), '产物中心渲染出来了');
   check(text.includes('产物中心'), '标题就是「产物中心」');
   check(text.includes('正在读') || text.includes('还没有产物'), '先给一句话，不留白屏');
+  const mask = findByClass(tree, 'dsa-mask');
+  check(Boolean(mask) && typeof mask.props.onMouseDown === 'function', '产物中心点空白处能关');
 });
 
 /* 6b-2. 宿主还没重启（快照里根本没有 registry 这个键）：不许发注定 404 的请求，也不许只报一句看不懂的错 */const STALE_SNAP = Object.assign({}, SNAP);
@@ -686,6 +728,8 @@ scenario(
     check(!text.includes('开始转码'), '没有「开始转码」按钮');
     check(!text.includes('开始识别'), '识图不再有「开始识别」按钮（跑不跑由会话决定）');
     check(!text.includes('undefined'), '没有 undefined 漏到界面上');
+    const mask = findByClass(tree, 'dsa-mask');
+    check(Boolean(mask) && typeof mask.props.onMouseDown === 'function', '材料库点空白处能关');
   },
 );
 
@@ -810,7 +854,7 @@ scenario(
   },
   (tree, text) => {
     check(text.includes('缺 2 张图'), '标题点名缺几张图');
-    check(text.includes('第 7 阶段会失败'), '说清后果');
+    check(text.includes('第 8 阶段会失败'), '说清后果');
   },
 );
 
@@ -1118,6 +1162,8 @@ await composerScenario('输入行：点一下只起跑一次', {}, async (tree, 
     btn.props.onClick();
     await flush();
     check(runsTo(stub.calls).length === 1, '成功窗口内再点不会发第二次 run（实际 ' + runsTo(stub.calls).length + ' 次）');
+    const runCall = stub.calls.find((call) => call.url.includes('/stage/run'));
+    check(Boolean(runCall) && runCall.body.sessionId === 's1', '起跑时带上这条对话的 sessionId（宿主按它认项目）');
   } finally {
     stub.restore();
   }
@@ -1224,11 +1270,12 @@ await composerScenario(
       return {
         payload: {
           ok: true,
-          totalFiles: 3,
-          totalBytes: 4096,
+          totalFiles: 6,
+          totalBytes: 18944,
           truncated: false,
           entries: [
             { rel: 'output/chart_pack/figures/a.png', name: 'a.png', ext: '.png', size: 1024, kind: 'file', image: true, viewable: true },
+            { rel: 'output/chart_pack/figures/a.tiff', name: 'a.tiff', ext: '.tiff', size: 8192, kind: 'file', image: true, viewable: true },
             { rel: 'output/chart_pack/figures/b.png', name: 'b.png', ext: '.png', size: 2048, kind: 'file', image: true, viewable: true },
             { rel: 'output/chart_pack/figures/c.tiff', name: 'c.tiff', ext: '.tiff', size: 4096, kind: 'file', image: true, viewable: true },
             { rel: 'output/models/coef_all.csv', name: 'coef_all.csv', ext: '.csv', size: 512, kind: 'file', viewable: true },
@@ -1288,9 +1335,14 @@ await composerScenario(
     view.render();
 
     const cards = findAllByClass(view.tree(), 'dsa-art-card');
-    check(cards.length === 3, '图表 tab 里三张图都在（表在「全部」里）');
+    check(cards.length === 3, '图表 tab 里三张图：成对的 a.tiff 不单独占卡，孤 TIFF 仍在');
+    check(!cards.some((card) => textOf(card).includes('a.tiff')), '同名 TIFF 不出现在网格');
+    check(cards.some((card) => textOf(card).includes('a.png')), '同名 PNG 仍在');
+    check(textOf(view.tree()).includes('图 3'), '图计数不含被收掉的 TIFF');
+    check(textOf(view.tree()).includes('5 个文件'), '右上角文件数扣掉被收掉的 TIFF（6 - 1）');
+    check(!textOf(view.tree()).includes('6 个文件'), '右上角不再报服务端的原始文件数');
     const thumbs = cards.filter((card) => Boolean(findByClass(card, 'dsa-art-thumb')));
-    check(thumbs.length === 3, '图片都带缩略图（含 TIFF）');
+    check(thumbs.length === 3, '露出的图片都带缩略图（含孤 TIFF）');
     check(!findByClass(view.tree(), 'dsa-lightbox'), '没点之前不弹大图');
 
     check(view.tap(thumbs[0]), '缩略图点得动');
@@ -1303,7 +1355,20 @@ await composerScenario(
       '大图指向被点的那一张',
     );
     check(textOf(findByClass(opened, 'dsa-lightbox-name')).includes('a.png'), '顶栏写着文件名');
-    check(textOf(findByClass(opened, 'dsa-lightbox-bar')).includes('1 / 3'), '标出「第 1 / 共 3 张」');
+    check(textOf(findByClass(opened, 'dsa-lightbox-bar')).includes('1 / 3'), '标出「第 1 / 共 3 张」（成对 TIFF 不进翻页）');
+    const openedBar = textOf(findByClass(opened, 'dsa-lightbox-bar'));
+    check(openedBar.includes('下载 PNG'), '有同名 TIFF 时按被点开的格式写成「下载 PNG」');
+    check(openedBar.includes('下载 TIFF'), '旁边有「下载 TIFF」');
+    const tiffLink = findAllByClass(opened, 'dsa-link').find((item) => textOf(item).includes('下载 TIFF'));
+    check(
+      Boolean(tiffLink) && String(tiffLink.props.href).includes(encodeURIComponent('output/chart_pack/figures/a.tiff')) && String(tiffLink.props.href).includes('download=1'),
+      '下载 TIFF 指向同名原稿且带 download=1',
+    );
+    const pngLink = findAllByClass(opened, 'dsa-link').find((item) => textOf(item).trim() === '下载 PNG');
+    check(
+      Boolean(pngLink) && String(pngLink.props.href).includes(encodeURIComponent('output/chart_pack/figures/a.png')) && String(pngLink.props.href).includes('download=1'),
+      '下载 PNG 指向被点开的那张',
+    );
     check(
       !stub.calls.some((call) => call.url.includes('/artifacts/file')),
       '点图不请求 /artifacts/file（不再为了看大图去拉详情）',
@@ -1319,6 +1384,8 @@ await composerScenario(
       '翻到第二张',
     );
     check(textOf(findByClass(second, 'dsa-lightbox-bar')).includes('2 / 3'), '页码跟着变');
+    const secondBar = textOf(findByClass(second, 'dsa-lightbox-bar'));
+    check(secondBar.includes('下载') && !secondBar.includes('下载 PNG') && !secondBar.includes('下载 TIFF'), '没有同名 TIFF 的图仍是一个「下载」');
 
     check(view.click('关闭'), '有「关闭」按钮');
     check(!findByClass(view.tree(), 'dsa-lightbox'), '关闭后回到网格');
@@ -1361,6 +1428,14 @@ await composerScenario(
     const frame = findByClass(pdfView, 'dsa-lightbox-pdf');
     check(Boolean(frame), 'PDF 在弹层里给内嵌阅读器');
     check(Boolean(frame) && String(frame.props.src).includes('/artifacts/raw?path='), 'PDF 读的是 raw，不是缩略图');
+
+    /* 点弹窗旁边的空白处直接关掉：不用非得去点「关闭」 */
+    view.click('关闭');
+    const mask = findByClass(view.tree(), 'dsa-mask');
+    check(Boolean(mask) && typeof mask.props.onMouseDown === 'function', '遮罩带 onMouseDown');
+    mask.props.onMouseDown({});
+    view.render();
+    check(!findByClass(view.tree(), 'dsa-modal'), '点空白处把产物中心关掉');
   } finally {
     stub.restore();
     globalThis.setInterval = realInterval;
@@ -1368,6 +1443,404 @@ await composerScenario(
     globalThis.__DSA__ = Object.assign({}, globalThis.__DSA__, { dialog: null });
   }
 }
+
+/* 7. 左栏项目行：点「研究对话」= 切项目 → 复用/新建会话 → 跳进原生对话 */
+await (async function projectChatEntry() {
+  process.stdout.write('\n左栏项目行：一点就进那条会话\n');
+  const created = [];
+  const retained = [];
+  const opened = [];
+  const sessions = {
+    retain(id) {
+      retained.push(id);
+      return {
+        sessionId: id,
+        ready: Promise.resolve(),
+        binding: {
+          session: {
+            getSnapshot: () => ({ running: false }),
+            subscribe: () => () => {},
+            prompt: async () => ({}),
+          },
+        },
+        release() {},
+      };
+    },
+    create(opts) {
+      created.push(opts || {});
+      return 'sess-new';
+    },
+  };
+  globalThis.__DSA_SVC__ = {
+    sessions,
+    uiWorkspace: { openSession(id) { opened.push(id); } },
+    layout: { selectPanel() {} },
+  };
+
+  const base = Object.assign({}, SNAP);
+  const twoProjects = (s1, s2) => [
+    { id: 'p1', name: '测试项目', path: 'C:/work/p1', exists: true, sessionId: s1 },
+    { id: 'p2', name: '另一个项目', path: 'C:/work/p2', exists: true, sessionId: s2 },
+  ];
+
+  // 点第二个项目（不是当前项目，且它自己有会话）：先切过去，再进它那条
+  const fixtureA = Object.assign({}, base, {
+    projects: twoProjects('', ''),
+    active: Object.assign({}, base.active, { id: 'p1', path: 'C:/work/p1', sessionId: '' }),
+  });
+  const afterOpenA = Object.assign({}, fixtureA, {
+    projects: twoProjects('', 's2'),
+    active: Object.assign({}, base.active, { id: 'p2', name: '另一个项目', path: 'C:/work/p2', sessionId: 's2' }),
+  });
+
+  async function clickRow(fixture, afterOpen, index) {
+    globalThis.__DSA__ = Object.assign({}, globalThis.__DSA__, {
+      snap: fixture,
+      pre: SNAP.preflight,
+      loading: false,
+      dialog: null,
+      width: 'wide',
+      theme: 'light',
+      selected: 'scope',
+    });
+    const stub = stubFetch((url) => {
+      if (url.includes('/project/open')) return { payload: { ok: true, state: afterOpen } };
+      if (url.includes('/project/session')) return { payload: { ok: true, state: afterOpen } };
+      if (url.includes('/state')) return { payload: afterOpen };
+      return { payload: { ok: true } };
+    });
+    const view = mountPanel({});
+    const rows = findAllByClass(view.tree(), 'dsa-proj-chat');
+    check(rows.length === 2, '两行各一条会话入口');
+    view.tap(rows[index]);
+    for (let i = 0; i < 4; i += 1) {
+      await flush();
+      view.render();
+    }
+    return { stub, view };
+  }
+
+  const a = await clickRow(fixtureA, afterOpenA, 1);
+  try {
+    const openCall = a.stub.calls.find((call) => call.url.includes('/project/open'));
+    check(Boolean(openCall) && openCall.body.dir === 'C:/work/p2', '先切到那个项目（绑定认的是当前项目）');
+    check(openCall && openCall.method === 'POST', '切项目走 POST，不是悄悄改本地状态');
+    check(retained.includes('s2'), '复用它自己的会话');
+    check(created.length === 0, '已经有会话就不再新建一条');
+    check(opened.includes('s2'), '点完直接跳到那条原生对话');
+  } finally {
+    a.stub.restore();
+  }
+
+  // 当前项目还没会话：点一下就建一条，绑定，再进去
+  created.length = 0;
+  retained.length = 0;
+  opened.length = 0;
+  const fixtureB = Object.assign({}, base, {
+    projects: twoProjects('', ''),
+    active: Object.assign({}, base.active, { id: 'p1', path: 'C:/work/p1', sessionId: '' }),
+  });
+  const b = await clickRow(fixtureB, fixtureB, 0);
+  try {
+    const sessionCall = b.stub.calls.find((call) => call.url.includes('/project/session'));
+    check(Boolean(sessionCall) && sessionCall.body.sessionId === 'sess-new', '新会话立刻绑定到项目');
+    check(Boolean(sessionCall) && sessionCall.body.projectId === 'p1', '绑定指名项目，不靠「碰巧是当前项目」');
+    check(created.length === 1 && created[0].cwd === 'C:/work/p1', '会话建在项目目录里：' + JSON.stringify(created[0] || {}));
+    check(!b.stub.calls.some((call) => call.url.includes('/project/open')), '已经是当前项目就不再切一次');
+    check(opened.includes('sess-new'), '建完直接进去');
+    check(findAllByClass(b.view.tree(), 'dsa-proj-chat').length === 2, '跳转后左栏仍完整（没有渲染崩溃）');
+  } finally {
+    b.stub.restore();
+    globalThis.__DSA_SVC__ = undefined;
+    globalThis.__DSA__ = Object.assign({}, globalThis.__DSA__, { snap: SNAP });
+  }
+})();
+
+/* 8. 本对话 ⇄ 项目：面板跟着对话走，而不是跟着上次点开的项目 */
+await (async function followCurrentChat() {
+  process.stdout.write('\n本对话 ⇄ 项目：面板跟着对话走\n');
+  const realInterval = globalThis.setInterval;
+  try {
+    globalThis.setInterval = () => 0;
+    const base = Object.assign({}, SNAP);
+    const projP1 = { id: 'p1', name: '测试项目', path: 'C:/work/p1', exists: true, sessionId: 's1' };
+    const projP2 = { id: 'p2', name: '另一个项目', path: 'C:/work/p2', exists: true, sessionId: 's2' };
+    const activeP1 = Object.assign({}, base.active, { id: 'p1', name: '测试项目', path: 'C:/work/p1', sessionId: 's1' });
+    const activeP2 = Object.assign({}, base.active, { id: 'p2', name: '另一个项目', path: 'C:/work/p2', sessionId: 's2' });
+    const focusP1 = { sessionId: 's1', projectId: 'p1', projectName: '测试项目', projectPath: 'C:/work/p1' };
+    const focusP2 = { sessionId: 's2', projectId: 'p2', projectName: '另一个项目', projectPath: 'C:/work/p2' };
+
+    async function mountWith(fixture, afterState) {
+      globalThis.__DSA__ = Object.assign({}, globalThis.__DSA__, {
+        snap: fixture,
+        pre: SNAP.preflight,
+        loading: false,
+        dialog: null,
+        width: 'wide',
+        theme: 'light',
+        selected: 'scope',
+      });
+      const stub = stubFetch((url) => {
+        if (url.includes('/project/open')) return { payload: { ok: true, state: afterState } };
+        if (url.includes('/state')) return { payload: afterState };
+        return { payload: { ok: true } };
+      });
+      // effect 在首帧就打开：假 React 里 useEffect 关闭时不占 hook 位，
+      // 中途打开会让后面的 useState 全部错位（读到的值是别的 hook 的）
+      globalThis.__DSA_EFFECTS__ = true;
+      const view = mountPanel({});
+      for (let i = 0; i < 4; i += 1) {
+        await flush();
+        view.render();
+      }
+      return { view, stub };
+    }
+
+    // A. 屏幕上那条对话属于另一个项目：进面板就切过去
+    const fixtureA = Object.assign({}, base, { projects: [projP1, projP2], active: activeP1, focus: focusP2 });
+    const afterA = Object.assign({}, fixtureA, { active: activeP2 });
+    const a = await mountWith(fixtureA, afterA);
+    try {
+      await flush();
+      await flush();
+      a.view.render();
+      const openedNow = a.stub.calls.find((call) => call.url.includes('/project/open'));
+      check(Boolean(openedNow) && openedNow.method === 'POST', '进面板时切到对话所属的项目');
+      check(Boolean(openedNow) && openedNow.body.dir === 'C:/work/p2', '切的是 C:/work/p2，不是上次点开的 p1');
+      check(a.stub.calls.filter((call) => call.url.includes('/project/open')).length === 1, '一条对话只跟一次，不反复切');
+      check(textOf(a.view.tree()).includes('本对话'), '切过去后顶栏承认「本对话」属于当前项目');
+    } finally {
+      a.stub.restore();
+    }
+
+    // B. 对话就属于当前项目：不切、不再发一次请求，左栏那行标「当前对话」
+    globalThis.__DSA_EFFECTS__ = false;
+    const fixtureB = Object.assign({}, base, { projects: [projP1, projP2], active: activeP1, focus: focusP1 });
+    const b = await mountWith(fixtureB, fixtureB);
+    try {
+      await flush();
+      b.view.render();
+      check(!b.stub.calls.some((call) => call.url.includes('/project/open')), '同一个项目就不再切一次');
+      const pills = findAllByClass(b.view.tree(), 'dsa-proj-chat');
+      check(pills.length === 2, '两行入口都在');
+      check(textOf(pills[0]).includes('当前对话'), 'p1 那行标成「当前对话」');
+      check(!textOf(pills[1]).includes('当前对话'), 'p2 那行不冒充当前对话');
+      check(textOf(b.view.tree()).includes('本对话'), '顶栏也认这条对话');
+    } finally {
+      b.stub.restore();
+    }
+
+    // C. 还没跟/跟不过去：顶栏给「⇄ 对话在「X」」入口，而不是假装就是当前项目
+    globalThis.__DSA_EFFECTS__ = false;
+    const fixtureC = Object.assign({}, base, { projects: [projP1, projP2], active: activeP1, focus: focusP2 });
+    globalThis.__DSA__ = Object.assign({}, globalThis.__DSA__, {
+      snap: fixtureC,
+      pre: SNAP.preflight,
+      loading: false,
+      dialog: null,
+      width: 'wide',
+      theme: 'light',
+      selected: 'scope',
+    });
+    const viewC = mountPanel({});
+    const chipC = findAllByClass(viewC.tree(), 'dsa-settings-btn').find((item) =>
+      String(item.props.title || '').includes('这条对话关联的是')
+    );
+    check(Boolean(chipC), '顶栏给「对话在另一个项目」的入口');
+    check(Boolean(chipC) && String(chipC.props.className).includes('dsa-chat-link'), '这个入口标了 dsa-chat-link（窄屏隐藏，顶栏装不下）');
+    check(Boolean(chipC) && textOf(chipC).includes('另一个项目'), '按钮上写着是哪个项目：' + (chipC ? textOf(chipC).trim() : ''));
+
+    // D. 宿主说「这个项目没有对话」时，本地副本不能把旧会话复活回来
+    //    （否则改绑之后，旧项目的入口还指着一条已经属于别人的会话 = 随意切换）
+    const withSession = { id: 'p1', name: '测试项目', path: 'C:/work/p1', exists: true, sessionId: 'sess-old' };
+    const withoutSession = Object.assign({}, withSession, { sessionId: '' });
+    async function mountAndStub(fixture) {
+      globalThis.__DSA_EFFECTS__ = false;
+      globalThis.__DSA__ = Object.assign({}, globalThis.__DSA__, {
+        snap: fixture,
+        pre: SNAP.preflight,
+        loading: false,
+        dialog: null,
+        width: 'wide',
+        theme: 'light',
+        selected: 'scope',
+      });
+      const stub = stubFetch((url) => {
+        if (url.includes('/state')) return { payload: fixture };
+        return { payload: { ok: true } };
+      });
+      globalThis.__DSA_EFFECTS__ = true;
+      const view = mountPanel({});
+      for (let i = 0; i < 3; i += 1) {
+        await flush();
+        view.render();
+      }
+      return { view, stub };
+    }
+
+    const d1 = await mountAndStub(Object.assign({}, base, { projects: [withSession], active: Object.assign({}, activeP1, { sessionId: 'sess-old' }), focus: null }));
+    try {
+      check(textOf(findAllByClass(d1.view.tree(), 'dsa-proj-chat')[0]).includes('已绑定'), 'D1：有会话时入口显示「已绑定」——实际：' + textOf(findAllByClass(d1.view.tree(), 'dsa-proj-chat')[0]).trim() + ' / class=' + String(findAllByClass(d1.view.tree(), 'dsa-proj-chat')[0].props.className));
+    } finally {
+      d1.stub.restore();
+    }
+    const d2 = await mountAndStub(Object.assign({}, base, { projects: [withoutSession], active: Object.assign({}, activeP1, { sessionId: '' }), focus: null }));
+    try {
+      const pill = findAllByClass(d2.view.tree(), 'dsa-proj-chat')[0];
+      check(textOf(pill).includes('还没有'), 'D2：宿主解绑后入口回到「还没有」：' + textOf(pill).trim());
+      check(!textOf(pill).includes('已绑定'), 'D2：本地副本没有把旧会话复活');
+    } finally {
+      d2.stub.restore();
+    }
+  } finally {
+    globalThis.setInterval = realInterval;
+    globalThis.__DSA_EFFECTS__ = false;
+    globalThis.__DSA__ = Object.assign({}, globalThis.__DSA__, { snap: SNAP });
+  }
+})();
+
+/* 13. 重进面板：首屏骨架 + 上次快照先用 */
+await (async function cachedRemount() {
+  process.stdout.write('\n重进面板：骨架与上次快照\n');
+  // 浏览器里刷新一次页面，模块级缓存就没了；测试进程里模块状态是活的，
+  // 前面那些场景已经把缓存填过。要测「第一次进来」这条冷路径，只能重新求值一遍 bundle。
+  PANEL = loadPanel().panel;
+  const realInterval = globalThis.setInterval;
+  const realFetch = globalThis.fetch;
+  globalThis.setInterval = () => 0;
+  try {
+    // A. 第一次进来：还没有任何快照 → 骨架，不画「无项目」，技能包徽章不误报
+    let release = null;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    globalThis.fetch = async (url) => {
+      await gate;
+      // 真实 /state 的形状是 { ok, state }：stub 必须照这个形状回，否则面板会走「拉失败」分支
+      return { ok: true, status: 200, json: async () => (String(url).includes('/state') ? { ok: true, state: SNAP } : { ok: true }) };
+    };
+    globalThis.__DSA_EFFECTS__ = true;
+    globalThis.__DSA__ = { snap: null, pre: null, loading: true, dialog: null, width: 'wide', theme: 'light', selected: 'scope' };
+    const first = mountPanel({});
+    await flush();
+    const skeletonTree = first.tree();
+    check(hasClass(skeletonTree, 'dsa-skeleton'), '首屏没有数据时渲染骨架');
+    check(!textOf(skeletonTree).includes('从一个资料目录开始'), '首屏不再先画「无项目」空态卡');
+    check(!textOf(skeletonTree).includes('技能包未就位'), '读取中不误报「技能包未就位」');
+    release();
+    await flush();
+    await flush();
+    first.render();
+    check(!hasClass(first.tree(), 'dsa-skeleton'), '数据回来骨架就消失');
+    check(textOf(first.tree()).includes('范围与口径'), '数据回来后面板正常渲染');
+
+    // B. 新鲜快照该跟的对话要照跟（证明上面的守卫只拦「旧的一帧」，不是把功能关掉）。
+    //    这一帧直接把快照种进初始 state：假 React 的 effect 只在挂载时跑一次，
+    //    所以「先空后填」那种时序在这里测不出来，只能分别测两个状态。
+    const withFocus = Object.assign({}, SNAP, {
+      focus: { sessionId: 'sess-follow-test', projectId: 'p2', projectPath: 'C:/work/p2' },
+    });
+    const callsFresh = [];
+    globalThis.fetch = async (url, init) => {
+      callsFresh.push({ url: String(url), method: (init && init.method) || 'GET' });
+      const payload = String(url).includes('/state') ? { ok: true, state: withFocus } : { ok: true };
+      return { ok: true, status: 200, json: async () => payload };
+    };
+    globalThis.__DSA__ = { snap: withFocus, pre: null, loading: false, dialog: null, width: 'wide', theme: 'light', selected: 'scope' };
+    mountPanel({});
+    await flush();
+    check(callsFresh.some((call) => call.url.includes('/project/open')), '新鲜快照该跟的对话照跟（切到 p2）');
+
+    // C. 先把缓存换成带 focus 的那份，再模拟「宿主还在算」
+    let release2 = null;
+    const gate2 = new Promise((resolve) => {
+      release2 = resolve;
+    });
+    globalThis.fetch = async (url) => {
+      await gate2;
+      const payload = String(url).includes('/state') ? { ok: true, state: withFocus } : { ok: true };
+      return { ok: true, status: 200, json: async () => payload };
+    };
+    globalThis.__DSA__ = { snap: null, pre: null, loading: true, dialog: null, width: 'wide', theme: 'light', selected: 'scope' };
+    const warm = mountPanel({});
+    release2();
+    await flush();
+    await flush();
+    warm.render();
+
+    // D. 再进：请求挂起不返回，只能靠缓存；旧快照里「当前对话在 p2」，这一帧不许去切
+    let release3 = null;
+    const gate3 = new Promise((resolve) => {
+      release3 = resolve;
+    });
+    const calls3 = [];
+    globalThis.fetch = async (url, init) => {
+      calls3.push({ url: String(url), method: (init && init.method) || 'GET' });
+      await gate3;
+      const payload = String(url).includes('/state') ? { ok: true, state: withFocus } : { ok: true };
+      return { ok: true, status: 200, json: async () => payload };
+    };
+    globalThis.__DSA__ = { snap: null, pre: null, loading: true, dialog: null, width: 'wide', theme: 'light', selected: 'scope' };
+    const second = mountPanel({});
+    await flush();
+    const cachedTree = second.tree();
+    check(!hasClass(cachedTree, 'dsa-skeleton'), '重进面板不再等骨架');
+    check(textOf(cachedTree).includes('范围与口径'), '重进面板第一帧就显示上次的快照');
+    check(!calls3.some((call) => call.url.includes('/project/open')), '旧快照不会被拿去切项目');
+    release3();
+    await flush();
+    await flush();
+    second.render();
+    check(!hasClass(second.tree(), 'dsa-skeleton'), '新数据到了也还在正常工作台');
+
+    // E. 换项目之后缓存要跟着换：/project/open 回来的新 state 若没被记住，
+    //    下次重进面板第一帧闪的还是上一个项目（数据是对的，但闪一下就是白改）。
+    const P2_STATE = Object.assign({}, SNAP, {
+      // skillDrift 只在顶栏按「当前项目」渲染：用它当标记，能证明第一帧到底画的是哪个项目
+      active: Object.assign({}, SNAP.active, { id: 'p2', name: '另一个项目', path: 'C:/work/p2', skillDrift: true }),
+      focus: { sessionId: 'sess-switch', projectId: 'p1', projectPath: 'C:/work/p1' },
+    });
+    const focusP2 = Object.assign({}, SNAP, {
+      focus: { sessionId: 'sess-switch', projectId: 'p2', projectPath: 'C:/work/p2' },
+    });
+    globalThis.fetch = async (url) => {
+      const isState = String(url).includes('/state');
+      return { ok: true, status: 200, json: async () => (isState ? { ok: true, state: focusP2 } : { ok: true, state: P2_STATE }) };
+    };
+    globalThis.__DSA__ = { snap: focusP2, pre: null, loading: false, dialog: null, width: 'wide', theme: 'light', selected: 'scope' };
+    const switched = mountPanel({});
+    await flush();
+    await flush();
+    switched.render();
+
+    let holdSwitch = null;
+    const switchGate = new Promise((resolve) => {
+      holdSwitch = resolve;
+    });
+    globalThis.fetch = async () => {
+      await switchGate;
+      return { ok: true, status: 200, json: async () => ({ ok: true, state: P2_STATE }) };
+    };
+    globalThis.__DSA__ = { snap: null, pre: null, loading: true, dialog: null, width: 'wide', theme: 'light', selected: 'scope' };
+    const afterSwitch = mountPanel({});
+    await flush();
+    const switchedTree = afterSwitch.tree();
+    check(textOf(switchedTree).includes('SKILL.md 指纹不一致'), '换项目之后重进面板第一帧就是新项目');
+    check(!hasClass(switchedTree, 'dsa-skeleton'), '换项目之后重进面板也不用等骨架');
+    holdSwitch();
+    await flush();
+    await flush();
+    afterSwitch.render();
+    check(!hasClass(afterSwitch.tree(), 'dsa-skeleton'), '换项目之后新数据到了照常渲染');
+  } catch (error) {
+    check(false, '重进面板场景抛错', String((error && error.message) || error));
+  } finally {
+    globalThis.setInterval = realInterval;
+    globalThis.fetch = realFetch;
+    globalThis.__DSA_EFFECTS__ = false;
+    globalThis.__DSA__ = Object.assign({}, globalThis.__DSA__, { snap: SNAP, loading: false });
+  }
+})();
 
 process.stdout.write('\n');
 if (failedCount) {  process.stdout.write('✗ ' + failedCount + ' 项失败\n');

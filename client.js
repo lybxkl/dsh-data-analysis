@@ -1,22 +1,4 @@
-/**
- * 实证研究工作台 · Client 半片（单文件、零构建）
- *
- * 视觉目标（ui-spec.md）：
- *  - 纸白底、藏青强调、无渐变无阴影；数字等宽；顶栏 44px、左阶段栏 296px、右运行台 352px。
- *  - 三态贯穿：✓ 通过 / ✗ 未过 / ? 判不了。「判不了」用灰点 + 「未核」，绝不画成绿色。
- *
- * 数据契约（与 Host 半片 src/routes.js 严格一致）：
- *  GET  /data-analysis/api/state
- *  POST /data-analysis/api/project/create | open | close
- *  POST /data-analysis/api/stage/run | stage/cancel
- *  GET  /data-analysis/api/run/log?id=
- *  POST /data-analysis/api/adjudicate | config
- */
-(function () {
-  var MODULE_ID = '@local/dsh-data-analysis';
-  var API = '/data-analysis/api';
-
-  window.__ModuleLoader__.load({
+/** * 实证研究工作台 · Client 半片（单文件、零构建） * * 视觉目标（ui-spec.md）： *  - 纸白底、藏青强调、无渐变无阴影；数字等宽；顶栏 44px、左阶段栏 296px、右运行台 352px。 *  - 三态贯穿：✓ 通过 / ✗ 未过 / ? 判不了。「判不了」用灰点 + 「未核」，绝不画成绿色。 * * 数据契约（与 Host 半片 src/routes.js 严格一致）： *  GET  /data-analysis/api/state *  POST /data-analysis/api/project/create | open | close *  POST /data-analysis/api/stage/run | stage/cancel *  GET  /data-analysis/api/run/log?id= *  POST /data-analysis/api/adjudicate | config */(function () {  var MODULE_ID = '@local/dsh-data-analysis';  var API = '/data-analysis/api';  window.__ModuleLoader__.load({
     id: MODULE_ID,
     factory: function factory(require) {
       var React = require('react');
@@ -26,11 +8,9 @@
       var useMemo = React.useMemo;
       var useRef = React.useRef;
       var useCallback = React.useCallback;
-
       /* ------------------------------------------------------------------ *
        * 文案
        * ------------------------------------------------------------------ */
-
       var ZH = {
         title: '实证研究工作台',
         subtitle: '按阶段跑技能、看证据、在交付前拦住不合格项',
@@ -90,6 +70,7 @@
         review: '待裁定',
         done: '已完成',
         todo: '未开始',
+        na: '不适用',
         runningState: '运行中',
         stageRunOk: '最近一次运行成功',
         stageRunFail: '最近一次运行失败',
@@ -176,6 +157,19 @@
         tailOpen: '打开',
         chatCardTitle: '研究对话',
         chatSessionShort: '会话',
+        // 左栏每个项目下面那一小条：项目 = 目录 + 它的研究对话，两件事都要一眼看见
+        projChat: '研究对话',
+        projChatNew: '还没有',
+        projChatBound: '已绑定',
+        projChatCurrent: '当前对话',
+        projChatRunning: '运行中',
+        projChatDirGone: '目录不见了',
+        projChatBoundHint: '进入这个项目的研究对话（DSH 会话：{id}）',
+        projChatCurrentHint: '右上角那条对话就属于这个项目（DSH 会话：{id}）：点一下回到它',
+        projChatNewHint: '这个项目还没有研究对话：点一下在项目目录里建一条并进入',
+        projChatGoneHint: '项目目录不见了，先恢复目录或从列表移除',
+        headerChat: '对话',
+        headerChatHint: '打开当前项目的研究对话：已绑定就直接进去，没有就建一条',
         sessionGone: '会话已不存在，请重新开始研究对话',
         retryChat: '重新建会话',
         nextTitle: '全局下一步',
@@ -183,7 +177,7 @@
         nextGo: '去这里',
         nextAdjudicate: '去裁定',
         nextInspect: '去查看',
-        nextAllDoneText: '九个阶段都已完成',
+        nextAllDoneText: '十个阶段都已完成',
         nextRunning: '正在运行',
         nextBlocked: '被拦住',
         nextReview: '待人工确认',
@@ -215,6 +209,7 @@
         aiReview: '让 AI 复核',
         aiReviewHint: '把 12 项复算、已有问题与项目脚本交给模型，让它写 issues.jsonl 与覆盖表；工作台不替模型改产物',
         chainRunning: '重跑中',
+        chainWaiting: '等人工步骤',
         chainDone: '已跑完',
         chainStopped: '已停下',
         chainCancelled: '已取消',
@@ -237,21 +232,17 @@
         runExit: '退出码',
         runNoLog: '这次运行没有日志',
         pipelineLegend: '完成 = 闸门全过；待裁定 = 有人工项或警告；被拦住 = 有 error 级未过',
-        stageOf: '阶段'
-      };
-
+        stageOf: '阶段'      };
       function t(key) {
         return ZH[key] || key;
       }
-
       var STATUS_TEXT = {
         done: 'done',
         blocked: 'blocked',
         review: 'review',
         todo: 'todo',
-        running: 'runningState'
-      };
-
+        na: 'na',
+        running: 'runningState'      };
       // 复核区原来直接显示英文枚举，人看不懂；这里统一成中文
       var ISSUE_STATUS = { open: 'issueOpen', fixed: 'issueFixed', wontfix: 'issueWontfix', deferred: 'issueDeferred' };
       var SEVERITY_TEXT = { error: 'severityError', warning: 'severityWarning', info: 'severityInfo' };
@@ -260,13 +251,11 @@
         'edit-code': 'fixEditCode',
         rerun: 'fixRerun',
         'accept-risk': 'fixAcceptRisk',
-        'ask-user': 'fixAskUser'
-      };
-      var CHAIN_STATUS = { running: 'chainRunning', done: 'chainDone', stopped: 'chainStopped', cancelled: 'chainCancelled' };
+        'ask-user': 'fixAskUser'      };
+      var CHAIN_STATUS = { running: 'chainRunning', waiting: 'chainWaiting', done: 'chainDone', stopped: 'chainStopped', cancelled: 'chainCancelled' };
       var RUN_WORD = { ok: '成功', failed: '失败', cancelled: '已取消', running: '运行中', interrupted: '被中断' };
       // 面板阶段 → AI 起草任务的对应关系：没有脚本的阶段，主按钮应该直接把起草任务打开
-      var STAGE_TASK = { scope: 'scope', coding: 'codebook', figures: 'figures', manuscript: 'manuscript', qa: 'qa', recheck: 'recheck' };
-
+      var STAGE_TASK = { scope: 'scope', coding: 'codebook', verify: 'verify', figures: 'figures', manuscript: 'manuscript', qa: 'qa', recheck: 'recheck' };
       function fmtTime(iso) {
         if (!iso) return '';
         var date = new Date(iso);
@@ -274,7 +263,6 @@
         var pad = function (n) { return String(n).padStart(2, '0'); };
         return pad(date.getMonth() + 1) + '-' + pad(date.getDate()) + ' ' + pad(date.getHours()) + ':' + pad(date.getMinutes());
       }
-
       function fmtSpan(from, to) {
         if (!from) return '';
         var start = new Date(from).getTime();
@@ -286,7 +274,6 @@
         var rest = sec % 60;
         return min + ' 分' + (rest ? ' ' + rest + ' 秒' : '');
       }
-
       function sizeText(bytes) {
         var n = Number(bytes || 0);
         if (!n) return '—';
@@ -294,11 +281,14 @@
         if (n < 1024 * 1024) return Math.round(n / 1024) + ' KB';
         return (n / 1024 / 1024).toFixed(1) + ' MB';
       }
-
+      /** 项目登记的 DSH 会话：宿主台账优先，其次本地副本（宿主还是旧进程时靠它）。 */
+      function projectChatId(project) {
+        if (!project) return '';
+        return project.sessionId || SESSION_HINTS.get(project.id) || '';
+      }
       /* ------------------------------------------------------------------ *
        * HTTP
        * ------------------------------------------------------------------ */
-
       function request(method, path, body) {
         var init = { method: method, headers: { accept: 'application/json' } };
         if (body !== undefined) {
@@ -314,26 +304,102 @@
           });
         });
       }
-
       function getState() {
         return request('GET', '/state');
       }
-
-      function getSummary() {
-        return request('GET', '/summary');
+      // sessionId 可选：对话里的徽章带着它问，宿主按「这条对话自己的项目」回答
+      function getSummary(sessionId) {
+        return request('GET', '/summary' + (sessionId ? '?sessionId=' + encodeURIComponent(sessionId) : ''));
       }
-
       /* ------------------------------------------------------------------ *
        * 研究对话：与 DSH 原生会话的桥
        *
        * 不实现聊天：会话、消息流、输入框、附件、工具卡都由宿主承担。
        * 工作台只做三件事——建/绑会话、投递任务卡、在原生对话里加工作台动作。
        * ------------------------------------------------------------------ */
-
       var runtime = { ctx: null, ref: null };
       // 投卡去重记录：按项目路径存最近一次指纹。放模块作用域，面板卸载/切到对话后仍在。
       var CARD_LOG = {};
-
+      /**
+       * 上一次拿到的快照。
+       *
+       * 面板每挂载一次都要重新 GET /state（宿主那边是全项目的只读扫描，面板侧省不掉），
+       * 但不该让用户先看一帧「从一个资料目录开始」再等数据回来——那是「重进一次空工作台」的错觉。
+       * 放模块作用域：面板卸载后这份还在，重进时第一帧就能拿它渲染，新快照到了照常覆盖。
+       * 只当渲染占位用，不参与任何判定：闸门三态永远以新快照为准。
+       */
+      var SNAPSHOT_CACHE = null;
+      /**
+       * 项目 → DSH 会话 id 的本地副本。
+       *
+       * 权威记录在宿主台账（/state 的 projects[].sessionId）。但宿主是旧进程时那个字段不在，
+       * 而「这个项目有没有对话、点一下能不能进去」是左栏每行都要显示的东西，不能等重启。
+       * 所以每次绑定/进对话都往这里记一份，界面先据此显示，快照里有值就以快照为准。
+       */
+      var SESSION_HINTS = (function () {
+        var KEY = 'dsh.data-analysis.sessionHints';
+        var map = {};
+        try {
+          var raw = window.localStorage.getItem(KEY);
+          var parsed = raw ? JSON.parse(raw) : null;
+          if (parsed && typeof parsed === 'object') map = parsed;
+        } catch (e) {
+          /* 隐私模式 / 无 storage：只丢跨刷新的记忆，不影响这次能用 */
+        }
+        return {
+          get: function (id) {
+            return (id && map[id]) || '';
+          },
+          set: function (id, sessionId) {
+            if (!id) return;
+            if (sessionId) {
+              if (map[id] === sessionId) return;
+              map[id] = sessionId;
+            } else {
+              if (!Object.prototype.hasOwnProperty.call(map, id)) return;
+              delete map[id];
+            }
+            try {
+              window.localStorage.setItem(KEY, JSON.stringify(map));
+            } catch (e) {
+              /* 存不下就只留内存版本 */
+            }
+          }
+        };
+      })();
+      /**
+       * 「现在屏幕上是哪条原生对话」。
+       *
+       * 面板切到工作台之后，会话头部那个按钮就卸载了，面板也就看不到 conversation 了；
+       * 所以这个值只记「刚才那条」，卸载时不清空。宿主那边也有同一份事实（/chat/focus），
+       * 面板跟着宿主走，这里只是给同屏渲染用。
+       */
+      var CURRENT_CHAT = { id: '', at: 0 };
+      // 每条会话只上报一次：面板要的是「现在跟哪条」，不是每次渲染都敲一下宿主
+      var FOCUS_SENT = {};
+      /**
+       * 用户在工作台里手动点开过项目：这条对话就不要再被「跟着对话」拽回来。
+       * 按会话记（chatId），换了对话自然失效——「不能随意切换」指的是绑定，不是禁止浏览。
+       */
+      var FOLLOW_SKIP = { chatId: '', path: '' };
+      // 上一次在屏幕上的是哪条对话：判断「换了一条对话」用（面板反复挂载，这个记忆不能放 ref）
+      var LAST_FOCUS_CHAT = '';
+      function noteCurrentChat(sessionId) {
+        var id = String(sessionId || '');
+        if (!id) return;
+        if (CURRENT_CHAT.id !== id) CURRENT_CHAT.at = Date.now();
+        CURRENT_CHAT.id = id;
+      }
+      function reportFocus(sessionId) {
+        var id = String(sessionId || '');
+        noteCurrentChat(id);
+        if (!id || FOCUS_SENT[id]) return;
+        FOCUS_SENT[id] = true;
+        request('POST', '/chat/focus', { sessionId: id }).catch(function () {
+          // 上报失败只是面板跟不过去，不打扰用户；下次挂载再试
+          FOCUS_SENT[id] = false;
+        });
+      }
       function svc(name) {
         var ctx = runtime.ctx;
         if (!ctx) return null;
@@ -345,6 +411,15 @@
         } catch (e) {
           /* fall through */
         }
+        // 旧版 context 没有 get，服务挂在 reflect 上；比直接读属性稳（属性名可能被 getter 拦）
+        try {
+          if (ctx.reflect && typeof ctx.reflect.get === 'function') {
+            var viaReflect = ctx.reflect.get(name);
+            if (viaReflect) return viaReflect;
+          }
+        } catch (e) {
+          /* fall through */
+        }
         // 少数宿主形态里 client context 不暴露 get，直接按名字取一次
         try {
           return ctx[name] || null;
@@ -352,11 +427,9 @@
           return null;
         }
       }
-
       function sessionService() {
         return svc('sessions');
       }
-
       function releaseRef() {
         var ref = runtime.ref;
         runtime.ref = null;
@@ -368,7 +441,6 @@
           }
         }
       }
-
       function ensureRef(sessionId) {
         if (!sessionId) return Promise.reject(new Error(t('chatNoProject')));
         var sessions = sessionService();
@@ -391,7 +463,6 @@
           throw error;
         });
       }
-
       function createSession(cwd) {
         var sessions = sessionService();
         if (!sessions || typeof sessions.create !== 'function') {
@@ -402,36 +473,65 @@
         // 宿主返回的可能是 id，也可能是 Promise<id>：统一成 Promise，调用方一律 .then
         return Promise.resolve(sessions.create(where ? { cwd: where } : {}));
       }
-
-      function persistSession(sessionId) {
-        return request('POST', '/project/session', { sessionId: sessionId || '' }).then(function (json) {
-          if (json && json.ok) return json;
-          throw new Error((json && json.error) || '绑定会话失败');
+      /**
+       * 把会话绑到一个项目上（不传 projectId = 当前项目；sessionId 为空 = 解绑）。
+       *
+       * 宿主那边的规则是「一条会话只属于一个项目」：这条会话已经绑在别处时返回 409 +
+       * 原来的项目，调用方要么问用户，要么显式 force。这里把 code/bound 一起抛出去，
+       * 免得面板把「绑不上」说成一句没头没尾的失败。
+       */
+      function persistSession(sessionId, projectId, force) {
+        var body = { sessionId: sessionId || '' };
+        if (projectId) body.projectId = projectId;
+        if (force === true) body.force = true;
+        return request('POST', '/project/session', body).then(function (json) {
+          if (json && json.ok) {
+            // 绑定成功顺手记一份本地副本：宿主还是旧进程（快照里没有 projects[].sessionId）时，
+            // 左栏也能立刻显示「已绑定 / 点一下进这条会话」。
+            var pid = (json.state && json.state.active ? json.state.active.id : '') || json.projectId || '';
+            if (pid) SESSION_HINTS.set(pid, sessionId || '');
+            return json;
+          }
+          var error = new Error((json && json.error) || '绑定会话失败');
+          if (json && json.code) error.code = json.code;
+          if (json && json.bound) error.bound = json.bound;
+          throw error;
         });
       }
-
+      /**
+       * 跳到某条会话的原生对话。
+       * 宿主版本不同入口不同：sessions.open(id)（旧）→ uiWorkspace.openSession(id)（0.1.6+，
+       * SessionTarget = SessionId）→ layout.selectPanel('conversation') 兜底（只切面板，选不中会话）。
+       * 返回是否真的点名了会话——调用方据此决定要不要提示「跳了但没选中」。
+       */
       function openConversation(sessionId) {
+        var sessions = svc('sessions');
+        if (sessions && typeof sessions.open === 'function') {
+          try {
+            sessions.open(sessionId);
+            return true;
+          } catch (e) {
+            /* 换下一条路 */
+          }
+        }
         var uiWorkspace = svc('uiWorkspace');
         if (uiWorkspace && typeof uiWorkspace.openSession === 'function') {
           try {
             uiWorkspace.openSession(sessionId);
-            return;
+            return true;
           } catch (e) {
-            /* fall through */
+            /* 换下一条路 */
           }
         }
         var layout = svc('layout');
         if (layout && typeof layout.selectPanel === 'function') layout.selectPanel('conversation');
+        return false;
       }
-
       function openWorkbenchPanel() {
         var layout = svc('layout');
         if (layout && typeof layout.selectPanel === 'function') layout.selectPanel('data-analysis');
       }
-
-      /* 系统原生的「选文件夹」：桌面端有 preload 桥就直接用，Web 端走宿主的
-         directoryPicker/pick（在 DSH 所在那台机器上弹框）。两路都拿不到就报错，
-         由调用处写在字段下面——不静默失败，也不造一个假的路径。 */
+      /* 系统原生的「选文件夹」：桌面端有 preload 桥就直接用，Web 端走宿主的         directoryPicker/pick（在 DSH 所在那台机器上弹框）。两路都拿不到就报错，         由调用处写在字段下面——不静默失败，也不造一个假的路径。 */
       function pickDirectoryPath() {
         var bridge = typeof globalThis !== 'undefined' ? globalThis.__DSH_DIRECTORY_PICKER__ : null;
         if (bridge && typeof bridge.pick === 'function') return Promise.resolve(bridge.pick());
@@ -441,12 +541,10 @@
         }
         return Promise.reject(new Error(t('pickUnsupported')));
       }
-
       /* ------------------------------------------------------------------ *
        * 让 AI 装环境：开一个临时会话，把「装什么、怎么验」一次说清
        * 会话由宿主建（sessions.create + retain + prompt），工作台不自己实现聊天。
        * ------------------------------------------------------------------ */
-
       var ENV_PROMPT = [
         '帮我把「实证研究工作台」（DSH 插件 dsh-data-analysis）的运行环境一次性装好，装完自己验一遍再回话。',
         '',
@@ -458,7 +556,7 @@
         '   （Windows 是 %USERPROFILE%\\.agents\\skills\\）。装完确认 ~/.agents/skills/empirical-research-pipeline/SKILL.md 存在。',
         '',
         '2) Python 3.9+ 与依赖',
-        '   依赖：pandas numpy scipy statsmodels matplotlib PyMuPDF python-docx openpyxl Pillow',
+        '   依赖：pandas numpy scipy statsmodels matplotlib PyMuPDF python-docx openpyxl Pillow jsonschema',
         '   没有 Python（或低于 3.9）就先装最新的 Python 3：Windows 用 winget install Python.Python.3.13 或官网安装包，',
         '   macOS 用 brew install python，Linux 用发行版的包管理器。',
         '   然后 pip install -r <技能仓库>/requirements.txt；缺哪个包单独补装也行。',
@@ -471,9 +569,7 @@
         '- 再调一次 data_analysis_doctor 确认全部通过。',
         '',
         '约束：不要动用户的研究资料，不要修改技能包里的脚本，不要装上面没提到的软件。',
-        '最后用一句话说明「环境已就绪」，并附上 Python 可执行文件路径与版本。'
-      ].join('\n');
-
+        '最后用一句话说明「环境已就绪」，并附上 Python 可执行文件路径与版本。'      ].join('\n');
       /**
        * 开一个临时会话并把安装提示词投进去。
        * 用自己的一条 ref，不碰 runtime.ref（那是「研究对话」在用的），失败一律如实抛出。
@@ -496,7 +592,14 @@
           var ref = sessions.retain(sessionId, { source: 'gateway' });
           return Promise.resolve(ref.ready).then(function () {
             runtime.installRef = ref;
-            return ref.binding.session.prompt([{ type: 'text', text: ENV_PROMPT }], 'queue');
+            // 触发门：装环境要调 doctor/configure，而临时会话默认没有工具——
+            // 先显式启用这条对话，再投提示词；启用失败就不要发一条「注定跑不动」的指令。
+            return request('POST', '/session/arm', { sessionId: sessionId, reason: 'install' }).then(function (json) {
+              if (!json || json.ok !== true) {
+                throw new Error('启用失败：' + ((json && json.error) || '宿主拒绝了这条请求'));
+              }
+              return ref.binding.session.prompt([{ type: 'text', text: ENV_PROMPT }], 'queue');
+            });
           }).then(function (result) {
             if (!result || result.ok !== true) {
               var detail = result && result.error && (result.error.message || result.error.code);
@@ -507,7 +610,6 @@
           });
         });
       }
-
       function textOfBlocks(content) {
         if (!Array.isArray(content)) return '';
         var out = [];
@@ -517,47 +619,65 @@
         }
         return out.join('\n');
       }
-
       /**
        * 把一段文字投给研究对话：有绑定就复用，没有就建会话 → prompt(queue) → 绑定 → 打开原生对话。
        * `shouldOpen` 让调用方在弹窗已关闭时不要再把人拽进对话；任一步失败都如实抛回面板。
+       *
+       * 复用已有会话时不再发一次绑定：那条会话早就是某个项目的对话了，重复绑只会把
+       * 「已经关联好」答成 409，然后被这里当成失败写进红字。
        */
       function deliverText(text, projectDir, boundSessionId, shouldOpen) {
         var open = typeof shouldOpen === 'function' ? shouldOpen : function () { return true; };
         var idPromise = boundSessionId ? Promise.resolve(boundSessionId) : createSession(projectDir);
         return idPromise.then(function (sessionId) {
           return ensureRef(sessionId).then(function (ref) {
-            return ref.binding.session.prompt([{ type: 'text', text: text }], 'queue').then(function (result) {
-              if (!result || result.ok !== true) {
-                var detail = result && result.error && (result.error.message || result.error.code);
-                throw new Error('投递失败：' + (detail || '宿主拒绝了这条消息'));
-              }
-              return persistSession(sessionId).then(function (json) {
-                if (open()) openConversation(sessionId);
-                return { ok: true, sessionId: sessionId, state: json.state };
-              }).catch(function (error) {
-                // 消息已经发出去了：绑定失败不能谎报「投递失败」，照常进对话并如实提示。
+            // 触发门：绑定 = 启用。必须先启用这条会话、再投任务卡——反过来的话，
+            // 会话可能在「没有工具的模型步」里读到卡，只能回一句「我做不了」。
+            var boundPromise = boundSessionId
+              ? request('GET', '/session/project?sessionId=' + encodeURIComponent(sessionId)).then(function (info) {
+                  // 已经有了归属就直接投；归属被别的项目/会话顶掉了（旧快照）就先绑回来再投。
+                  if (info && info.bound === true) return { ok: true, state: null };
+                  return persistSession(sessionId).then(function (json) {
+                    return { ok: true, state: json.state };
+                  }).catch(function (error) {
+                    return { ok: false, error: String((error && error.message) || error) };
+                  });
+                }).catch(function () {
+                  // 查询失败不等于没绑定：照常投递，也不吓用户。真正的绑定失败会在下一行（persist）里报。
+                  return { ok: true, state: null, unknown: true };
+                })
+              : persistSession(sessionId).then(function (json) {
+                  return { ok: true, state: json.state };
+                }).catch(function (error) {
+                  return { ok: false, error: String((error && error.message) || error) };
+                });
+            return boundPromise.then(function (bound) {
+              return ref.binding.session.prompt([{ type: 'text', text: text }], 'queue').then(function (result) {
+                if (!result || result.ok !== true) {
+                  var detail = result && result.error && (result.error.message || result.error.code);
+                  throw new Error('投递失败：' + (detail || '宿主拒绝了这条消息'));
+                }
                 if (open()) openConversation(sessionId);
                 return {
                   ok: true,
                   sessionId: sessionId,
-                  warning: '任务卡已发出，但会话绑定失败（重启后可能找不到这条对话）：' + String((error && error.message) || error)
+                  state: bound.state || null,
+                  // 绑定失败不能谎报「投递失败」：卡确实发出去了，但要说清模型可能看不到工具。
+                  warning: bound.ok ? undefined : ('任务卡已投递，但这条会话没启用成功（模型可能看不到工具）：' + (bound.error || '绑定失败'))
                 };
               });
             });
           });
         });
       }
-
       function deliverCard(stageId, projectDir, boundSessionId) {
-        return request('GET', '/task-card?stageId=' + encodeURIComponent(stageId)).then(function (card) {
+        return request('GET', '/task-card?stageId=' + encodeURIComponent(stageId) + (boundSessionId ? '&sessionId=' + encodeURIComponent(boundSessionId) : '')).then(function (card) {
           if (!card || !card.ok) throw new Error((card && card.error) || '任务卡生成失败');
           return deliverText(card.text, projectDir, boundSessionId);
         });
       }
-
       /** 原生会话侧读工作台摘要：payload 只含 active/summary/totals/next，不搬图表清单。 */
-      function useWorkbenchState(intervalMs, deps) {
+      function useWorkbenchState(intervalMs, deps, sessionId) {
         var stateTuple = useState(null);
         var state = stateTuple[0];
         var setState = stateTuple[1];
@@ -565,7 +685,7 @@
         var err = errTuple[0];
         var setErr = errTuple[1];
         var reload = useCallback(function () {
-          return getSummary().then(function (json) {
+          return getSummary(sessionId).then(function (json) {
             if (json && json.ok) {
               setState(json);
               setErr('');
@@ -575,7 +695,7 @@
           }).catch(function (e) {
             setErr(String((e && e.message) || e));
           });
-        }, []);
+        }, [sessionId]);
         useEffect(function () {
           void reload();
           if (!intervalMs) return undefined;
@@ -588,7 +708,6 @@
         }, [reload].concat(deps || []));
         return [state, reload, err];
       }
-
       function useSessionRunning(sessionId) {
         var tuple = useState(false);
         var running = tuple[0];
@@ -628,7 +747,6 @@
         }, [sessionId]);
         return running;
       }
-
       /** 面板侧栏只放「最近一轮」的摘要，不搬运整段对话。 */
       function useSessionSnippet(sessionId) {
         var tuple = useState('');
@@ -683,12 +801,16 @@
         }, [sessionId]);
         return snippet;
       }
-
       /* ------------------------------------------------------------------ *
        * 原生对话里的工作台零件（四个槽位，一个都不重画聊天）
        * ------------------------------------------------------------------ */
-
-      function OpenWorkbenchAction() {
+      function OpenWorkbenchAction(props) {
+        var sessionId = (props && props.sessionId) || '';
+        // 这条按钮只要在屏幕上是哪条对话就知道——工作台靠它决定「跟着哪条对话」。
+        // 面板切过去之后这个组件会卸载，宿主的记录还在，所以只上报不清空。
+        useEffect(function () {
+          reportFocus(sessionId);
+        }, [sessionId]);
         return h(
           'span',
           { className: 'dsa-cmp' },
@@ -700,9 +822,8 @@
           )
         );
       }
-
       function WorkbenchTail(props) {
-        var tuple = useWorkbenchState(10000, [props.seq]);
+        var tuple = useWorkbenchState(10000, [props.seq], props.sessionId);
         var state = tuple[0];
         if (!state || !state.active || !props.sessionId || state.active.sessionId !== props.sessionId) return null;
         var summary = state.summary || {};
@@ -715,21 +836,16 @@
           h(
             'span',
             null,
-            state.active.name
-              + ' · 完成 ' + (summary.done || 0)
+            state.active.name              + ' · 完成 ' + (summary.done || 0)
               + ' · 待裁定 ' + (summary.review || 0)
               + ' · 未过 ' + (totals.fail || 0)
           ),
           h('button', { type: 'button', className: 'dsa-chat-btn', onClick: openWorkbenchPanel }, t('tailOpen'))
         );
       }
-
-      /* 输入行左侧的「下一步」：四种状态装在同一个按钮里，不再往旁边追加一句话——
-         追加的那句会把输入行撑长，点完还一直挂着（按钮已经换成下一阶段，旁边仍写着
-         「已启动：上一阶段」）。状态只来自两处真东西：本次请求的结果、/summary 里
-         next.status。没有假进度，也没有前端计时器造出来的「进行中」。 */
+      /* 输入行左侧的「下一步」：四种状态装在同一个按钮里，不再往旁边追加一句话——         追加的那句会把输入行撑长，点完还一直挂着（按钮已经换成下一阶段，旁边仍写着         「已启动：上一阶段」）。状态只来自两处真东西：本次请求的结果、/summary 里         next.status。没有假进度，也没有前端计时器造出来的「进行中」。 */
       function NextStepControl(props) {
-        var tuple = useWorkbenchState(8000, [props.sessionId]);
+        var tuple = useWorkbenchState(8000, [props.sessionId], props.sessionId);
         var state = tuple[0];
         var reload = tuple[1];
         // idle | starting | ok | error：只记这一次点击；运行中 / 待人工取自服务端
@@ -740,7 +856,6 @@
         var flash = flashTuple[0];
         var setFlash = flashTuple[1];
         var timerRef = useRef(0);
-
         // 反馈有时限：成功 3 秒、失败 8 秒后退回真实状态，免得一次点击的结果变成长住的假状态
         useEffect(function () {
           if (phase !== 'ok' && phase !== 'error') return undefined;
@@ -752,18 +867,15 @@
             clearTimeout(timerRef.current);
           };
         }, [phase]);
-
         if (!state || !state.active || !props.sessionId || state.active.sessionId !== props.sessionId) return null;
         var next = state.next;
         if (!next) {
           return h('span', { className: 'dsa-cmp' }, h('span', { className: 'dsa-cmp-text' }, t('nextAllDone')));
         }
-
         var running = next.status === 'running';
         // 只有「未开始」才直接从输入行起跑：被拦住 / 待人工要先看清拦截原因，
         // 否则点下去只会收到一句 409，还得再来一次面板。这两种状态点开工作台定位。
         var runnable = Boolean(next.script) && next.status === 'todo';
-
         var click = function click() {
           if (phase === 'starting') return;
           // 没有脚本、或者刚刚点过（服务端可能已经在跑）：点一下只去看日志，不再发一次 run
@@ -773,7 +885,7 @@
           }
           setPhase('starting');
           setFlash('');
-          request('POST', '/stage/run', { stageId: next.id }).then(function (json) {
+          request('POST', '/stage/run', { stageId: next.id, sessionId: props.sessionId }).then(function (json) {
             if (json && json.ok) {
               setPhase('ok');
               setFlash(t('nextStarted') + ' ' + next.name);
@@ -787,7 +899,6 @@
             setFlash(t('nextStartFailed') + ' ' + String((e && e.message) || e));
           });
         };
-
         var view;
         if (phase === 'starting') {
           view = { spinner: true, label: t('nextStarting'), hint: '正在启动「' + next.name + '」' };
@@ -801,8 +912,7 @@
             tone: 'run',
             label: t('nextStateRunning'),
             name: next.name,
-            hint: '「' + next.name + '」正在运行，点一下打开工作台看日志'
-          };
+            hint: '「' + next.name + '」正在运行，点一下打开工作台看日志'          };
         } else if (runnable) {
           view = { glyph: '▶', label: t('nextStep'), name: next.name, hint: '在工作台里运行「' + next.name + '」' };
         } else {
@@ -810,16 +920,9 @@
             glyph: '→',
             label: t('nextStateManual'),
             name: next.name,
-            hint: t('nextManual') + '，点一下打开工作台'
-          };
+            hint: t('nextManual') + '，点一下打开工作台'          };
         }
-
-        var icon = view.spinner
-          ? h('span', { className: 'dsa-cmp-spin', 'aria-hidden': 'true' })
-          : view.dot
-            ? h('span', { className: 'dsa-cmp-dot', 'aria-hidden': 'true' })
-            : h('span', { className: 'dsa-cmp-icon', 'aria-hidden': 'true' }, view.glyph);
-
+        var icon = view.spinner          ? h('span', { className: 'dsa-cmp-spin', 'aria-hidden': 'true' })          : view.dot            ? h('span', { className: 'dsa-cmp-dot', 'aria-hidden': 'true' })            : h('span', { className: 'dsa-cmp-icon', 'aria-hidden': 'true' }, view.glyph);
         return h(
           'span',
           { className: 'dsa-cmp' + (view.tone ? ' tone-' + view.tone : ''), role: 'status', 'aria-live': 'polite' },
@@ -831,19 +934,14 @@
               disabled: phase === 'starting',
               'aria-busy': phase === 'starting' ? 'true' : undefined,
               title: view.hint,
-              onClick: click
-            },
+              onClick: click            },
             icon,
-            view.flash
-              ? h('span', { className: 'dsa-cmp-flash' }, view.flash)
-              : [
+            view.flash              ? h('span', { className: 'dsa-cmp-flash' }, view.flash)              : [
                   h('span', { key: 'label', className: 'dsa-cmp-label' }, view.label),
-                  view.name ? h('span', { key: 'name', className: 'dsa-cmp-name' }, view.name) : null
-                ]
+                  view.name ? h('span', { key: 'name', className: 'dsa-cmp-name' }, view.name) : null                ]
           )
         );
       }
-
       var TOOL_LABELS = {
         data_analysis_status: '工作台状态',
         data_analysis_list_stages: '阶段清单',
@@ -856,9 +954,7 @@
         data_analysis_adjudicate: '人工裁定',
         data_analysis_configure: '修改配置',
         data_analysis_doctor: '环境自检',
-        data_analysis_draft: 'AI 起草'
-      };
-
+        data_analysis_draft: 'AI 起草'      };
       function makeToolRow(toolName) {
         return function WorkbenchToolRow(props) {
           var phase = props.phase || '';
@@ -875,13 +971,10 @@
           );
         };
       }
-
       var DATA_TOOLS = Object.keys(TOOL_LABELS);
-
       /* ------------------------------------------------------------------ *
        * 样式
        * ------------------------------------------------------------------ */
-
       var CSS = [
         // 变量挂在面板根上，不写 :root —— 别把宿主全局的 --dsa-* 污染了
         // 方向 C（卡片仪表盘）：白卡片浮在浅灰底上，圆角 + 极轻阴影，状态用「软色底 + 文字」而不是只靠色点
@@ -921,6 +1014,7 @@
         '.dsa-chip.ok{color:var(--dsa-ok);border-color:color-mix(in srgb,var(--dsa-ok) 35%,var(--dsa-line));}',
         '.dsa-chip.warn{color:var(--dsa-warn);border-color:color-mix(in srgb,var(--dsa-warn) 35%,var(--dsa-line));}',
         '.dsa-chip.err{color:var(--dsa-err);border-color:color-mix(in srgb,var(--dsa-err) 35%,var(--dsa-line));}',
+        '.dsa-chip.quiet{color:var(--dsa-ink3);border-style:dashed;}',
         // 默认按钮要有「填充」才像按钮：原来白底白边框，落在白色弹窗里就成了一条细线
         '.dsa-btn{appearance:none;height:30px;padding:0 11px;border:1px solid var(--dsa-line2);border-radius:4px;',
         '  background:var(--dsa-band);color:var(--dsa-ink);font:inherit;font-size:12.5px;cursor:pointer;white-space:nowrap;}',
@@ -934,6 +1028,10 @@
         '.dsa-btn.ghost:hover{background:var(--dsa-hover);color:var(--dsa-ink);}',
         // 设置常驻顶栏：图标+文字，窄屏只留齿轮（标题/无障碍名还在，不会变成无字按钮）
         '.dsa-settings-btn{display:inline-flex;align-items:center;gap:5px;}',
+        // 「本对话」这类附注只在宽屏露脸：窄屏顶栏装不下，品牌标会被压扁（视觉回归会抓）
+        '.dsa-root[data-dsa-width="narrow"] .dsa-chat-link,',
+        '.dsa-root[data-dsa-width="compact"] .dsa-chat-link,',
+        '.dsa-root[data-dsa-width="mid"] .dsa-chat-link{display:none;}',
         '.dsa-settings-btn .dsa-ico{font-size:13px;line-height:1;}',
         '.dsa-root[data-dsa-width="narrow"] .dsa-settings-btn .dsa-settings-label{display:none;}',
         // 空状态三步动线：编号列表，弱化正文但让「第几步」一眼可数
@@ -969,6 +1067,7 @@
         '.dsa-stage.done .dsa-idx{border-color:var(--dsa-ok);color:var(--dsa-ok);}',
         '.dsa-stage.blocked .dsa-idx{border-color:var(--dsa-err);color:var(--dsa-err);}',
         '.dsa-stage.review .dsa-idx{border-color:var(--dsa-warn);color:var(--dsa-warn);}',
+        '.dsa-stage.na .dsa-idx{border-color:var(--dsa-ctl);color:var(--dsa-ink3);border-style:dashed;}',
         '.dsa-stage.running .dsa-idx{border-color:var(--dsa-accent);color:var(--dsa-accent);}',
         '.dsa-stage-main{min-width:0;flex:1 1 auto;}',
         '.dsa-stage-name{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:500;line-height:1.35;}',
@@ -1004,6 +1103,8 @@
         '.dsa-gate.pass .mark{color:var(--dsa-ok);}',
         '.dsa-gate.fail .mark{color:var(--dsa-err);}',
         '.dsa-gate.unjudged .mark{color:var(--dsa-ctl);}',
+        '.dsa-gate.na .mark{color:var(--dsa-ink3);}',
+        '.dsa-gate.na .dsa-gate-label{color:var(--dsa-ink2);}',
         '.dsa-gate.todo .mark{color:var(--dsa-ctl);}',
         '.dsa-gate.manual .mark{color:var(--dsa-warn);}',
         '.dsa-gate-body{flex:1 1 auto;min-width:0;}',
@@ -1030,6 +1131,7 @@
         '.dsa-badge.pass{color:var(--dsa-ok);background:color-mix(in srgb,var(--dsa-ok) 10%,transparent);}',
         '.dsa-badge.fail{color:var(--dsa-err);background:color-mix(in srgb,var(--dsa-err) 12%,transparent);}',
         '.dsa-badge.unjudged{color:var(--dsa-ink3);background:color-mix(in srgb,var(--dsa-ctl) 14%,transparent);}',
+        '.dsa-badge.na{color:var(--dsa-ink2);background:transparent;border:1px dashed var(--dsa-line2);}',
         '.dsa-side-h{flex:0 0 auto;height:42px;display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid var(--dsa-line);background:var(--dsa-panel);}',
         '.dsa-side-h b{font-size:12.5px;font-weight:600;color:var(--dsa-ink);}',
         '.dsa-runs{flex:0 0 auto;max-height:42%;overflow-y:auto;border-bottom:1px solid var(--dsa-line);background:var(--dsa-panel);}',
@@ -1229,7 +1331,6 @@
         '.dsa-patch-pre{max-height:220px;overflow:auto;margin:6px 0 0;padding:8px 10px;border:1px solid var(--dsa-line);',
         '  background:var(--dsa-bg);border-radius:2px;font-family:var(--dsa-mono);font-size:11px;white-space:pre-wrap;word-break:break-word;}',
         '.dsa-inline-tight{display:inline-flex;gap:4px;align-items:center;flex-wrap:wrap;}',
-
         /* ================================================================== *
          * 方向 C：卡片仪表盘
          *
@@ -1238,7 +1339,6 @@
          * 三条硬口径：① 状态永远有文字，不只靠颜色 ② 数字等宽对齐
          *            ③ 项目多时列表自己滚，不把下面的阶段挤走
          * ================================================================== */
-
         // ---- 顶栏：58px、圆角渐变标、pill 徽章、有填充的按钮
         '.dsa-top{height:58px;flex:0 0 58px;gap:10px;padding:0 18px;}',
         '.dsa-logo{flex:0 0 30px;width:30px;height:30px;border-radius:9px;',
@@ -1263,7 +1363,6 @@
         '  filter:brightness(1.07);}',
         '.dsa-stage-select,.dsa-menu>summary{height:32px;border-radius:var(--dsa-r2);font-size:12.5px;}',
         '.dsa-menu-list{top:38px;border-radius:10px;box-shadow:var(--dsa-shadow2);}',
-
         // ---- 左栏：分区 + 项目列表「自己滚」，阶段永远在下面看得见
         '.dsa-rail{flex:0 0 276px;width:276px;display:flex;flex-direction:column;min-height:0;overflow:hidden;',
         '  background:var(--dsa-bg);padding:12px 12px 0;border-right:1px solid var(--dsa-line);}',
@@ -1289,7 +1388,6 @@
         '.dsa-proj-actions{gap:8px;padding:5px 4px 0;}',
         '.dsa-link{padding:3px 5px;border-radius:6px;font-size:11.5px;}',
         '.dsa-link:hover{background:var(--dsa-hover);}',
-
         // ---- 阶段行：圆号 + 名称 + 右侧状态徽章（徽章是文字，色弱也读得出）
         '.dsa-stage{padding:5px 8px;border:1px solid transparent;border-radius:var(--dsa-r2);align-items:center;',
         '  gap:9px;margin-bottom:1px;transition:background .16s,border-color .16s,box-shadow .16s;}',
@@ -1317,7 +1415,6 @@
         '.dsa-stage.running .dsa-stage-meta{background:var(--dsa-soft);color:var(--dsa-accent);}',
         '.dsa-stage.todo{opacity:1;}',
         '.dsa-stage.todo .dsa-stage-name{color:var(--dsa-ink3);font-weight:400;}',
-
         // ---- 主区：hero 卡 + KPI 条 + 卡片化的段落
         '.dsa-main{padding:16px 20px 60px;background:var(--dsa-bg);}',
         '.dsa-hero{background:var(--dsa-panel);border:1px solid var(--dsa-line);border-radius:var(--dsa-r);',
@@ -1344,7 +1441,6 @@
         '.dsa-code{border-radius:var(--dsa-r2);}',
         '.dsa-tag{border-radius:999px;padding:0 7px;height:19px;line-height:18px;}',
         '.dsa-badge{border-radius:999px;height:18px;line-height:17px;padding:0 7px;font-weight:550;}',
-
         // ---- 右栏：运行记录卡片 + 终端风格的日志卡（日志固定深色，像 C 的 .log）
         '.dsa-side{flex:0 0 330px;width:330px;background:var(--dsa-bg);padding-bottom:18px;}',
         '.dsa-side-h{height:46px;background:transparent;}',
@@ -1359,7 +1455,6 @@
         '.dsa-log .ln-err{color:#e58d84;}',
         '.dsa-log .ln-warn{color:#dfb267;}',
         '.dsa-chat-card{margin:12px 12px 0;border-radius:var(--dsa-r);background:var(--dsa-panel);box-shadow:var(--dsa-shadow);}',
-
         // ---- 弹窗与输入：跟着圆角走，输入框加柔光圈
         '.dsa-modal{border-radius:14px;box-shadow:0 18px 50px rgba(16,24,40,.22);}',
         '.dsa-input,.dsa-btn,.dsa-chat-btn,.dsa-menu-list button,.dsa-flow-step{border-radius:var(--dsa-r2);}',
@@ -1368,7 +1463,6 @@
         '.dsa-input-row .dsa-input{flex:1 1 auto;min-width:0;width:auto;}',
         '.dsa-input-row .dsa-btn{flex:0 0 auto;height:32px;}',
         '.dsa-field-note{color:var(--dsa-ink3);font-size:11px;line-height:1.5;}',
-
         // ---- 断点：顶栏变高了，抽屉与遮罩的起点要跟着改
         '.dsa-root[data-dsa-width="compact"] .dsa-rail{flex-basis:248px;width:248px;}',
         '.dsa-root[data-dsa-width="compact"] .dsa-kpis{grid-template-columns:repeat(3,1fr);}',
@@ -1377,7 +1471,6 @@
         '.dsa-root[data-dsa-width="mid"] .dsa-side,',
         '.dsa-root[data-dsa-width="narrow"] .dsa-side{top:58px;}',
         '.dsa-scrim{top:58px;}',
-
         // ---- 折叠行：卡里的折叠不能是「卡中卡」，独立折叠也要有可点的手感
         '.dsa-card .dsa-fold{margin-top:0;border:0;border-top:1px solid var(--dsa-line);border-radius:0;',
         '  background:transparent;box-shadow:none;}',
@@ -1399,7 +1492,6 @@
         '.dsa-fold-sub>summary::-webkit-details-marker{display:none;}',
         '.dsa-fold-sub>summary:before{content:"▸";display:inline-block;width:12px;color:var(--dsa-ink3);}',
         '.dsa-fold-sub[open]>summary:before{content:"▾";}',
-
         // ---- 项目行：整行可点 + 右侧移除键（两个并列 button，不能嵌套）
         '.dsa-proj{position:relative;}',
         '.dsa-proj-main{display:block;width:100%;padding:0 22px 0 0;border:0;background:none;',
@@ -1417,7 +1509,27 @@
         // 目录已经不见的项目：移除键常显，因为这是用户唯一能对它做的动作
         '.dsa-proj.orphan .dsa-proj-del{opacity:.85;}',
         '.dsa-proj.orphan .dsa-proj-name{color:var(--dsa-err);}',
-
+        // ---- 每个项目下面那条「研究对话」：常驻可见（不等 hover），点一下就进会话
+        '.dsa-proj-chat{display:flex;align-items:center;gap:6px;width:auto;margin:5px 0 0 27px;height:23px;',
+        '  padding:0 7px;border:1px solid var(--dsa-line2);border-radius:6px;background:transparent;',
+        '  color:var(--dsa-ink);font:inherit;font-size:11.5px;text-align:left;cursor:pointer;',
+        '  transition:background .12s,border-color .12s,color .12s;}',
+        '.dsa-proj-chat:hover{border-color:var(--dsa-accent);color:var(--dsa-accent);background:var(--dsa-soft);}',
+        '.dsa-proj-chat:focus-visible{outline:2px solid var(--dsa-accent);outline-offset:1px;}',
+        '.dsa-proj-chat.run{border-color:var(--dsa-accent);color:var(--dsa-accent);}',
+        '.dsa-proj-chat .dsa-chat-dot{flex:0 0 auto;margin-right:0;}',
+        '.dsa-proj-chat-tx{font-weight:550;white-space:nowrap;}',
+        '.dsa-proj-chat-state{min-width:0;font-size:11px;color:var(--dsa-ink3);white-space:nowrap;',
+        '  overflow:hidden;text-overflow:ellipsis;}',
+        '.dsa-proj-chat.bound .dsa-proj-chat-state{color:var(--dsa-ok);}',
+        // 「当前对话」= 右上角那条对话就属于这个项目：实心一点，和「只是绑过」区分开
+        '.dsa-proj-chat.current{border-color:var(--dsa-ok);background:var(--dsa-soft);}',
+        '.dsa-proj-chat.current .dsa-proj-chat-state{color:var(--dsa-ok);font-weight:600;}',
+        '.dsa-proj-chat.run .dsa-proj-chat-state{color:var(--dsa-accent);}',
+        '.dsa-proj-chat-go{margin-left:auto;font-size:11px;color:var(--dsa-ctl);}',
+        '.dsa-proj-chat:hover .dsa-proj-chat-go{color:var(--dsa-accent);}',
+        '.dsa-proj-chat:disabled{opacity:.5;cursor:default;border-style:dashed;}',
+        '.dsa-proj-chat.gone{color:var(--dsa-err);}',
         // ---- 移除项目的确认弹窗
         '.dsa-forget-name{font-size:13px;font-weight:600;color:var(--dsa-ink);}',
         '.dsa-forget-path{margin-top:3px;font-family:var(--dsa-mono);font-size:11px;color:var(--dsa-ink3);',
@@ -1430,7 +1542,6 @@
         '.dsa-ask{display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:8px 10px;',
         '  border:1px solid var(--dsa-line2);border-radius:var(--dsa-r2);background:var(--dsa-warnsoft);}',
         '.dsa-ask-t{flex:1 1 auto;font-size:12.5px;line-height:1.5;color:var(--dsa-ink);}',
-
         // ---- 产物中心
         '.dsa-art-bar{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;}',
         '.dsa-tabs{display:inline-flex;gap:4px;padding:3px;border-radius:999px;background:var(--dsa-card2);',
@@ -1461,7 +1572,6 @@
         '.dsa-art-table th{position:sticky;top:0;background:var(--dsa-card2);font-weight:600;color:var(--dsa-ink2);}',
         '.dsa-art-pre{margin:0;padding:10px;max-height:52vh;overflow:auto;border-radius:6px;background:var(--dsa-card2);',
         '  font-family:var(--dsa-mono);font-size:11.5px;line-height:1.6;color:var(--dsa-ink);white-space:pre-wrap;}',
-
         // ---- 契约卡
         '.dsa-reg-section{margin-top:14px;}',
         '.dsa-reg-card{margin-top:8px;}',
@@ -1477,7 +1587,6 @@
         '.dsa-reg-item b{font-family:var(--dsa-mono);font-weight:600;}',
         '.dsa-reg-issues{margin-top:10px;padding-top:8px;border-top:1px solid var(--dsa-line);',
         '  font-size:11.5px;line-height:1.6;color:var(--dsa-ink2);}',
-
         // ---- 大图（点缩略图就地弹一层，不让人滚到底部找按钮）
         '.dsa-lightbox{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;',
         '  padding:24px;background:rgba(10,12,16,.78);}',
@@ -1490,6 +1599,7 @@
         '.dsa-art-pre-lg{max-height:70vh;background:var(--dsa-card2);}',
         '.dsa-lightbox-pdf{width:100%;height:70vh;border:0;border-radius:var(--dsa-r2);background:var(--dsa-card2);}',
         '.dsa-lightbox-bar{display:flex;align-items:center;gap:12px;font-size:12px;color:var(--dsa-ink2);min-width:0;}',
+        '.dsa-lightbox-bar .dsa-link{flex:0 0 auto;white-space:nowrap;}',
         '.dsa-lightbox-name{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;',
         '  font-family:var(--dsa-mono);font-size:11.5px;font-weight:600;color:var(--dsa-ink);}',
         '.dsa-lightbox-img{display:block;max-width:100%;max-height:76vh;margin:0 auto;object-fit:contain;',
@@ -1501,9 +1611,21 @@
         '  box-shadow:var(--dsa-shadow2);}',
         '.dsa-lightbox-nav:hover{color:var(--dsa-ink);border-color:var(--dsa-accent);}',
         '.dsa-lightbox-nav.prev{margin-left:-19px;}',
-        '.dsa-lightbox-nav.next{margin-right:-19px;}'
-      ].join('');
-
+        '.dsa-lightbox-nav.next{margin-right:-19px;}',
+        // 首屏骨架：只占位、不假装有数据。灰条用面板线条色，脉冲节奏比转圈慢，
+        // 看起来像「在铺页面」而不是「卡住了」；reduced-motion 下静止不动。
+        '.dsa-skeleton .dsa-rail,.dsa-skeleton .dsa-main,.dsa-skeleton .dsa-side{pointer-events:none;}',
+        '.dsa-sk-bar{display:block;height:9px;border-radius:3px;background:var(--dsa-line);',
+        '  animation:dsa-cmp-pulse 1.8s ease-in-out infinite;}',
+        '.dsa-sk-bar.tall{height:14px;}',
+        '.dsa-sk-row{display:flex;align-items:center;min-height:26px;padding:0 14px;}',
+        '.dsa-sk-row .dsa-sk-bar{width:100%;}',
+        '.dsa-sk-hero{display:flex;flex-direction:column;gap:10px;margin:6px 0 18px;}',
+        '.dsa-sk-kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:14px;}',
+        '.dsa-sk-card{height:64px;border:1px solid var(--dsa-line);border-radius:var(--dsa-r,6px);background:var(--dsa-card);}',
+        '.dsa-sk-block{border:1px solid var(--dsa-line);border-radius:var(--dsa-r,6px);background:var(--dsa-card);padding:10px 0;}',
+        '.dsa-skeleton .dsa-side .dsa-sk-block{margin:10px 12px;}',
+        '@media (prefers-reduced-motion:reduce){.dsa-sk-bar{animation:none;opacity:.75}}'      ].join('');
       function installStyles() {
         if (document.getElementById('dsa-style')) return function () {};
         var el = document.createElement('style');
@@ -1518,15 +1640,12 @@
           }
         };
       }
-
       /* ------------------------------------------------------------------ *
        * 小组件
        * ------------------------------------------------------------------ */
-
       function Chip(props) {
         return h('span', { className: 'dsa-chip ' + (props.tone || ''), title: props.title || undefined }, props.children);
       }
-
       function Btn(props) {
         var cls = 'dsa-btn' + (props.variant ? ' ' + props.variant : '') + (props.className ? ' ' + props.className : '');
         return h(
@@ -1536,51 +1655,50 @@
             className: cls,
             disabled: props.disabled,
             title: props.title || undefined,
-            onClick: props.onClick
-          },
-          props.children
-        );
+            onClick: props.onClick          },
+          props.children        );
       }
-
       function stateDot(status) {
         if (status === 'done') return 'pass';
         if (status === 'blocked') return 'fail';
         if (status === 'review') return 'warn';
+        if (status === 'na') return 'na';
         if (status === 'running') return 'run';
         return '';
       }
-
       function statusLabel(status) {
         return t(STATUS_TEXT[status] || 'todo');
       }
-
       function gateMarks(gates) {
         var pass = 0;
         var fail = 0;
         var unknown = 0;
+        var na = 0;
         for (var i = 0; i < gates.length; i += 1) {
           if (gates[i].status === 'pass') pass += 1;
           else if (gates[i].status === 'fail') fail += 1;
+          else if (gates[i].status === 'na') na += 1;
           else unknown += 1;
         }
-        return { pass: pass, fail: fail, unjudged: unknown };
+        return { pass: pass, fail: fail, unjudged: unknown, na: na };
       }
-
-      // 一套词表：通过 / 未通过 / 等你拍板 / 还没查。未核、判不了、未测、缺失都只是「还没查」的原因。
+      // 一套词表：通过 / 未通过 / 等你拍板 / 还没查 / 不适用。
+      // 「不适用」是有依据的结论（例如纯表格语料不需要文本编码），既不能画成通过，也不能画成未核。
       function gateFace(gate, stageStatus) {
+        if (gate.status === 'na') return { cls: 'na', mark: '—', word: '不适用' };
         if (stageStatus === 'todo' && gate.status !== 'pass') return { cls: 'todo', mark: '○', word: '未评价' };
         if (gate.status === 'pass') return { cls: 'pass', mark: '✓', word: '通过' };
         if (gate.status === 'fail') return { cls: 'fail', mark: '✗', word: '未通过' };
         if (gate.manual) return { cls: 'manual', mark: '!', word: '等你拍板' };
         return { cls: 'unjudged', mark: '○', word: '还没查' };
       }
-
       function stageWord(stage) {
         if (!stage) return '';
         if (stage.status === 'running') return '运行中';
         if (stage.status === 'done') return '已完成';
         if (stage.status === 'blocked') return '被拦住';
         if (stage.status === 'todo') return '未开始';
+        if (stage.status === 'na') return '不适用';
         var manual = 0;
         var unknown = 0;
         for (var i = 0; i < (stage.gates || []).length; i += 1) {
@@ -1593,18 +1711,16 @@
         if (unknown) return '还没查 ' + unknown;
         return '待复核';
       }
-
       function Badge(props) {
         var mark = props.state === 'pass' ? '✓' : props.state === 'fail' ? '✗' : '?';
         return h('span', { className: 'dsa-badge ' + props.state, title: props.title || undefined }, mark + ' ' + props.text);
       }
-
       /** 一个 AI 入口：不再让用户猜「起草 / 让 AI 做 / 复核」有什么区别。 */
       function AiMenu(props) {
         var items = [];
         if (props.onDraft) items.push({ label: '写一份草稿', hint: '不跑脚本，只依据已有产物，落 docs/', run: props.onDraft });
         if (props.onChat) items.push({ label: '在对话里做这一步', hint: '投任务卡到项目会话，会改文件', run: props.onChat });
-        if (props.onReview) items.push({ label: '复核（第 9 阶段）', hint: '让模型按证据包写问题清单', run: props.onReview });
+        if (props.onReview) items.push({ label: '复核（第 10 阶段）', hint: '让模型按证据包写问题清单', run: props.onReview });
         if (!items.length) return null;
         return h(
           'details',
@@ -1633,7 +1749,6 @@
           )
         );
       }
-
       /** 一行闸门：符号 + 一句话结论 + 证据。符号只有 ✓ ✗ ○ ! 四种，别再造新词。 */
       function GateRow(props) {
         var gate = props.gate;
@@ -1642,9 +1757,7 @@
         if (gate.status === 'fail') {
           tag = h('span', { className: 'dsa-tag ' + (gate.level === 'error' ? 'err' : '') }, gate.level === 'error' ? '拦截' : '提醒');
         } else if (gate.manual && gate.status === 'unjudged') {
-          tag = props.stageStatus === 'todo'
-            ? h('span', { className: 'dsa-tag' }, '开工后确认')
-            : h('span', { className: 'dsa-tag manual' }, '需要你');
+          tag = props.stageStatus === 'todo'            ? h('span', { className: 'dsa-tag' }, '开工后确认')            : h('span', { className: 'dsa-tag manual' }, '需要你');
         }
         return h(
           'div',
@@ -1658,8 +1771,7 @@
               { className: 'dsa-gate-label' },
               gate.label,
               tag,
-              gate.manual && props.stageStatus !== 'todo'
-                ? h(
+              gate.manual && props.stageStatus !== 'todo'                ? h(
                     'button',
                     {
                       type: 'button',
@@ -1667,25 +1779,27 @@
                       style: { height: '24px', padding: '0 7px', fontSize: '12px', marginLeft: 'auto' },
                       onClick: function () { props.onAdjudicate(gate); }
                     },
-                    gate.status === 'unjudged' ? '现在拍板' : '重新裁定'
-                  )
-                : null
-            ),
+                    gate.status === 'unjudged' ? '现在拍板' : '重新裁定'                  )                : null            ),
             h(
               'div',
               { className: 'dsa-gate-detail' },
               gate.detail || (gate.status === 'unjudged' ? '缺少可读证据，先补齐再判断' : '')
             ),
-            gate.source
-              ? h('div', { className: 'dsa-hint dsa-mono', style: { fontSize: '11.5px', marginTop: '2px' } }, String(gate.source))
-              : null
-          )
+            gate.source ? h('div', { className: 'dsa-hint', style: { fontSize: '11.5px', marginTop: '2px' } }, gate.source==='skill'?'技能体检':gate.source==='workbench'?'工作台核验':String(gate.source)) : null,
+            gate.blockingAt?h('div',{className:'dsa-hint'},'生效检查点：'+({'data-ready':'数据准备完成','analysis-ready':'进入分析','figures-ready':'进入成稿','manuscript-ready':'进入质检','delivery-ready':'正式交付'}[gate.blockingAt]||gate.blockingAt)):null,
+            gate.validationReason ? h('div',{className:'dsa-error'},gate.validationReason==='binding-mismatch'?'输入已变化，原结论已失效':'报告暂时无法采信，请重新体检') : null,
+            gate.advice ? h('div',{className:'dsa-hint',style:{overflowWrap:'anywhere'}},gate.advice) : null,
+            gate.evidence && gate.evidence.length ? h('details',{className:'dsa-fold'},
+              h('summary',null,'查看判定依据'),
+              gate.generatedAt?h('p',{className:'dsa-hint'},'报告生成于 '+fmtTime(gate.generatedAt)):null,
+              h('pre',{className:'dsa-mono',style:{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:'240px',overflowY:'auto'}},JSON.stringify(gate.evidence,null,2)),
+              (gate.resources||[]).map(function(resource){return h('p',{key:resource.id,style:{overflowWrap:'anywhere'}},
+                h('a',{href:API+'/gates/resource?stageId='+encodeURIComponent(props.stageId||'')+'&gateId='+encodeURIComponent(gate.id)+'&resourceId='+encodeURIComponent(resource.id),download:true},resource.path));})
+            ) : null          )
         );
       }
-
       function Modal(props) {
         var boxRef = useRef(null);
-
         // 打开就把焦点放进弹窗：键盘用户不应该还停在背后的阶段栏上
         useEffect(function () {
           var node = boxRef.current;
@@ -1696,7 +1810,6 @@
             /* 焦点抢不到不影响操作 */
           }
         }, []);
-
         // Esc 关闭：遮罩挡住了背后整块面板，没有键盘出口时用户只能找鼠标
         useEffect(function () {
           function onKey(e) {
@@ -1711,7 +1824,6 @@
             window.removeEventListener('keydown', onKey);
           };
         }, [props.onCancel, props.onMask]);
-
         // Tab 不能跑出弹窗：aria-modal 只是声明，焦点还得自己圈住；关闭时把焦点还给原来的位置
         useEffect(function () {
           var box = boxRef.current;
@@ -1749,10 +1861,13 @@
             }
           };
         }, []);
-
+        // 点空白处关闭：给了 onMask 就用它；浏览类弹窗传 maskClose 即可点遮罩关掉。
+        // 用 onMouseDown 而不是 onClick，配合卡片上的 stopPropagation：
+        // 从卡片里按下、拖到外面松开不会误关，也不会把正在拖选的文字丢掉。
+        var onMask = props.onMask || (props.maskClose && props.onCancel          ? function () { props.onCancel(); }          : null);
         return h(
           'div',
-          { className: 'dsa-mask', onMouseDown: props.onMask || undefined },
+          { className: 'dsa-mask', onMouseDown: onMask || undefined },
           h(
             'div',
             {
@@ -1773,20 +1888,14 @@
               'div',
               { className: 'dsa-modal-foot' },
               props.onCancel ? h(Btn, { variant: 'ghost', onClick: props.onCancel }, t('cancel')) : null,
-              props.onConfirm
-                ? h(Btn, { variant: props.confirmVariant || 'primary', disabled: props.busy || props.confirmDisabled, onClick: props.onConfirm }, props.busy ? t('saving') : props.confirmText || t('confirm'))
-                : null
-            )
+              props.onConfirm                ? h(Btn, { variant: props.confirmVariant || 'primary', disabled: props.busy || props.confirmDisabled, onClick: props.onConfirm }, props.busy ? t('saving') : props.confirmText || t('confirm'))                : null            )
           )
         );
       }
-
       /* ------------------------------------------------------------------ *
        * 启动自检
        * ------------------------------------------------------------------ */
-
       var CHECK_MARK = { pass: '✓', fail: '✗', warn: '!', unjudged: '?' };
-
       /** 环境自检的紧凑清单：面板顶部横幅与设置弹窗共用。 */
       function PreflightList(props) {
         var pre = props.preflight;
@@ -1806,15 +1915,11 @@
                 { className: 'dsa-check-body' },
                 h('span', { className: 'dsa-check-label' }, item.label),
                 h('span', { className: 'dsa-check-detail' }, ' — ' + item.detail),
-                item.hint && item.status !== 'pass'
-                  ? h('div', { className: 'dsa-check-advice' }, t('advice') + '：' + item.hint)
-                  : null
-              )
+                item.hint && item.status !== 'pass'                  ? h('div', { className: 'dsa-check-advice' }, t('advice') + '：' + item.hint)                  : null              )
             );
           })
         );
       }
-
       function PreflightBanner(props) {
         var pre = props.preflight;
         if (!pre || pre.status === 'pass' || pre.status === 'pending') return null;
@@ -1832,14 +1937,12 @@
           h(Btn, { disabled: props.busy, onClick: props.onRecheck }, t('recheck'))
         );
       }
-
       /** 环境不全（有 error 级检查没通过）时，工作台整体不可用。还没查到结论时不算拦。 */
       function envBlocked(pre) {
         if (!pre) return false;
         if (pre.status === 'fail') return true;
         return (pre.checks || []).some(function (item) { return item.status === 'fail'; });
       }
-
       /**
        * 环境闸门：拦在整个工作台前面。
        * 只有两条出路——让 AI 装好，或者自己去设置里填路径；判不了/warn 不算拦（Mac 上没有 Word COM 是正常的）。
@@ -1857,15 +1960,11 @@
             h(
               'p',
               { className: 'dsa-sub', style: { marginTop: 0 } },
-              '工作台不自己算数：脚本来自技能包，跑在 Python 子进程里。这两样缺一样，九个阶段一个都跑不起来，所以先把环境装齐再进来。'
-            ),
-            fails.length
-              ? h(
+              '工作台不自己算数：脚本来自技能包，跑在 Python 子进程里。这两样缺一样，十个阶段一个都跑不起来，所以先把环境装齐再进来。'            ),
+            fails.length              ? h(
                   'div',
                   { className: 'dsa-hint', style: { marginBottom: '8px' } },
-                  '卡住的是：' + fails.map(function (item) { return item.label; }).join('、') + '（共 ' + fails.length + ' 项）'
-                )
-              : null,
+                  '卡住的是：' + fails.map(function (item) { return item.label; }).join('、') + '（共 ' + fails.length + ' 项）'                )              : null,
             h(PreflightList, { preflight: pre }),
             h(
               'div',
@@ -1873,37 +1972,41 @@
               h(
                 Btn,
                 { variant: 'primary', disabled: props.busy, onClick: props.onAi },
-                props.busy ? '正在开临时会话…' : '让 AI 装好环境'
-              ),
+                props.busy ? '正在开临时会话…' : '让 AI 装好环境'              ),
               h(Btn, { disabled: props.busy, onClick: props.onSettings }, '手动配置'),
               h(Btn, { disabled: props.busy, onClick: props.onRecheck }, t('recheck'))
             ),
             h(
               'div',
               { className: 'dsa-hint', style: { marginTop: '10px' } },
-              '点「让 AI 装好环境」会开一个临时会话：它自己 clone 技能包、装 Python 依赖（机器上没有 Python 的话连 Python 一起装），再用 data_analysis_doctor 自查。装完回到这里会自动复查，通过后就能正常使用。'
-            ),
-            props.note ? h('div', { className: 'dsa-error', style: { marginTop: '8px' } }, props.note) : null
-          )
+              '点「让 AI 装好环境」会开一个临时会话：它自己 clone 技能包、装 Python 依赖（机器上没有 Python 的话连 Python 一起装），再用 data_analysis_doctor 自查。装完回到这里会自动复查，通过后就能正常使用。'            ),
+            props.note ? h('div', { className: 'dsa-error', style: { marginTop: '8px' } }, props.note) : null          )
         );
       }
-
       /* ------------------------------------------------------------------ *
        * 面板
        * ------------------------------------------------------------------ */
-
       function Panel() {
         var snapState = useState(null);
         var snap = snapState[0];
         var setSnap = snapState[1];
-        // 宿主没重启时快照里不会有 registry（v2 才有）：新入口要降级成「重启后可用」，而不是报错
-        var hostStale = Boolean(snap && snap.ok && snap.registry === undefined);
         var errState = useState('');
         var error = errState[0];
         var setError = errState[1];
         var loadingState = useState(true);
         var loading = loadingState[0];
         var setLoading = loadingState[1];
+        // 重进面板：先用上次快照渲染（宿主一次快照是整项目扫描，0.1～3 秒不等），
+        // 别先闪一帧「无项目」再等数据回来；下面的 load 拿到新数据会直接覆盖它。
+        var fromCache = false;
+        if (!snap && loading && SNAPSHOT_CACHE) {
+          snap = SNAPSHOT_CACHE;
+          // 这一帧是旧数据：可以让用户先看到上次的界面，但不许拿它去发任何请求
+          // （比如「跟着对话切项目」——旧焦点可能已经过期，切错一次就是切了两次）
+          fromCache = true;
+        }
+        // 宿主没重启时快照里不会有 registry（v2 才有）：新入口要降级成「重启后可用」，而不是报错
+        var hostStale = Boolean(snap && snap.ok && snap.registry === undefined);
         var selectedState = useState('scope');
         var selected = selectedState[0];
         var setSelected = selectedState[1];
@@ -1975,7 +2078,6 @@
         var regNoteState = useState('');
         var regNote = regNoteState[0];
         var setRegNote = regNoteState[1];
-
         var measureRoot = useCallback(function () {
           var el = rootRef.current;
           if (!el) return;
@@ -1983,7 +2085,6 @@
           var next = w <= 860 ? 'narrow' : w <= 1100 ? 'compact' : w <= 1240 ? 'mid' : 'wide';
           setWidth(function (prev) { return prev === next ? prev : next; });
         }, []);
-
         // 用回调 ref 而不是 [] effect：面板首帧是 loading 占位，那时 .dsa-root 还不存在，
         // effect 只跑一次就永远拿不到节点（这是实测踩到的坑）。
         var attachRoot = useCallback(function (node) {
@@ -1994,7 +2095,6 @@
           setTimeout(measureRoot, 0);
           setTimeout(measureRoot, 300);
         }, [measureRoot]);
-
         useEffect(function () {
           var onResize = function () { measureRoot(); };
           window.addEventListener('resize', onResize);
@@ -2010,7 +2110,6 @@
             }
           };
         }, [measureRoot]);
-
         // Esc 关抽屉：右栏在 mid/compact/narrow 是覆盖式抽屉，没有键盘出口就只能点遮罩
         useEffect(function () {
           function onKey(e) {
@@ -2019,7 +2118,6 @@
           window.addEventListener('keydown', onKey);
           return function () { window.removeEventListener('keydown', onKey); };
         }, [drawer, dialog]);
-
         useEffect(function () {
           function detect() {
             var dark = null;
@@ -2055,13 +2153,20 @@
             if (mq && mq.removeEventListener) mq.removeEventListener('change', detect);
           };
         }, []);
-
+        /* 所有「宿主刚把新鲜快照给我」的地方都走这里：顺手更新模块级缓存。
+         * 否则换了项目（/project/open、绑定对话、保存产物都会带新 state）之后重进面板，
+         * 第一帧拿到的还是上一个项目那份旧快照——虽然马上会被新数据替换，但闪一下也没必要。 */
+        var commitState = useCallback(function (state) {
+          if (state) SNAPSHOT_CACHE = state;
+          setSnap(state);
+        }, []);
         var load = useCallback(function (silent) {
           if (!silent) setLoading(true);
           return getState()
             .then(function (json) {
               if (json && json.ok && json.state) {
-                setSnap(json.state);
+                // 记进模块级缓存：下次重进面板第一帧直接拿它渲染，不再等这一趟
+                commitState(json.state);
                 setError('');
                 var pre = json.state.preflight || null;
                 if (pre) setPreflight(pre);
@@ -2078,19 +2183,19 @@
             })
             .catch(function (e) {
               setError(String((e && e.message) || e));
+              // 拉失败时别把已经显示过的数据换成「无项目」：错误横幅会把原因说清楚
+              if (SNAPSHOT_CACHE) setSnap(SNAPSHOT_CACHE);
             })
             .then(function () {
               if (!silent) setLoading(false);
             });
         }, []);
-
         useEffect(function () {
           void load(false);
           return function () {
             if (timerRef.current) clearInterval(timerRef.current);
           };
         }, [load]);
-
         var running = useMemo(function () {
           if (!snap || !snap.activeRuns) return false;
           for (var key in snap.activeRuns) {
@@ -2098,7 +2203,6 @@
           }
           return false;
         }, [snap]);
-
         // 研究对话：会话 id 存在宿主台账里，running / 最近一轮都从原生会话读
         var projectSession = (snap && snap.active && snap.active.sessionId) || '';
         var chatRunning = useSessionRunning(projectSession);
@@ -2106,34 +2210,49 @@
         var chatErrState = useState('');
         var chatError = chatErrState[0];
         var setChatError = chatErrState[1];
-
+        // 快照里带着每个项目的会话 id：把它对进本地副本。
+        // 两种方向都要：有会话就记下（宿主没重启也能立刻显示「已绑定」），
+        // 宿主说「这条项目没有对话」就把副本清掉——否则改绑之后，旧项目的入口还会
+        // 指着一条已经属于别的项目的会话，点进去就是「随意切换」。
+        // 老宿主的 projects[] 里没有 sessionId 这个键，那种情况副本才是唯一来源，不能清。
+        var sessionKey = snap && Array.isArray(snap.projects)          ? snap.projects.map(function (p) { return p.id + ':' + (p.sessionId === undefined ? '?' : (p.sessionId || '')); }).join(',')
+            + '|' + (snap.active ? snap.active.id + ':' + (snap.active.sessionId || '') : '')          : '';
+        useEffect(function () {
+          if (!snap) return;
+          var list = Array.isArray(snap.projects) ? snap.projects : [];
+          for (var i = 0; i < list.length; i += 1) {
+            var p = list[i];
+            if (!p || !p.id) continue;
+            if (Object.prototype.hasOwnProperty.call(p, 'sessionId')) SESSION_HINTS.set(p.id, p.sessionId || '');
+            else if (p.sessionId) SESSION_HINTS.set(p.id, p.sessionId);
+          }
+          if (snap.active && snap.active.sessionId) SESSION_HINTS.set(snap.active.id, snap.active.sessionId);
+        }, [sessionKey]);
         useEffect(function () {
           return function () {
             releaseRef();
           };
         }, []);
-
         useEffect(function () {
           if (timerRef.current) clearInterval(timerRef.current);
+          // 跑着的时候才轮询，而且 5 秒一次就够：每打一次 /state，宿主就要把整项目重算一遍，
+          // 跑脚本本身也在写产物——2.5 秒一次等于让宿主一直在算快照，反而拖慢脚本与面板。
           timerRef.current = setInterval(function () {
             if (running) void load(true);
-          }, 2500);
+          }, 5000);
           return function () {
             if (timerRef.current) clearInterval(timerRef.current);
           };
         }, [running, load]);
-
         var stages = (snap && snap.stages) || [];
         var current = useMemo(function () {
           for (var i = 0; i < stages.length; i += 1) if (stages[i].id === selected) return stages[i];
           return stages[0] || null;
         }, [stages, selected]);
-
         useEffect(function () {
           if (current) return;
           if (stages.length) setSelected(stages[0].id);
         }, [stages, current]);
-
         // 第一次拿到快照时，直接落在「该做的那一步」：已完成的不当前，未开始的不抢眼
         var landedRef = useRef(false);
         useEffect(function () {
@@ -2146,7 +2265,6 @@
           if (!target) target = stages[stages.length - 1];
           if (target) setSelected(target.id);
         }, [stages]);
-
         var refreshLog = useCallback(function (id) {
           if (!id) return;
           request('GET', '/run/log?id=' + encodeURIComponent(id) + '&limit=300')
@@ -2155,7 +2273,6 @@
             })
             .catch(function () {});
         }, []);
-
         useEffect(function () {
           if (!runId) return undefined;
           refreshLog(runId);
@@ -2164,20 +2281,26 @@
           var id = setInterval(function () { refreshLog(runId); }, 1500);
           return function () { clearInterval(id); };
         }, [runId, running, refreshLog]);
-
         // 运行中的日志滚到底：不然长脚本要每 2 秒手动往下拽
         useEffect(function () {
           var el = logRef.current;
           if (el && running) el.scrollTop = el.scrollHeight;
         }, [logData.lines, running]);
-
         var action = useCallback(function (path, body) {
           setBusy(true);
           setError('');
+          // 用户自己点开的项目：记下「这次是人的选择」，跟着对话走的那条逻辑不要再覆盖它
+          if (path === '/project/open' && body && body.dir) {
+            FOLLOW_SKIP = { chatId: CURRENT_CHAT.id, path: String(body.dir) };
+          }
+          // 主动关掉项目也是人的选择：否则一进面板就被「跟着对话」重新打开，关闭键等于失效
+          if (path === '/project/close') {
+            FOLLOW_SKIP = { chatId: CURRENT_CHAT.id, path: 'close' };
+          }
           return request('POST', path, body)
             .then(function (json) {
               if (json && json.ok) {
-                if (json.state) setSnap(json.state);
+                if (json.state) commitState(json.state);
                 else void load(true);
               } else {
                 setError((json && json.error) || t('actionFail'));
@@ -2193,7 +2316,6 @@
               return json;
             });
         }, [load]);
-
         var doRun = useCallback(function (stage) {
           action('/stage/run', { stageId: stage.id }).then(function (json) {
             if (json && json.ok && json.run) {
@@ -2202,18 +2324,16 @@
             }
           });
         }, [action]);
-
         var doCancel = useCallback(function (stage) {
           action('/stage/cancel', { stageId: stage.id });
         }, [action]);
-
         // 重新检查环境：只探测，不安装；结果同时刷新横幅与设置弹窗
         var doRecheck = useCallback(function () {
           setBusy(true);
           return request('POST', '/preflight/refresh', {})
             .then(function (json) {
               if (json && json.preflight) setPreflight(json.preflight);
-              if (json && json.state) setSnap(json.state);
+              if (json && json.state) commitState(json.state);
               if (!json || !json.ok) setError((json && json.error) || t('actionFail'));
               return json;
             })
@@ -2226,16 +2346,13 @@
               return json;
             });
         }, []);
-
         var doAdjudicate = useCallback(function (payload) {
           return action('/adjudicate', payload).then(function (json) {
             if (json && json.ok) setDialog(null);
             return json;
           });
         }, [action]);
-
         /* ---------------- 手稿骨架 ---------------- */
-
         var doScaffold = useCallback(function (overwrite) {
           // 请求发出时的项目：回来时已经切走就整条丢弃，别把 A 的结果写到 B 的卡片上
           var startKey = activeIdRef.current;
@@ -2255,14 +2372,10 @@
               var skipped = '';
               if (json.skippedNoPng) skipped += '；' + json.skippedNoPng + ' 张图缺 png（补齐后重排）';
               if (json.skippedBadStatus) {
-                skipped += '；' + json.skippedBadStatus + ' 张图在清单里是失败状态' +
-                  (json.skippedBadExample ? '（如 ' + json.skippedBadExample + '）' : '') + '（先重跑第 6 阶段）';
+                skipped += '；' + json.skippedBadStatus + ' 张图在清单里是失败状态' +                  (json.skippedBadExample ? '（如 ' + json.skippedBadExample + '）' : '') + '（先重跑第 7 阶段）';
               }
               setManNote(
-                '已生成 ' + json.file + '：' + json.blocks + ' 块（图 ' + json.figures + ' / 表 ' + json.tables + ' / 待补 ' + json.placeholders + '）' +
-                  skipped +
-                  (json.backup ? '；原文件已备份到 ' + json.backup : '') +
-                  (json.warning ? '。注意：' + json.warning : '')
+                '已生成 ' + json.file + '：' + json.blocks + ' 块（图 ' + json.figures + ' / 表 ' + json.tables + ' / 待补 ' + json.placeholders + '）' +                  skipped +                  (json.backup ? '；原文件已备份到 ' + json.backup : '') +                  (json.warning ? '。注意：' + json.warning : '')
               );
               return load(true).then(function () {
                 return json;
@@ -2277,7 +2390,6 @@
               return json;
             });
         }, [load]);
-
         var doAdopt = useCallback(function (overwrite) {
           var startKey = activeIdRef.current;
           setRegBusy(true);
@@ -2303,7 +2415,6 @@
               return json;
             });
         }, [load]);
-
         var doBrief = useCallback(function () {
           var startKey = activeIdRef.current;
           setManBusy('brief');
@@ -2319,7 +2430,7 @@
               var sid = snap && snap.active && snap.active.sessionId;
               return deliverText(json.text, dir, sid).then(function (result) {
                 if (activeIdRef.current !== startKey) return json;
-                if (result && result.state) setSnap(result.state);
+                if (result && result.state) commitState(result.state);
                 // 绑定失败是「没投出去」，不是成功提示：和投卡一样走红字
                 if (result && result.warning) setError(result.warning);
                 else setManNote('已把改稿说明投进研究对话');
@@ -2335,9 +2446,7 @@
               return json;
             });
         }, [snap, deliverText]);
-
         /* ---------------- 环境闸门 ---------------- */
-
         // 项目一换，开着的弹窗（拍板 / 补丁 / 草稿）指向的就都是旧项目了：
         // 直接关掉，别让它对着新项目把旧结论写进去。
         var activeIdRef = useRef('');
@@ -2351,7 +2460,6 @@
             setRegNote('');
           }
         }, [activeId]);
-
         // 让 AI 装环境：开临时会话投递安装提示词，然后把界面切过去
         var doAiInstall = useCallback(function () {
           setEnvNote('');
@@ -2371,7 +2479,6 @@
               return value;
             });
         }, [snap]);
-
         // 被环境挡住时每 12 秒强制复查一次：AI 那边装完，这里应该自己放行。
         // 用 refresh 而不是取缓存的 /preflight —— 否则最长要等 5 分钟缓存过期才看到变化。
         var envBlockedNow = envBlocked(preflight);
@@ -2398,9 +2505,7 @@
             clearInterval(timer);
           };
         }, [envBlockedNow]);
-
         /* ---------------- 研究对话 ---------------- */
-
         // 「让 AI 做这一步」：拿任务卡 → 复用/新建会话 → 投递 → 绑定 → 切到原生对话
         var doAskAI = useCallback(function (stage) {
           if (!snap || !snap.active || !stage) return;
@@ -2422,7 +2527,7 @@
           setChatError('');
           deliverCard(stage.id, snap.active.path, projectSession)
             .then(function (result) {
-              if (result && result.state) setSnap(result.state);
+              if (result && result.state) commitState(result.state);
               if (result && result.warning) setChatError(result.warning);
               CARD_LOG[snap.active.path] = { stageId: stage.id, key: key, at: Date.now() };
             })
@@ -2433,7 +2538,6 @@
               setBusy(false);
             });
         }, [snap, projectSession, chatRunning]);
-
         var reviewNow = useCallback(function () {
           var target = null;
           for (var i = 0; i < (snap?.stages || []).length; i += 1) {
@@ -2443,20 +2547,18 @@
           setSelected('recheck');
           doAskAI(target);
         }, [snap, doAskAI]);
-
         // 只打开对话，不投递：已有会话直接进；没有就先建一个空会话
         var doOpenChat = useCallback(function () {
           if (!snap || !snap.active) return;
           setBusy(true);
           setChatError('');
-          var existing = projectSession;
+          var existing = projectSession || projectChatId(snap.active);
           var idPromise = existing ? Promise.resolve(existing) : createSession(snap.active.path);
-          idPromise
-            .then(function (sessionId) {
+          idPromise            .then(function (sessionId) {
               return ensureRef(sessionId).then(function () {
                 if (existing) return null;
-                return persistSession(sessionId).then(function (json) {
-                  if (json.state) setSnap(json.state);
+                return persistSession(sessionId, snap.active.id).then(function (json) {
+                  if (json.state) commitState(json.state);
                 });
               }).then(function () {
                 openConversation(sessionId);
@@ -2469,7 +2571,6 @@
               setBusy(false);
             });
         }, [snap, projectSession]);
-
         // 绑定失效（会话被删）时：清掉旧 id，下一次重新建
         var doResetChat = useCallback(function () {
           setBusy(true);
@@ -2477,7 +2578,7 @@
           releaseRef();
           persistSession('')
             .then(function (json) {
-              if (json.state) setSnap(json.state);
+              if (json.state) commitState(json.state);
             })
             .catch(function (e) {
               setChatError(String((e && e.message) || e));
@@ -2486,9 +2587,68 @@
               setBusy(false);
             });
         }, []);
-
-        /* ---------------- 复核（第 9 阶段） ---------------- */
-
+        /**
+         * 左栏每一行的「研究对话」：点一下就直接进这个项目的 DSH 会话。
+         *
+         * 三步，顺序是用户要的，不是实现方便：
+         *   1. 不是当前项目 → 先切过去（会话绑定写的是当前项目，切不过去就会绑错项目）；
+         *   2. 已经绑过 → 直接 retain + 打开原生对话；
+         *   3. 没绑过（或会话已被删）→ 在项目目录里建一条，绑定，再进去。
+         * 会话服务不可用时如实报错，不假装进去。
+         */
+        var enterProjectChat = useCallback(function (project) {
+          if (!project || !project.path) return Promise.resolve(null);
+          if (project.exists === false) {
+            setChatError(t('projChatGoneHint'));
+            return Promise.resolve(null);
+          }
+          if (busy) return Promise.resolve(null);
+          setBusy(true);
+          setChatError('');
+          var isOn = Boolean(snap && snap.active && project.id === snap.active.id);
+          function fresh(target) {
+            var where = (target && target.path) || project.path;
+            return createSession(where).then(function (sessionId) {
+              // 绑定要指名项目：光「绑当前项目」在切项目竞态下会挂到错的那个上
+              return persistSession(sessionId, project.id).then(function (json) {
+                if (json.state) commitState(json.state);
+                SESSION_HINTS.set(project.id, sessionId);
+                openConversation(sessionId);
+                return sessionId;
+              });
+            });
+          }
+          var opened = isOn            ? Promise.resolve(snap && snap.active)            : request('POST', '/project/open', { dir: project.path }).then(function (json) {
+                if (!json || !json.ok) throw new Error((json && json.error) || '打开项目失败');
+                if (json.state) commitState(json.state);
+                // 打开失败时 active 还是旧项目：拿它去建会话会把会话挂到错的项目上
+                return json.state && json.state.active ? json.state.active : null;
+              });
+          return opened            .then(function (target) {
+              var bound = (target && target.sessionId) || SESSION_HINTS.get(project.id) || '';
+              if (bound) SESSION_HINTS.set(project.id, bound);
+              if (!bound) return fresh(target);
+              // 绑定过但那条会话已经没了：不把用户钉在「会话不存在」上，直接换一条新的
+              return ensureRef(bound)
+                .then(function () {
+                  openConversation(bound);
+                  return bound;
+                })
+                .catch(function () {
+                  SESSION_HINTS.set(project.id, '');
+                  return fresh(target);
+                });
+            })
+            .catch(function (e) {
+              setChatError(String((e && e.message) || e) || t('chatUnavailable'));
+              return null;
+            })
+            .then(function (value) {
+              setBusy(false);
+              return value;
+            });
+        }, [snap, busy]);
+        /* ---------------- 复核（第 10 阶段） ---------------- */
         // 只有选中复核阶段才拉：12 项检查 + 问题清单不该跟着 /state 每 8 秒轮询
         var recheckState = useState(null);
         var recheck = recheckState[0];
@@ -2499,7 +2659,42 @@
         var noticeState = useState('');
         var notice = noticeState[0];
         var setNotice = noticeState[1];
-
+        /* ---------------- 面板跟着对话走 ----------------
+         *
+         * 用户要的是「互相关联，不能随意切换」：进工作台时看到的应该是「我刚在聊的那个项目」，
+         * 而不是「上次顺手点开的那个」。所以每条对话只跟一次——切过去之后，用户在面板里
+         * 手动点别的项目就是他的选择，面板不会再把他拽回来（那就是「随意切换」）。
+         */
+        var followedRef = useRef('');
+        useEffect(function () {
+          if (!snap) return;
+          // 这一帧是「上次的快照」：只用来占位，不能据此切项目。新快照到了再决定跟不跟。
+          if (fromCache) return;
+          var focus = snap.focus;
+          if (!focus || !focus.sessionId || !focus.projectId) return;
+          // 换了一条对话 = 新的意图：上一条对话那次「别跟过来」不再适用于这一条
+          if (LAST_FOCUS_CHAT && LAST_FOCUS_CHAT !== focus.sessionId) {
+            FOLLOW_SKIP.chatId = '';
+            FOLLOW_SKIP.path = '';
+          }
+          LAST_FOCUS_CHAT = focus.sessionId;
+          // 记住的是「哪条对话 → 哪个项目」：对话在别处被改绑到另一个项目后，这里还要跟一次
+          var key = focus.sessionId + '|' + focus.projectId;
+          if (followedRef.current === key) return;
+          followedRef.current = key;
+          // 用户已经在工作台里自己点开过项目：那是浏览，不动他的选择
+          if (FOLLOW_SKIP.chatId && FOLLOW_SKIP.chatId === focus.sessionId) return;
+          if (snap.active && snap.active.id === focus.projectId) return;
+          request('POST', '/project/open', { dir: focus.projectPath })
+            .then(function (json) {
+              if (!json || !json.ok) return null;
+              if (json.state) commitState(json.state);
+              return null;
+            })
+            .catch(function () {
+              // 跟不过去（目录没了/宿主忙）就停在原项目，不用一条红字打断当前工作
+            });
+        }, [snap]);
         var loadRecheck = useCallback(function () {
           if (!snap || !snap.active) return Promise.resolve(null);
           return request('GET', '/recheck')
@@ -2517,7 +2712,6 @@
               return null;
             });
         }, [snap && snap.active ? snap.active.id : '']);
-
         useEffect(function () {
           if (selected !== 'recheck') return undefined;
           void loadRecheck();
@@ -2525,7 +2719,6 @@
           var timer = setInterval(function () { void loadRecheck(); }, 5000);
           return function () { clearInterval(timer); };
         }, [selected, snap && snap.active ? snap.active.id : '']);
-
         var doIssue = function (id, status) {
           action('/recheck/issue', { id: id, status: status }).then(function (json) {
             if (json && json.ok) void loadRecheck();
@@ -2536,9 +2729,7 @@
           action('/recheck/apply', { id: id, advance: true }).then(function (json) {
             if (json && json.ok) {
               setDialog(null);
-              setNotice(json.chain
-                ? '补丁已应用，开始重跑：' + json.chain.steps.join(' → ')
-                : (json.note || '补丁已应用'));
+              setNotice(json.chain                ? '补丁已应用，开始重跑：' + json.chain.steps.join(' → ')                : (json.note || '补丁已应用'));
               void loadRecheck();
             }
           });
@@ -2548,9 +2739,19 @@
             if (json && json.ok) void loadRecheck();
           });
         };
-
+        // 人工步骤停下后的续跑：先不带 force 试一次，被前置闸门拦住时再问人。
+        var doResumeChain = function (force) {
+          return action('/recheck/resume-chain', { force: Boolean(force) }).then(function (json) {
+            if (json && json.ok) {
+              void loadRecheck();
+              return;
+            }
+            var reason = (json && json.error) || '续跑失败';
+            setNotice((force ? '仍然没跑起来：' : '停在人工步骤：') + reason + (force ? '' : '（确认要跳过前置闸门时点「跳过闸门继续」）'));
+            void loadRecheck();
+          });
+        };
         /* ---------------- 顶栏 ---------------- */
-
         var header = h(
           'div',
           { className: 'dsa-top' },
@@ -2562,14 +2763,11 @@
               'div',
               { className: 'dsa-brand-tx' },
               h('b', null, t('title')),
-              snap && snap.active
-                ? h('span', { title: snap.active.path }, snap.active.name || snap.active.path)
-                : h('span', null, t('subtitle'))
+              snap && snap.active                ? h('span', { title: snap.active.path }, snap.active.name || snap.active.path)                : h('span', null, t('subtitle'))
             )
           ),
           // 窄屏没有左侧阶段栏，用下拉补一个入口；宽屏由 CSS 隐藏
-          stages.length
-            ? h(
+          stages.length            ? h(
                 'select',
                 {
                   className: 'dsa-stage-select',
@@ -2580,21 +2778,48 @@
                 stages.map(function (stage) {
                   return h('option', { key: stage.id, value: stage.id }, String(stage.index) + '. ' + stage.name);
                 })
-              )
-            : null,
+              )            : null,
           h('span', { className: 'dsa-spacer' }),
-          snap && snap.active && snap.active.skillDrift
-            ? h(Chip, { tone: 'warn', title: t('skillDrift') }, '⚠ SKILL.md 指纹不一致')
-            : null,
-          snap && snap.skill && snap.skill.ok
-            ? h(Chip, { tone: 'ok', title: snap.skill.packageDir }, t('skillOk') + ' · ' + (snap.skill.version || '?'))
-            : h(Chip, { tone: 'err', title: snap && snap.skill ? snap.skill.reason : '' }, t('skillMissing')),
+          snap && snap.active && snap.active.skillDrift            ? h(Chip, { tone: 'warn', title: t('skillDrift') }, '⚠ SKILL.md 指纹不一致')            : null,
+          // 快照还没回来时别急着说「技能包未就位」：那只是默认值，会把「正在读」说成「坏了」。
+          !snap            ? h(Chip, { tone: 'quiet', title: '正在读取工作台状态（含环境自检结果）' }, '环境检查中…')            : snap.skill && snap.skill.ok              ? h(Chip, { tone: 'ok', title: snap.skill.packageDir }, t('skillOk') + ' · ' + (snap.skill.version || '?'))              : h(Chip, { tone: 'err', title: snap.skill ? snap.skill.reason : '' }, t('skillMissing')),
           h(AiMenu, {
             busy: busy,
             onDraft: function () { setDialog({ kind: 'draft' }); },
             onChat: current ? function () { doAskAI(current); } : null,
-            onReview: reviewNow
-          }),
+            onReview: reviewNow          }),
+          // 研究对话常驻顶栏：窄屏整块左栏是隐藏的，项目行里那条入口就看不见了；
+          // 宽屏也省得为了进对话先去开「运行台」抽屉。
+          snap && snap.active            ? h(
+                Btn,
+                {
+                  className: 'dsa-settings-btn',
+                  variant: 'ghost',
+                  title: t('headerChatHint') + (projectSession ? '（' + projectSession + '）' : ''),
+                  onClick: function () { void doOpenChat(); }
+                },
+                h('span', { className: 'dsa-ico', 'aria-hidden': 'true' }, '💬'),
+                h('span', { className: 'dsa-settings-label' }, t('headerChat')),
+                h('span', {
+                  className: 'dsa-chat-dot ' + (projectSession ? (chatRunning ? 'run' : 'ok') : ''),
+                  'aria-hidden': 'true'                })
+              )            : null,
+          // 这条对话属不属于现在这个项目：一眼能看出来，不靠记忆。
+          // 不属于时给一个「切过去」的入口——但绝不自动改绑（改绑是工具或用户的事）。
+          // 只在宽屏出现：≤1240 时顶栏已经很挤（品牌标会被压扁），而左栏那行本来就标着「当前对话」。
+          snap && snap.active && snap.focus && snap.focus.sessionId && snap.focus.projectId            ? snap.focus.projectId === snap.active.id              ? h('span', { className: 'dsa-chat-link' }, h(Chip, { tone: 'ok', title: '本对话关联的就是当前项目（' + (snap.active.name || snap.active.path) + '）' }, '本对话'))              : h(
+                  Btn,
+                  {
+                    className: 'dsa-settings-btn dsa-chat-link',
+                    variant: 'ghost',
+                    title: '这条对话关联的是「' + (snap.focus.projectName || snap.focus.projectPath) + '」，点一下切过去',
+                    onClick: function () {
+                      if (snap.focus.projectPath) action('/project/open', { dir: snap.focus.projectPath });
+                    }
+                  },
+                  h('span', { className: 'dsa-ico', 'aria-hidden': 'true' }, '⇄'),
+                  h('span', { className: 'dsa-settings-label' }, '对话在「' + (snap.focus.projectName || '另一个项目') + '」')
+                )            : null,
           // 材料库是「给项目喂资料」的主入口，不该藏在项目菜单里：和设置一样常驻顶栏。
           h(
             Btn,
@@ -2608,8 +2833,7 @@
             h('span', { className: 'dsa-settings-label' }, '材料')
           ),
           // 产物中心：图、表、docx 都在 output/ 里，以前面板一个都打不开
-          snap && snap.active
-            ? h(
+          snap && snap.active            ? h(
                 Btn,
                 {
                   className: 'dsa-settings-btn',
@@ -2619,8 +2843,7 @@
                 },
                 h('span', { className: 'dsa-ico', 'aria-hidden': 'true' }, '▦'),
                 h('span', { className: 'dsa-settings-label' }, '产物')
-              )
-            : null,
+              )            : null,
           // 设置是「配置入口」，不是项目动作：常驻在顶栏右上角，别塞进「项目」菜单里让人翻。
           // 窄屏只留图标（标题与无障碍名仍在），不给顶栏添负担。
           h(
@@ -2648,9 +2871,48 @@
           h(Btn, { className: 'dsa-drawer-toggle', variant: 'ghost', onClick: function () { setDrawer(!drawer); } }, t('drawer')),
           h(Btn, { disabled: loading, onClick: function () { void load(false); } }, loading ? t('refreshing') : t('refresh'))
         );
-
+        /* ---------------- 首屏骨架 ---------------- */
+        // 还没有快照、又正在读：此刻并不知道有没有项目，不能先画「从一个资料目录开始」——
+        // 那会让「等数据」看起来像「重进是个空工作台」。骨架沿用真实的三栏布局，
+        // 数据回来时位置不变，只有内容从灰条换成真东西。
+        if (!snap && loading) {
+          var skBar = function (w, extra) {
+            return h('span', { className: 'dsa-sk-bar' + (extra ? ' ' + extra : ''), style: w ? { width: w } : undefined });
+          };
+          var skRows = function (n, widths) {
+            var out = [];
+            for (var i = 0; i < n; i += 1) {
+              out.push(h('div', { key: i, className: 'dsa-sk-row' }, skBar(widths[i % widths.length])));
+            }
+            return out;
+          };
+          return h(
+            'div',
+            { className: 'dsa-root', 'data-dsa-width': width, 'data-dsa-theme': theme },
+            header,
+            // 读屏用户听得到进度；视觉上靠灰条脉冲
+            h('div', { className: 'dsa-sr-only', role: 'status', 'aria-live': 'polite' }, '正在读取工作台状态…'),
+            h(
+              'div',
+              { className: 'dsa-body dsa-skeleton', 'aria-busy': 'true' },
+              h(
+                'div',
+                { className: 'dsa-rail' },
+                h('div', { className: 'dsa-rail-sec' }, h('div', { className: 'dsa-rail-h' }, '项目'), skRows(2, ['86%', '64%'])),
+                h('div', { className: 'dsa-rail-sec' }, h('div', { className: 'dsa-rail-h' }, '阶段'), skRows(8, ['78%', '92%', '58%']))
+              ),
+              h(
+                'div',
+                { className: 'dsa-main' },
+                h('div', { className: 'dsa-sk-hero' }, skBar('38%', 'tall'), skBar('66%')),
+                h('div', { className: 'dsa-sk-kpis' }, h('div', { className: 'dsa-sk-card' }), h('div', { className: 'dsa-sk-card' }), h('div', { className: 'dsa-sk-card' })),
+                h('div', { className: 'dsa-sk-block' }, skRows(6, ['88%', '96%', '72%']))
+              ),
+              h('div', { className: 'dsa-side' }, h('div', { className: 'dsa-sk-block' }, skRows(6, ['84%', '60%', '92%'])))
+            )
+          );
+        }
         /* ---------------- 无项目 ---------------- */
-
         if (!snap || !snap.active) {
           var picker = h(
             'div',
@@ -2671,8 +2933,7 @@
               h(
                 'div',
                 { className: 'dsa-hint', style: { margin: '0 0 14px' } },
-                '你会得到：可审计的语料清单 · 分析宽表与统计表 · 600 dpi 图表包 · 成稿 docx · 机器质检报告。'
-              ),
+                '你会得到：可审计的语料清单 · 分析宽表与统计表 · 600 dpi 图表包 · 成稿 docx · 机器质检报告。'              ),
               error ? h('div', { className: 'dsa-error', role: 'alert', style: { margin: '0 0 12px' } }, error) : null,
               h(
                 'div',
@@ -2683,8 +2944,7 @@
                   h(Btn, { variant: 'primary', onClick: function () { setDialog({ kind: 'create' }); } }, t('create')),
                   h(Btn, { onClick: function () { setDialog({ kind: 'open' }); } }, t('open'))
                 ),
-                snap && snap.projects && snap.projects.length
-                  ? h(
+                snap && snap.projects && snap.projects.length                  ? h(
                       'div',
                       null,
                       h('div', { className: 'dsa-hint', style: { marginTop: '8px' } }, '最近项目'),
@@ -2714,13 +2974,10 @@
                               title: '从列表移除（不删磁盘文件）',
                               onClick: function () { setDialog({ kind: 'forget', project: p }); }
                             },
-                            '移除'
-                          )
+                            '移除'                          )
                         );
                       })
-                    )
-                  : null
-              )
+                    )                  : null              )
             )
           );
           return h(
@@ -2728,22 +2985,14 @@
             { className: 'dsa-root' },
             header,
             picker,
-            dialog ? renderDialog(dialog) : null
-          );
+            dialog ? renderDialog(dialog) : null          );
         }
-
         /* ---------------- 阶段栏 ---------------- */
-
         var mat = (snap && snap.materials) || { sources: [], mounts: [], derived: [] };
         var matMounts = mat.mounts || [];
         var matBad = matMounts.filter(function (item) { return item.status !== 'ok'; }).length;
         // 副标题要能塞进 52% 宽的 pill：挂载条数是用户要看的数，材料源个数只在不止一个时才提
-        var matMeta = matBad
-          ? '⚠ ' + matBad + ' 条失效'
-          : matMounts.length
-            ? matMounts.length + ' 条挂载' + ((mat.sources || []).length > 1 ? ' · ' + (mat.sources || []).length + ' 源' : '')
-            : '未挂载（点开管理）';
-
+        var matMeta = matBad          ? '⚠ ' + matBad + ' 条失效'          : matMounts.length            ? matMounts.length + ' 条挂载' + ((mat.sources || []).length > 1 ? ' · ' + (mat.sources || []).length + ' 源' : '')            : '未挂载（点开管理）';
         var railProjects = (snap && snap.projects) || [];
         var rail = h(
           'div',
@@ -2766,6 +3015,14 @@
               railProjects.map(function (p) {
                 var on = snap && snap.active && p.id === snap.active.id;
                 var label = p.name || p.path;
+                // 这个项目那条 DSH 会话：当前项目以 active.sessionId 为准，其余项目看台账/本地副本
+                var chatId = projectChatId(p) || (on && snap.active ? snap.active.sessionId || '' : '');
+                var chatBusy = Boolean(on && chatRunning);
+                // 现在屏幕上那条对话是哪个项目的：它那一行的入口标成「当前对话」，
+                // 不用去猜「我上次聊的是哪个项目」。
+                // 宿主还是旧进程（快照里没有 focus）时退回本地的 CURRENT_CHAT。
+                var focusSessionId = (snap && snap.focus && snap.focus.sessionId) || CURRENT_CHAT.id || '';
+                var isCurrentChat = Boolean(chatId && focusSessionId && chatId === focusSessionId);
                 // 行主体和「移除」是两个并列按钮：button 不能套 button，
                 // 套进去浏览器会把内层按钮踢出 DOM，移除键就永远点不到。
                 return h(
@@ -2794,6 +3051,32 @@
                     ),
                     h('span', { className: 'dsa-proj-path' }, p.exists === false ? p.path + ' · 目录不见了' : p.path)
                   ),
+                  // 项目 = 目录 + 它的研究对话。这条常驻显示（不靠 hover 才出现）：
+                  // 用户来看项目列表，就是为了点进那条会话接着聊。
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className:
+                        'dsa-proj-chat' +                        (chatId ? ' bound' : '') +                        (isCurrentChat ? ' current' : '') +                        (chatBusy ? ' run' : '') +                        (p.exists === false ? ' gone' : ''),
+                      disabled: p.exists === false,
+                      title:
+                        p.exists === false                          ? t('projChatGoneHint')                          : isCurrentChat                            ? t('projChatCurrentHint').replace('{id}', chatId)                            : chatId                              ? t('projChatBoundHint').replace('{id}', chatId)                              : t('projChatNewHint'),
+                      'aria-label': t('projChat') + '：' + label,
+                      onClick: function (e) {
+                        if (e && e.stopPropagation) e.stopPropagation();
+                        void enterProjectChat(p);
+                      }
+                    },
+                    h('span', { className: 'dsa-chat-dot ' + (chatId ? (chatBusy ? 'run' : 'ok') : '') }),
+                    h('span', { className: 'dsa-proj-chat-tx' }, t('projChat')),
+                    h(
+                      'span',
+                      { className: 'dsa-proj-chat-state' },
+                      p.exists === false                        ? t('projChatDirGone')                        : chatId                          ? chatBusy                            ? t('projChatRunning')                            : isCurrentChat                              ? t('projChatCurrent')                              : t('projChatBound')                          : t('projChatNew')
+                    ),
+                    h('span', { className: 'dsa-proj-chat-go', 'aria-hidden': 'true' }, '→')
+                  ),
                   h(
                     'button',
                     {
@@ -2806,8 +3089,7 @@
                         setDialog({ kind: 'forget', project: p });
                       }
                     },
-                    '×'
-                  )
+                    '×'                  )
                 );
               })
             ),
@@ -2839,8 +3121,7 @@
                 'div',
                 { className: 'dsa-stage-name' },
                 h('span', { className: 'dot ' + (matBad ? 'fail' : matMounts.length ? 'pass' : '') }),
-                '材料库'
-              ),
+                '材料库'              ),
               h('div', { className: 'dsa-stage-meta' }, matMeta)
             )
           ),
@@ -2864,18 +3145,15 @@
                   'div',
                   { className: 'dsa-stage-name' },
                   h('span', { className: 'dot ' + dotClass }),
-                  stage.name
-                ),
+                  stage.name                ),
                 h('div', { className: 'dsa-stage-meta' }, stageWord(stage))
               )
             );
             })
           )
         );
-
         /* ---------------- 闸门 ---------------- */
-
-        var gateRank = { fail: 0, manual: 1, todo: 2, unjudged: 2, pass: 9 };
+        var gateRank = { fail: 0, manual: 1, todo: 2, unjudged: 2, na: 8, pass: 9 };
         var orderedGates = (current.gates || []).slice().sort(function (a, b) {
           return gateRank[gateFace(a, current.status).cls] - gateRank[gateFace(b, current.status).cls];
         });
@@ -2886,29 +3164,32 @@
             key: gate.id,
             gate: gate,
             stageStatus: current.status,
+            stageId: current.id,
             onAdjudicate: function (target) { setDialog({ kind: 'adjudicate', stage: current, gate: target }); }
           });
         };
         var gateList = h(
           'div',
           { className: 'dsa-card' },
-          openGates.length
-            ? openGates.map(gateRowOf)
-            : passedGates.length
-              ? null
-              : h('div', { className: 'dsa-empty' }, '本阶段还没有可判的闸门'),
-          passedGates.length
-            ? h(
+          openGates.length            ? openGates.map(gateRowOf)            : passedGates.length              ? null              : h('div', { className: 'dsa-empty' }, '本阶段还没有可判的闸门'),
+          passedGates.length            ? h(
                 'details',
                 { className: 'dsa-fold' },
                 h('summary', null, '已通过 ' + passedGates.length + ' 项'),
                 passedGates.map(gateRowOf)
-              )
-            : null
-        );
-
-        /* ---------------- 复核区（第 9 阶段） ---------------- */
-
+              )            : null        );
+        gateList = h('div',null,
+          h('div',{className:'dsa-inline',style:{gap:'8px',flexWrap:'wrap',marginBottom:'8px'}},
+            h('span',{className:'dsa-hint'},'判定来源：'+({legacy:'旧版核验',shadow:'影子验证',compare:'并列验证',skill:'技能体检'}[snap.gateMode||'legacy'])),
+            h(Btn,{variant:'ghost',disabled:busy||Boolean(snap.gateChecking)||Boolean(snap.gateRecoveryNeeded),onClick:function(){action('/gates/control',{action:snap.gateMode&&snap.gateMode!=='legacy'?'inspect':'init'});}},snap.gateChecking?'体检中…':busy?'处理中…':snap.gateMode&&snap.gateMode!=='legacy'?'重新体检':'配置技能体检'),
+            snap.gateChecking?h(Btn,{variant:'ghost',onClick:function(){action('/stage/cancel',{stageId:snap.gateChecking.stageId||current.id});}},'停止体检'):null,
+            snap.gateRecoveryNeeded?h(Btn,{variant:'ghost',disabled:busy,onClick:function(){action('/gates/control',{action:'recover'});}},'恢复中断体检'):null,
+            snap.gateMode==='compare'?h(Btn,{variant:'ghost',disabled:busy,onClick:function(){action('/gates/control',{action:'migrate',mode:'skill'});}},'使用技能判定'):null),
+          gateList,
+          current.gateComparison&&current.gateComparison.length?h('details',{className:'dsa-fold'},
+            h('summary',null,'技能体检对照 '+current.gateComparison.length+' 项'),
+            current.gateComparison.map(gateRowOf)):null);
+        /* ---------------- 复核区（第 10 阶段） ---------------- */
         var recheckView = null;
         if (current && current.id === 'recheck') {
           var rc = recheck || { checks: [], issues: [], coverage: {}, chain: null, openErrors: 0, openOthers: 0 };
@@ -2927,34 +3208,45 @@
               h(Btn, { variant: 'ghost', disabled: busy, onClick: function () { void loadRecheck(); } }, t('refresh')),
               h('span', { className: 'dsa-hint' }, 'open error ' + String(rc.openErrors || 0) + ' · 其他 ' + String(rc.openOthers || 0))
             ),
-            chain
-              ? h(
+            chain              ? h(
                   'div',
                   { className: 'dsa-card dsa-pad', style: { marginBottom: '10px' } },
                   h(
                     'div',
                     { className: 'dsa-inline', style: { justifyContent: 'space-between' } },
                     h('b', { style: { fontSize: '12px' } }, '重跑链 · ' + t(CHAIN_STATUS[chain.status] || 'chainRunning')),
-                    chain.status === 'running'
-                      ? h(Btn, { variant: 'ghost', disabled: busy, onClick: doCancelChain }, '取消重跑')
-                      : null
+                    chain.status === 'running'                      ? h(Btn, { variant: 'ghost', disabled: busy, onClick: doCancelChain }, '取消重跑')                      : chain.status === 'waiting'                        ? h(
+                            'div',
+                            { className: 'dsa-inline', style: { gap: '6px' } },
+                            h(Btn, { variant: 'ghost', disabled: busy, onClick: function () { void doResumeChain(false); } }, '继续重跑'),
+                            h(Btn, { variant: 'ghost', disabled: busy, onClick: doCancelChain }, '取消重跑')
+                          )                        : h(Btn, { variant: 'ghost', disabled: busy, onClick: function () { void doResumeChain(false); } }, '继续重跑')
                   ),
                   h(
                     'div',
                     { className: 'dsa-hint dsa-mono', style: { marginTop: '4px' } },
-                    chain.steps.length
-                      ? chain.steps
-                          .map(function (s, i) {
+                    chain.steps.length                      ? chain.steps                          .map(function (s, i) {
                             var mark = i < chain.index ? '✓' : i === chain.index && chain.status === 'running' ? '▶' : '·';
                             return mark + ' ' + (i + 1) + '/' + chain.steps.length + ' ' + s;
                           })
-                          .join('   ')
-                      : t('chainNoSteps')
+                          .join('   ')                      : t('chainNoSteps')
                   ),
                   chain.note ? h('div', { className: 'dsa-hint', style: { marginTop: '3px' } }, chain.note) : null,
-                  chain.error ? h('div', { className: 'dsa-error', style: { fontSize: '11px', marginTop: '4px' } }, chain.error) : null
-                )
-              : null,
+                  chain.status === 'waiting' && Array.isArray(chain.blockers) && chain.blockers.length                    ? h(
+                        'div',
+                        { className: 'dsa-hint', style: { marginTop: '4px' } },
+                        '前置未过：' + chain.blockers.join('；'),
+                        h(
+                          Btn,
+                          {
+                            variant: 'ghost',
+                            disabled: busy,
+                            style: { marginLeft: '6px' },
+                            onClick: function () { void doResumeChain(true); }
+                          },
+                          '跳过闸门继续'                        )
+                      )                    : null,
+                  chain.error ? h('div', { className: 'dsa-error', style: { fontSize: '11px', marginTop: '4px' } }, chain.error) : null                )              : null,
             notice ? h('div', { className: 'dsa-hint', style: { marginBottom: '8px' } }, notice) : null,
             recheckError ? h('div', { className: 'dsa-error', style: { marginBottom: '8px' } }, recheckError) : null,
             h(
@@ -2964,8 +3256,7 @@
               h(
                 'span',
                 { className: 'count' },
-                String((rc.checks || []).length) + ' 项 · ' + String(rc.openErrors || 0) + ' error / ' + String(rc.openOthers || 0) + ' 其他'
-              )
+                String((rc.checks || []).length) + ' 项 · ' + String(rc.openErrors || 0) + ' error / ' + String(rc.openOthers || 0) + ' 其他'              )
             ),
             h(
               'div',
@@ -2975,29 +3266,24 @@
                   'div',
                   {
                     key: c.id,
-                    className: 'dsa-gate ' + (c.status === 'pass' ? 'pass' : c.status === 'fail' ? 'fail' : 'unjudged')
-                  },
+                    className: 'dsa-gate ' + gateFace(c, current.status).cls                  },
                   h('span', { className: 'mark' }, c.status === 'pass' ? '✓' : c.status === 'fail' ? '✗' : '?'),
                   h(
                     'div',
                     { className: 'dsa-gate-body' },
                     h('div', { className: 'dsa-gate-label' }, c.id + ' · ' + c.label),
                     h('div', { className: 'dsa-gate-detail' }, c.detail || ''),
-                    c.evidence
-                      ? h(
+                    c.evidence                      ? h(
                           'details',
                           { className: 'dsa-fold-sub', style: { marginTop: '4px' } },
                           h('summary', null, '证据'),
                           h('pre', { className: 'dsa-code', style: { marginTop: '4px', whiteSpace: 'pre-wrap' } }, String(c.evidence))
-                        )
-                      : null
-                  )
+                        )                      : null                  )
                 );
               })
             ),
             h('div', { className: 'dsa-section' }, h('h3', null, '问题清单'), h('span', { className: 'count' }, String((rc.issues || []).length) + ' 条')),
-            (rc.issues || []).length
-              ? (rc.issues || []).map(function (issue) {
+            (rc.issues || []).length              ? (rc.issues || []).map(function (issue) {
                   return h(
                     'div',
                     { key: issue.id, className: 'dsa-card dsa-pad', style: { marginBottom: '8px' } },
@@ -3018,24 +3304,18 @@
                     h(
                       'div',
                       { className: 'dsa-inline', style: { marginTop: '6px' } },
-                      issue.patch
-                        ? h(Btn, { variant: 'primary', disabled: busy, onClick: function () { setDialog({ kind: 'patch', issue: issue }); } }, '查看补丁并套用')
-                        : null,
-                      issue.status === 'open'
-                        ? h(Btn, { disabled: busy, onClick: function () { doIssue(issue.id, 'fixed'); } }, '标记已修')
-                        : h(Btn, { disabled: busy, onClick: function () { doIssue(issue.id, 'open'); } }, '重新打开'),
+                      issue.patch                        ? h(Btn, { variant: 'primary', disabled: busy, onClick: function () { setDialog({ kind: 'patch', issue: issue }); } }, '查看补丁并套用')                        : null,
+                      issue.status === 'open'                        ? h(Btn, { disabled: busy, onClick: function () { doIssue(issue.id, 'fixed'); } }, '标记已修')                        : h(Btn, { disabled: busy, onClick: function () { doIssue(issue.id, 'open'); } }, '重新打开'),
                       h(Btn, { variant: 'ghost', disabled: busy, onClick: function () { doIssue(issue.id, 'wontfix'); } }, '不修')
                     )
                   );
-                })
-              : h(
+                })              : h(
                   'div',
                   { className: 'dsa-card dsa-pad' },
                   h('div', { className: 'dsa-hint', style: { marginBottom: '6px' } }, '还没有 issues.jsonl：让 AI 按证据包写问题，或手动用 data_analysis_issue 记录。'),
                   h(Btn, { variant: 'primary', disabled: busy, onClick: function () { doAskAI(current); } }, t('aiReview'))
                 ),
-            coverageKeys.length
-              ? h(
+            coverageKeys.length              ? h(
                   'div',
                   null,
                   h('div', { className: 'dsa-section' }, h('h3', null, t('coverageTitle')), h('span', { className: 'count' }, 'R1–R12')),
@@ -3062,16 +3342,11 @@
                       )
                     )
                   )
-                )
-              : null
-          );
+                )              : null          );
         }
-
         /* ---------------- 产物 ---------------- */
-
         var artifacts = snap.artifacts || {};
         var artifactBlocks = [];
-
         // 产物按阶段归属：审计看审计链、编码看编码链，别把全项目的东西堆到每个阶段
         var flowChains = (artifacts.flow || []).filter(function (chain) {
           if (current.id === 'audit') return chain.file.indexOf('output/audit/') === 0;
@@ -3104,8 +3379,7 @@
                         {
                           key: step.stage + idx,
                           className: 'dsa-flow-step' + (bad ? ' bad' : ''),
-                          title: step.note || undefined
-                        },
+                          title: step.note || undefined                        },
                         h('div', { className: 's' }, step.stage),
                         h('div', { className: 'n' }, String(step.n))
                       );
@@ -3116,7 +3390,6 @@
             )
           );
         }
-
         if (artifacts.figures && artifacts.figures.total && current.id === 'figures') {
           var figRows = artifacts.figures.rows || [];
           var figSum = artifacts.figures.summary || {};
@@ -3138,9 +3411,7 @@
                 h('span', { className: 'dsa-badge fail' }, '✗ ' + t('figFail') + ' ' + (figSum.fail || 0)),
                 h('span', { className: 'dsa-badge unjudged' }, '? ' + t('figUnjudged') + ' ' + (figSum.unjudged || 0))
               ),
-              figSum.fontUnjudged
-                ? h('div', { className: 'dsa-hint', style: { marginBottom: '7px' } }, t('figFontNote') + ' 本次 ' + figSum.fontUnjudged + ' 张缺 min_fontsize。')
-                : null,
+              figSum.fontUnjudged                ? h('div', { className: 'dsa-hint', style: { marginBottom: '7px' } }, t('figFontNote') + ' 本次 ' + figSum.fontUnjudged + ' 张缺 min_fontsize。')                : null,
               h(
                 'div',
                 { className: 'dsa-card', style: { overflow: 'auto' } },
@@ -3190,17 +3461,13 @@
                   )
                 )
               ),
-              figRows.length > 10
-                ? h(
+              figRows.length > 10                ? h(
                     'div',
                     { style: { marginTop: '6px' } },
                     h(Btn, { variant: 'ghost', onClick: function () { setFigsOpen(!figsOpen); } }, figsOpen ? t('collapse') : t('showAll') + ' · ' + figRows.length + ' 张')
-                  )
-                : null
-            )
+                  )                : null            )
           );
         }
-
         if (artifacts.models && artifacts.models.length && current.id === 'stats') {
           artifactBlocks.push(
             h(
@@ -3222,18 +3489,13 @@
                     )
                   );
                 }),
-                artifacts.flowChecks && artifacts.flowChecks.length
-                  ? h(
+                artifacts.flowChecks && artifacts.flowChecks.length                  ? h(
                       'div',
                       { className: 'dsa-hint', style: { marginTop: '6px' } },
-                      'flow_checks：' + artifacts.flowChecks.filter(function (c) { return c && c.match === false; }).length + ' 项不一致'
-                    )
-                  : null
-              )
+                      'flow_checks：' + artifacts.flowChecks.filter(function (c) { return c && c.match === false; }).length + ' 项不一致'                    )                  : null              )
             )
           );
         }
-
         if (artifacts.verify && current.id === 'qa') {
           var counts = artifacts.verify.counts || {};
           var issues = artifacts.verify.issues || [];
@@ -3251,12 +3513,22 @@
                   h('span', null, h('b', { style: { color: 'var(--dsa-err)' } }, String(counts.error || 0)), ' error'),
                   h('span', null, h('b', { style: { color: 'var(--dsa-warn)' } }, String(counts.warning || 0)), ' warning'),
                   h('span', null, h('b', null, String(counts.info || 0)), ' info'),
-                  counts.deferred
-                    ? h('span', { title: 'V-05 用 n_dropna 当 N，需按 fit.n 复核；不并入 error' }, h('b', { style: { color: 'var(--dsa-ink3)' } }, String(counts.deferred)), ' V-05 待复核')
-                    : null
-                ),
-                issues.length
-                  ? h(
+                  counts.v05Error                    ? h(
+                        'span',
+                        { title: 'V-05：同一 n_scope 的模型 N 不一致。以 fit.csv / coef 的 n 为实际估计 N，n_dropna 是缺失剔除行数、不参与比较；差异需回查样本范围，不能改数字消警' },
+                        h('b', { style: { color: 'var(--dsa-ink3)' } }, String(counts.v05Error)),
+                        ' V-05 差异'                      )                    : null,
+                  counts.v05Unverifiable                    ? h(
+                        'span',
+                        { title: 'V-05：缺 n 或只有 n_dropna，无法核对；补实际估计样本 n 后重跑' },
+                        h('b', { style: { color: 'var(--dsa-ink3)' } }, String(counts.v05Unverifiable)),
+                        ' V-05 无法核对'                      )                    : null,
+                  counts.deferred                    ? h(
+                        'span',
+                        { title: 'verify_numbers 早于 1.0.1：旧版把 n_dropna 当 N，这次 V-05 结果不可信，用修复版重跑' },
+                        h('b', { style: { color: 'var(--dsa-ink3)' } }, String(counts.deferred)),
+                        ' V-05 旧版待重跑'                      )                    : null                ),
+                issues.length                  ? h(
                       'div',
                       { style: { marginTop: '8px' } },
                       issues.map(function (row, idx) {
@@ -3274,13 +3546,11 @@
                           )
                         );
                       })
-                    )
-                  : h('div', { className: 'dsa-hint', style: { marginTop: '6px' } }, '没有可展示的明细行（报告只有计数）')
+                    )                  : h('div', { className: 'dsa-hint', style: { marginTop: '6px' } }, '没有可展示的明细行（报告只有计数）')
               )
             )
           );
         }
-
         if (artifacts.analysis && current.id === 'dataset') {
           var a = artifacts.analysis;
           artifactBlocks.push(
@@ -3296,17 +3566,13 @@
                   { className: 'dsa-kv' },
                   h('span', null, h('b', null, String(a.rows)), ' 行'),
                   h('span', null, h('b', null, String(a.columns)), ' 列'),
-                  a.inAnalysis === null
-                    ? h('span', { className: 'dsa-hint' }, '缺 in_analysis 列')
-                    : h('span', null, h('b', null, String(a.inAnalysis)), ' ' + t('inAnalysisLabel')),
-                  a.excluded ? h('span', null, h('b', null, String(a.excluded)), ' ' + t('excludedLabel')) : null
-                ),
+                  a.inAnalysis === null                    ? h('span', { className: 'dsa-hint' }, '缺 in_analysis 列')                    : h('span', null, h('b', null, String(a.inAnalysis)), ' ' + t('inAnalysisLabel')),
+                  a.excluded ? h('span', null, h('b', null, String(a.excluded)), ' ' + t('excludedLabel')) : null                ),
                 h('div', { className: 'dsa-hint', style: { marginTop: '5px' } }, a.header.join(' · '))
               )
             )
           );
         }
-
         if (current.id === 'manuscript') {
           var man = artifacts.manuscript || 0;
           artifactBlocks.push(
@@ -3324,7 +3590,6 @@
             )
           );
         }
-
         if (artifacts.qa && artifacts.qa.count && current.id === 'qa') {
           artifactBlocks.push(
             h(
@@ -3356,26 +3621,24 @@
             )
           );
         }
-
         /* ---------------- 中央区 ---------------- */
-
         var stageRunning = Boolean(current && snap.activeRuns && snap.activeRuns[current.id]);
         var stageRun = stageRunning ? snap.activeRuns[current.id] : null;
         var hasScript = Boolean(current && current.script);
         var pyName = (snap.config && snap.config.pythonPath) || 'python';
         // 多步阶段（终检）不能只显示第一步：参数在每一步里，命令回显会把用户看糊涂
         var stepScripts = (current && current.steps ? current.steps : []).filter(Boolean);
-        var cmdText = stepScripts.length > 1
-          ? stepScripts.map(function (s) { return pyName + ' ' + s; }).join('  →  ') + '（' + stepScripts.length + ' 步，参数见任务卡与运行日志）'
-          : pyName + ' ' + current.script + ' ' + (current.args || []).join(' ');
+        var cmdText = stepScripts.length > 1          ? stepScripts.map(function (s) { return pyName + ' ' + s; }).join('  →  ') + '（' + stepScripts.length + ' 步，参数见任务卡与运行日志）'          : pyName + ' ' + current.script + ' ' + (current.args || []).join(' ');
         /* ---------------- 下一步 ---------------- */
-
         // 面板最该回答的问题是「现在该干嘛」：用一条横幅把状态、卡点、动作说清楚
         var runningStage = null;
         var nextStage = null;
+        // 第 5 阶段是可选的：没有 research_registry.json 的老项目不该被它
+        // 永远占住「下一步」——点运行只会得到「缺 registry」的报错。
+        var hasResearchRegistry = !!(snap && snap.artifacts && snap.artifacts.research          && snap.artifacts.research.registry && snap.artifacts.research.registry.exists);
         for (var ni = 0; ni < stages.length; ni += 1) {
           if (stages[ni].status === 'running') runningStage = stages[ni];
-          if (!nextStage && stages[ni].status !== 'done') nextStage = stages[ni];
+          if (!nextStage && stages[ni].status !== 'done'            && !(stages[ni].id === 'verify' && !hasResearchRegistry)) nextStage = stages[ni];
         }
         var nextView = null;
         if (runningStage) {
@@ -3400,7 +3663,7 @@
               'div',
               { className: 'dsa-next-body' },
               h('div', { className: 'dsa-next-line' }, t('nextAllDoneText')),
-              h('div', { className: 'dsa-next-sub' }, '所有阶段的闸门都已通过或已由人裁定。可以导出，或从右侧进入研究对话做最后复核。')
+              h('div', { className: 'dsa-next-sub' }, snap.gateMode==='skill'&&!snap.deliveryReady?'阶段操作已完成；正式交付仍需满足当前证据与签收要求。':'所有阶段的闸门都已通过或已由人裁定。可以导出，或从右侧进入研究对话做最后复核。')
             )
           );
         } else if (nextStage) {
@@ -3424,22 +3687,17 @@
           var primary = null;
           if (nextStage.status === 'blocked') {
             sub = (errGate ? errGate.label + '：' + errGate.detail + '。' : '') + '后面的步骤先跑不了。';
-            primary = isHere
-              ? h(Btn, { variant: 'ghost', onClick: function () { setSelected(nextStage.id); } }, '看哪条没过')
-              : h(Btn, { variant: 'ghost', onClick: function () { setSelected(nextStage.id); } }, '去查看');
+            primary = isHere              ? h(Btn, { variant: 'ghost', onClick: function () { setSelected(nextStage.id); } }, '看哪条没过')              : h(Btn, { variant: 'ghost', onClick: function () { setSelected(nextStage.id); } }, '去查看');
           } else if (nextStage.status === 'review') {
             if (manualGate) {
               sub = manualGate.label + '：' + (manualGate.detail || '需要你看一眼再决定') + '。';
-              primary = isHere
-                ? h(
+              primary = isHere                ? h(
                     Btn,
                     {
                       variant: 'ghost',
                       onClick: function () { setDialog({ kind: 'adjudicate', stage: nextStage, gate: manualGate }); }
                     },
-                    '现在拍板'
-                  )
-                : h(Btn, { variant: 'ghost', onClick: function () { setSelected(nextStage.id); } }, '去拍板');
+                    '现在拍板'                  )                : h(Btn, { variant: 'ghost', onClick: function () { setSelected(nextStage.id); } }, '去拍板');
             } else {
               sub = (firstUnknown ? unknownCount + ' 项还没查，先看「' + firstUnknown.label + '」' : '闸门没有全过') + '。';
               primary = h(Btn, { variant: 'ghost', onClick: function () { setSelected(nextStage.id); } }, isHere ? '看闸门' : '去查看');
@@ -3447,21 +3705,15 @@
           } else {
             sub = nextStage.script ? '有登记脚本，可以直接跑。' : '这一阶段没有脚本，交给 AI 或人来做。';
             if (isHere) {
-              primary = nextStage.script
-                ? h(
+              primary = nextStage.script                ? h(
                     Btn,
                     { variant: 'ghost', disabled: busy, onClick: function () { doRun(nextStage); } },
-                    (nextStage.lastRun ? '重跑' : '运行') + ' ' + nextStage.short
-                  )
-                : h(AiMenu, {
+                    (nextStage.lastRun ? '重跑' : '运行') + ' ' + nextStage.short                  )                : h(AiMenu, {
                     primary: false,
                     busy: busy,
-                    onDraft: STAGE_TASK[nextStage.id]
-                      ? function () { setDialog({ kind: 'draft', task: STAGE_TASK[nextStage.id] }); }
-                      : null,
+                    onDraft: STAGE_TASK[nextStage.id]                      ? function () { setDialog({ kind: 'draft', task: STAGE_TASK[nextStage.id] }); }                      : null,
                     onChat: function () { doAskAI(nextStage); },
-                    onReview: reviewNow
-                  });
+                    onReview: reviewNow                  });
             } else {
               primary = h(Btn, { variant: 'ghost', onClick: function () { setSelected(nextStage.id); } }, '去这里');
             }
@@ -3476,22 +3728,17 @@
               h('div', { className: 'dsa-next-line' }, line),
               h('div', { className: 'dsa-next-sub' }, sub)
             ),
-            primary
-          );
+            primary          );
         }
-
         var manualOpen = null;
         for (var mgi = 0; mgi < openGates.length; mgi += 1) {
           if (gateFace(openGates[mgi], current.status).cls === 'manual') { manualOpen = openGates[mgi]; break; }
         }
-        // 第 7 阶段没有 manuscript.json 时「运行」必然报 spec not found：
+        // 第 8 阶段没有 manuscript.json 时「运行」必然报 spec not found：
         // 这时别让它当实心主按钮（同屏只该有一个主动作——生成骨架）
         var manSpec = snap && snap.artifacts ? snap.artifacts.manuscriptSpec : null;
         var needSpec = current.id === 'manuscript' && (!manSpec || !manSpec.exists);
-        var headerPrimary = stageRunning
-          ? h(Btn, { variant: 'danger', disabled: busy, onClick: function () { doCancel(current); } }, '停止')
-          : manualOpen
-            ? h(
+        var headerPrimary = stageRunning          ? h(Btn, { variant: 'danger', disabled: busy, onClick: function () { doCancel(current); } }, '停止')          : manualOpen            ? h(
                 Btn,
                 {
                   variant: 'primary',
@@ -3499,10 +3746,7 @@
                   title: manualOpen.label,
                   onClick: function () { setDialog({ kind: 'adjudicate', stage: current, gate: manualOpen }); }
                 },
-                '去拍板'
-              )
-            : hasScript
-              ? h(
+                '去拍板'              )            : hasScript              ? h(
                   Btn,
                   {
                     variant: needSpec ? undefined : 'primary',
@@ -3510,20 +3754,12 @@
                     title: needSpec ? '先有 manuscript.json 才能跑：下面先点「生成手稿骨架」' : current.script,
                     onClick: function () { doRun(current); }
                   },
-                  current.lastRun ? '重跑' : '运行'
-                )
-              : null;
+                  current.lastRun ? '重跑' : '运行'                )              : null;
         // KPI 条：五个数一眼看完「有多少料、走到哪、卡在哪」。数字等宽，和右栏日志同一套
         var corpusInfo = (snap && snap.artifacts && snap.artifacts.corpus) || {};
         var corpusTotal = Number(corpusInfo.validFiles || corpusInfo.totalFiles || 0) || 0;
         var corpusBytes = Number((corpusInfo.fingerprint && corpusInfo.fingerprint.bytes) || 0) || 0;
-        var sizeNum = corpusBytes
-          ? corpusBytes >= 1048576
-            ? (corpusBytes / 1048576).toFixed(1)
-            : corpusBytes >= 1024
-              ? String(Math.round(corpusBytes / 1024))
-              : String(corpusBytes)
-          : '—';
+        var sizeNum = corpusBytes          ? corpusBytes >= 1048576            ? (corpusBytes / 1048576).toFixed(1)            : corpusBytes >= 1024              ? String(Math.round(corpusBytes / 1024))              : String(corpusBytes)          : '—';
         var sizeUnit = corpusBytes ? (corpusBytes >= 1048576 ? 'MB' : corpusBytes >= 1024 ? 'KB' : 'B') : '';
         var stageSummary = (snap && snap.summary) || {};
         var gateTotals = (snap && snap.totals) || {};
@@ -3540,12 +3776,11 @@
           { className: 'dsa-kpis' },
           kpiOf('corpus', '有效语料', corpusTotal || '—', corpusTotal ? '份' : '', true),
           kpiOf('size', '总体积', sizeNum, sizeUnit, false),
-          kpiOf('done', '阶段完成', (stageSummary.done || 0) + '/' + (stages.length || 9), '', false),
+          kpiOf('done', '阶段完成', (stageSummary.done || 0) + '/' + (stages.length || 10), '', false),
           kpiOf('review', '待裁定', stageSummary.review || 0, '项', false),
           kpiOf('fail', '闸门未过', gateTotals.fail || 0, '项', false)
         );
-
-        // 手稿骨架：第 7 阶段的输入文件脚本造不出来，给它一条明确的入口，别让人猜
+        // 手稿骨架：第 8 阶段的输入文件脚本造不出来，给它一条明确的入口，别让人猜
         // 契约卡：项目级信息（数据集/模型/产物/结论），与当前选中阶段无关，所以放在 KPI 下面
         var registryCard = h(RegistryCard, {
           registry: snap && snap.registry,
@@ -3555,7 +3790,6 @@
           onOpen: function () { setDialog({ kind: 'artifacts' }); },
           onAdopt: function () { doAdopt(false); }
         });
-
         var manuscriptBlock = null;
         if (current && current.id === 'manuscript') {
           var spec = snap && snap.artifacts ? snap.artifacts.manuscriptSpec : null;
@@ -3576,15 +3810,7 @@
               )
             );
           } else {
-            var specTitle = !spec.exists
-              ? '还没有 manuscript.json'
-              : spec.error
-                ? 'manuscript.json 跑不了'
-                : spec.invalidBlocks
-                  ? '结构有问题：' + specNum(spec.invalidBlocks) + ' 块会让第 7 阶段直接报错'
-                  : spec.figuresMissing
-                    ? '已就绪，但缺 ' + specNum(spec.figuresMissing) + ' 张图（第 7 阶段会失败）'
-                    : 'manuscript.json 已就绪';
+            var specTitle = !spec.exists              ? '还没有 manuscript.json'              : spec.error                ? 'manuscript.json 跑不了'                : spec.invalidBlocks                  ? '结构有问题：' + specNum(spec.invalidBlocks) + ' 块会让第 8 阶段直接报错'                  : spec.figuresMissing                    ? '已就绪，但缺 ' + specNum(spec.figuresMissing) + ' 张图（第 8 阶段会失败）'                    : 'manuscript.json 已就绪';
             var specParts = [];
             if (spec.exists && !spec.error) {
               specParts.push('块 ' + specNum(spec.blocks));
@@ -3611,12 +3837,7 @@
                     h(
                       'div',
                       { className: 'dsa-hint', style: { marginTop: '3px' } },
-                      spec.exists && spec.error
-                        ? (spec.errorKind === 'structure' ? '跑不了：' : '解析失败：') + spec.error
-                        : specParts.length
-                          ? specParts.join(' · ')
-                          : '这一阶段吃项目根的 manuscript.json；工作台只按图表清单拼结构，正文留「待补」，不编数字。'
-                    )
+                      spec.exists && spec.error                        ? (spec.errorKind === 'structure' ? '跑不了：' : '解析失败：') + spec.error                        : specParts.length                          ? specParts.join(' · ')                          : '这一阶段吃项目根的 manuscript.json；工作台只按图表清单拼结构，正文留「待补」，不编数字。'                    )
                   ),
                   h(
                     'div',
@@ -3626,7 +3847,7 @@
                       {
                         variant: spec.exists ? 'default' : 'primary',
                         disabled: manDisabled,
-                        title: stageRunning ? '先停掉正在跑的第 7 阶段' : spec.exists ? '按图表清单重排骨架（会覆盖现有正文）' : '按图表清单生成骨架',
+                        title: stageRunning ? '先停掉正在跑的第 8 阶段' : spec.exists ? '按图表清单重排骨架（会覆盖现有正文）' : '按图表清单生成骨架',
                         onClick: function () {
                           if (spec.exists) {
                             setManAsk(true);
@@ -3635,57 +3856,36 @@
                           doScaffold(false);
                         }
                       },
-                      manBusy === 'scaffold' ? '生成中…' : spec.exists ? '重排骨架' : '生成手稿骨架'
-                    ),
-                    spec.exists
-                      ? h(
+                      manBusy === 'scaffold' ? '生成中…' : spec.exists ? '重排骨架' : '生成手稿骨架'                    ),
+                    spec.exists                      ? h(
                           Btn,
                           { variant: 'primary', disabled: manDisabled, title: '把改稿说明投进研究对话', onClick: doBrief },
-                          manBusy === 'brief' ? '投递中…' : '让 AI 写成正文'
-                        )
-                      : null
-                  )
+                          manBusy === 'brief' ? '投递中…' : '让 AI 写成正文'                        )                      : null                  )
                 ),
-                spec.exists && manAsk
-                  ? h(
+                spec.exists && manAsk                  ? h(
                       'div',
                       { className: 'dsa-ask', style: { marginTop: '9px' } },
                       h(
                         'span',
                         { className: 'dsa-ask-t' },
-                        '重排会用图表清单重新拼一遍骨架，现有的 ' +
-                          (spec.placeholders ? specNum(spec.placeholders) + ' 段待补和已写正文' : '正文') +
-                          ' 都会被覆盖；原文件会先备份成 manuscript.json.bak-…。'
-                      ),
+                        '重排会用图表清单重新拼一遍骨架，现有的 ' +                          (spec.placeholders ? specNum(spec.placeholders) + ' 段待补和已写正文' : '正文') +                          ' 都会被覆盖；原文件会先备份成 manuscript.json.bak-…。'                      ),
                       h(
                         Btn,
                         { variant: 'danger', disabled: manDisabled, onClick: function () { doScaffold(true); } },
-                        '确认重排'
-                      ),
+                        '确认重排'                      ),
                       h(Btn, { disabled: manDisabled, onClick: function () { setManAsk(false); } }, '取消')
-                    )
-                  : null,
-                spec.exists && spec.placeholders && !manAsk
-                  ? h(
+                    )                  : null,
+                spec.exists && spec.placeholders && !manAsk                  ? h(
                       'div',
                       { className: 'dsa-hint', style: { marginTop: '7px' } },
-                      '正文还没写：「待补」段落要按改稿说明补成真正段落，写进去的每个数字都要能追到 output/models/ 或 output/dataset/analysis.csv。'
-                    )
-                  : spec.exists && !spec.placeholders && !spec.error && !manAsk
-                    ? h(
+                      '正文还没写：「待补」段落要按改稿说明补成真正段落，写进去的每个数字都要能追到 output/models/ 或 output/dataset/analysis.csv。'                    )                  : spec.exists && !spec.placeholders && !spec.error && !manAsk                    ? h(
                         'div',
                         { className: 'dsa-hint', style: { marginTop: '7px' } },
-                        '正文都写好了：改完 manuscript.json 必须重跑第 7 阶段（生成 output/manuscript.docx），否则交付的还是上一版成稿。'
-                      )
-                    : null,
-                manNote
-                  ? h('div', { className: 'dsa-hint', role: 'status', 'aria-live': 'polite', style: { marginTop: '7px' } }, manNote)
-                  : null
-              )
+                        '正文都写好了：改完 manuscript.json 必须重跑第 8 阶段（生成 output/manuscript.docx），否则交付的还是上一版成稿。'                      )                    : null,
+                manNote                  ? h('div', { className: 'dsa-hint', role: 'status', 'aria-live': 'polite', style: { marginTop: '7px' } }, manNote)                  : null              )
             );
           }
         }
-
         var main = h(
           'div',
           { className: 'dsa-main' },
@@ -3701,24 +3901,20 @@
                 h(
                   'span',
                   {
-                    className: 'dsa-chip ' + (current.status === 'done' ? 'ok' : current.status === 'blocked' ? 'err' : current.status === 'review' ? 'warn' : ''),
-                    title: '阶段状态（按闸门与产物判定）'
-                  },
+                    className: 'dsa-chip ' + (current.status === 'done' ? 'ok' : current.status === 'blocked' ? 'err' : current.status === 'review' ? 'warn' : current.status === 'na' ? 'quiet' : ''),
+                    title: '阶段状态（按闸门与产物判定）'                  },
                   stageWord(current)
                 )
               ),
               h('p', { className: 'dsa-sub' }, current.purpose),
-              current.lastRun
-                ? h(
+              current.lastRun                ? h(
                     'div',
                     { className: 'dsa-hint', style: { margin: '-6px 0 0' } },
                     '最近一次运行 ' + (RUN_WORD[current.lastRun.status] || current.lastRun.status)
                       + ' · ' + fmtTime(current.lastRun.endedAt || current.lastRun.startedAt)
                       + (current.lastRun.endedAt ? ' · ' + fmtSpan(current.lastRun.startedAt, current.lastRun.endedAt) : '')
                       + ' · 退出码 ' + (current.lastRun.exitCode === null || current.lastRun.exitCode === undefined ? '—' : current.lastRun.exitCode)
-                  )
-                : null
-            ),
+                  )                : null            ),
             h(
               'div',
               { className: 'dsa-row' },
@@ -3726,9 +3922,7 @@
               h(AiMenu, {
                 busy: busy,
                 primary: !hasScript && !stageRunning,
-                onDraft: STAGE_TASK[current.id]
-                  ? function () { setDialog({ kind: 'draft', task: STAGE_TASK[current.id] }); }
-                  : null,
+                onDraft: STAGE_TASK[current.id]                  ? function () { setDialog({ kind: 'draft', task: STAGE_TASK[current.id] }); }                  : null,
                 onChat: current.id === 'recheck' ? null : function () { doAskAI(current); },
                 onReview: function () { if (current.id === 'recheck') doAskAI(current); else reviewNow(); }
               })
@@ -3740,8 +3934,7 @@
           manuscriptBlock,
           nextView,
           error ? h('div', { className: 'dsa-error', role: 'alert', style: { margin: '10px 0' } }, error) : null,
-          hasScript
-            ? h(
+          hasScript            ? h(
                 'details',
                 { className: 'dsa-fold dsa-fold-quiet' },
                 h('summary', null, '执行细节 · 命令'),
@@ -3772,27 +3965,18 @@
                   ),
                   h('div', { className: 'dsa-code' }, cmdText)
                 )
-              )
-            : h('div', { className: 'dsa-hint', style: { margin: '8px 0 0' } }, t('noScript')),
+              )            : h('div', { className: 'dsa-hint', style: { margin: '8px 0 0' } }, t('noScript')),
           h(
             'div',
             { className: 'dsa-section' },
             h('h3', null, '判读'),
             // 全部通过时这一行不再复述「已通过 N 项」——折叠行里已经写了，同一句话出现两遍只是噪音
-            openGates.length
-              ? h('span', { className: 'count' }, openGates.length + ' 项待处理 · 已通过 ' + passedGates.length + ' 项')
-              : null
-          ),
+            openGates.length              ? h('span', { className: 'count' }, openGates.length + ' 项待处理 · 已通过 ' + passedGates.length + ' 项')              : null          ),
           gateList,
           recheckView,
-          artifactBlocks.length
-            ? h('div', { className: 'dsa-section' }, h('h3', null, t('artifacts')))
-            : null,
-          artifactBlocks
-        );
-
+          artifactBlocks.length            ? h('div', { className: 'dsa-section' }, h('h3', null, t('artifacts')))            : null,
+          artifactBlocks        );
         /* ---------------- 运行台 ---------------- */
-
         var runs = (snap.runs || []).slice();
         var stageShort = function (id) {
           var match = (snap.stages || []).filter(function (s) { return s.id === id; })[0];
@@ -3822,15 +4006,12 @@
               h(
                 'span',
                 { className: 'dsa-hint', style: { marginLeft: 'auto' } },
-                projectSession ? (chatRunning ? t('chatRunning') : '已绑定') : '未绑定'
-              )
+                projectSession ? (chatRunning ? t('chatRunning') : '已绑定') : '未绑定'              )
             ),
             h(
               'div',
               { className: 'dsa-chat-more' },
-              projectSession
-                ? h('div', { className: 'dsa-chat-id', title: projectSession }, projectSession)
-                : h('div', { className: 'dsa-hint' }, t('chatNone')),
+              projectSession                ? h('div', { className: 'dsa-chat-id', title: projectSession }, projectSession)                : h('div', { className: 'dsa-hint' }, t('chatNone')),
               chatSnippet ? h('div', { className: 'dsa-hint' }, '最近：' + chatSnippet) : null,
               h(
                 'div',
@@ -3843,24 +4024,19 @@
                 h(
                   Btn,
                   { variant: 'primary', disabled: busy || !current, onClick: function () { doAskAI(current); } },
-                  '把这一步交给 AI'
-                )
+                  '把这一步交给 AI'                )
               ),
               chatError ? h('div', { className: 'dsa-error', role: 'alert', style: { fontSize: '12px' } }, chatError) : null,
-              chatError && projectSession
-                ? h(
+              chatError && projectSession                ? h(
                     'button',
                     { type: 'button', className: 'dsa-chat-btn', onClick: function () { doResetChat(); } },
                     t('retryChat')
-                  )
-                : null
-            )
+                  )                : null            )
           ),
           h(
             'div',
             { className: 'dsa-runs' },
-            runs.length
-              ? runs.map(function (run) {
+            runs.length              ? runs.map(function (run) {
                   var stageMatch = (snap.stages || []).filter(function (s) { return s.id === run.stageId; })[0];
                   return h(
                     'button',
@@ -3876,11 +4052,9 @@
                     h('span', { className: 'tm' }, fmtTime(run.startedAt)),
                     h('span', { className: 'ex' }, run.exitCode === null || run.exitCode === undefined ? '—' : String(run.exitCode))
                   );
-                })
-              : h('div', { className: 'dsa-empty' }, t('noRuns'))
+                })              : h('div', { className: 'dsa-empty' }, t('noRuns'))
           ),
-          runId && logData.run
-            ? h(
+          runId && logData.run            ? h(
                 'div',
                 { className: 'dsa-run-h' },
                 h(
@@ -3891,31 +4065,20 @@
                   h('span', null, t('runExit') + ' ' + (logData.run.exitCode === null || logData.run.exitCode === undefined ? '—' : logData.run.exitCode)),
                   h('span', null, fmtTime(logData.run.startedAt) + (logData.run.endedAt ? ' · ' + fmtSpan(logData.run.startedAt, logData.run.endedAt) : ''))
                 ),
-                Array.isArray(logData.run.command) && logData.run.command.length
-                  ? h(
+                Array.isArray(logData.run.command) && logData.run.command.length                  ? h(
                       'div',
                       { className: 'dsa-mono', style: { marginTop: '4px', wordBreak: 'break-all', color: 'var(--dsa-ink3)' }, title: logData.run.logFile || '' },
                       logData.run.command.join(' ')
-                    )
-                  : null
-              )
-            : null,
+                    )                  : null              )            : null,
           h(
             'div',
             { className: 'dsa-log', ref: logRef },
-            runId
-              ? logData.id === runId && logData.lines.length
-                ? logData.lines.map(function (line, i) {
-                    var cls = /error|traceback|失败|错误/i.test(line)
-                      ? 'ln-err'
-                      : /\bwarn(ing)?\b|警告/i.test(line) ? 'ln-warn' : '';
+            runId              ? logData.id === runId && logData.lines.length                ? logData.lines.map(function (line, i) {
+                    var cls = /error|traceback|失败|错误/i.test(line)                      ? 'ln-err'                      : /\bwarn(ing)?\b|警告/i.test(line) ? 'ln-warn' : '';
                     return h('div', { key: i, className: cls }, line || ' ');
-                  })
-                : t('logEmpty')
-              : t('logEmpty')
+                  })                : t('logEmpty')              : t('logEmpty')
           )
         );
-
         return h(
           'div',
           { className: 'dsa-root', ref: attachRoot, 'data-dsa-width': width, 'data-dsa-theme': theme, 'data-drawer': drawer || width === 'wide' ? 'open' : 'closed' },
@@ -3926,24 +4089,16 @@
             { className: 'dsa-sr-only', role: 'status', 'aria-live': 'polite' },
             (current && current.name ? current.name + '：' : '') + (stageWord(runningStage || nextStage || current) || '') + (error ? '；' + error : '')
           ),
-          drawer && width !== 'wide'
-            ? h('div', { className: 'dsa-scrim', onClick: function () { setDrawer(false); } })
-            : null,
-          envBlockedNow
-            ? h(EnvGate, {
+          drawer && width !== 'wide'            ? h('div', { className: 'dsa-scrim', onClick: function () { setDrawer(false); } })            : null,
+          envBlockedNow            ? h(EnvGate, {
                 preflight: preflight,
                 busy: envBusy,
                 note: envNote,
                 onAi: doAiInstall,
                 onSettings: function () { setDialog({ kind: 'settings' }); },
-                onRecheck: doRecheck
-              })
-            : h('div', { className: 'dsa-body' }, rail, main, side),
-          dialog ? renderDialog(dialog) : null
-        );
-
+                onRecheck: doRecheck              })            : h('div', { className: 'dsa-body' }, rail, main, side),
+          dialog ? renderDialog(dialog) : null        );
         /* ---------------- 弹窗 ---------------- */
-
         function renderDialog(d) {
           if (d.kind === 'create') {
             return h(CreateDialog, {
@@ -3984,7 +4139,7 @@
               },
               onCancel: function () { setDialog(null); },
               onSaved: function (json) {
-                if (json && json.state) setSnap(json.state);
+                if (json && json.state) commitState(json.state);
               }
             });
           }
@@ -4068,13 +4223,10 @@
           return null;
         }
       }
-
       /* ------------------------------------------------------------------ *
        * 弹窗实现
        * ------------------------------------------------------------------ */
-
-      /* 路径输入 + 「选择…」：点按钮弹系统原生的文件夹选择框，选完把绝对路径填回输入框。
-         选择器不可用时把原因写在字段下面，绝不静默失败，也不假装已经选好。 */
+      /* 路径输入 + 「选择…」：点按钮弹系统原生的文件夹选择框，选完把绝对路径填回输入框。         选择器不可用时把原因写在字段下面，绝不静默失败，也不假装已经选好。 */
       function DirField(props) {
         var busyState = useState(false);
         var busy = busyState[0];
@@ -4110,10 +4262,8 @@
             }),
             h(Btn, { onClick: choose, disabled: busy || props.disabled, title: t('pickTitle') }, busy ? t('picking') : t('pick'))
           ),
-          note ? h('div', { className: 'dsa-field-note' }, note) : null
-        );
+          note ? h('div', { className: 'dsa-field-note' }, note) : null        );
       }
-
       function CreateDialog(props) {
         var dirState = useState('');
         var dir = dirState[0];
@@ -4140,8 +4290,7 @@
               label: t('dirLabel'),
               value: dir,
               placeholder: t('dirPh'),
-              onChange: setDir
-            }),
+              onChange: setDir            }),
             h(
               'div',
               { className: 'dsa-field' },
@@ -4151,7 +4300,6 @@
           )
         );
       }
-
       function OpenDialog(props) {
         var dirState = useState('');
         var dir = dirState[0];
@@ -4175,10 +4323,8 @@
               label: t('dirLabel'),
               value: dir,
               placeholder: t('dirPh'),
-              onChange: setDir
-            }),
-            props.recent && props.recent.length
-              ? h(
+              onChange: setDir            }),
+            props.recent && props.recent.length              ? h(
                   'div',
                   { className: 'dsa-field' },
                   h('label', null, '最近'),
@@ -4195,12 +4341,9 @@
                       h('span', { className: 'dsa-mono', style: { fontSize: '11px' } }, p.path)
                     );
                   })
-                )
-              : null
-          )
+                )              : null          )
         );
       }
-
       function ForgetDialog(props) {
         var project = props.project || {};
         var ackState = useState(false);
@@ -4249,11 +4392,11 @@
           )
         );
       }
-
       function DraftDialog(props) {
         var fallbackTasks = [
           { id: 'scope', label: '研究范围与口径', file: 'docs/scope.md' },
           { id: 'codebook', label: '变量字典与编码规则', file: 'docs/codebook.md' },
+          { id: 'verify', label: '逐格复核说明', file: 'docs/verify-notes.md' },
           { id: 'figures', label: '图表题注与解读', file: 'docs/figure-notes.md' },
           { id: 'manuscript', label: '文稿小节', file: 'docs/manuscript-notes.md' },
           { id: 'qa', label: '质检问题说明', file: 'docs/qa-notes.md' }
@@ -4284,7 +4427,6 @@
         var savedState = useState('');
         var saved = savedState[0];
         var setSaved = savedState[1];
-
         useEffect(function () {
           request('GET', '/assistant/models')
             .then(function (json) {
@@ -4295,20 +4437,17 @@
                 providers: json.providers || [],
                 tasks: json.tasks && json.tasks.length ? json.tasks : fallbackTasks,
                 default: json.default || null,
-                error: json.error || ''
-              });
+                error: json.error || ''              });
             })
             .catch(function (e) {
               setCatalog({ loading: false, ok: false, providers: [], tasks: fallbackTasks, default: null, error: String((e && e.message) || e) });
             });
         }, []);
-
         var current = null;
         for (var i = 0; i < catalog.tasks.length; i += 1) {
           if (catalog.tasks[i].id === taskId) current = catalog.tasks[i];
         }
         if (!current) current = catalog.tasks[0] || fallbackTasks[0];
-
         // 切任务时优先恢复这个任务上一次的生成结果；没有才清空
         useEffect(function () {
           var m = (props.memo && props.memo[taskId]) || null;
@@ -4317,13 +4456,11 @@
           setErr('');
           setSaved('');
         }, [taskId]);
-
         // 生成一次就把结果留在面板层，关闭弹窗不丢
         useEffect(function () {
           if (!out) return;
           if (props.onMemo) props.onMemo(taskId, out, meta);
         }, [out, meta]);
-
         var route = catalog.default || null;
         var modelLine = '模型：读取中…';
         if (!catalog.loading) {
@@ -4334,7 +4471,6 @@
             modelLine = t('modelUnavailable') + ' · ' + route.error;
           }
         }
-
         function generate() {
           setBusy(true);
           setErr('');
@@ -4356,7 +4492,6 @@
               setBusy(false);
             });
         }
-
         function copyOut() {
           try {
             if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -4367,7 +4502,6 @@
             void e;
           }
         }
-
         function writeOut() {
           setBusy(true);
           setErr('');
@@ -4388,15 +4522,13 @@
               setBusy(false);
             });
         }
-
         return h(
           Modal,
           {
             title: t('draftTitle'),
             desc: t('draftHint'),
             error: err,
-            onCancel: props.onCancel
-          },
+            onCancel: props.onCancel          },
           h(
             'div',
             { className: 'dsa-form' },
@@ -4435,29 +4567,22 @@
               h(Btn, { variant: 'primary', disabled: busy || !catalog.ok, onClick: generate }, busy ? t('generating') : t('generate')),
               h(Btn, { variant: 'ghost', disabled: busy || !out, onClick: copyOut }, t('copy')),
               h(Btn, { variant: 'ghost', disabled: busy || !out, onClick: writeOut, title: current.file }, t('write')),
-              saved ? h('span', { className: 'dsa-hint' }, saved) : null
-            ),
+              saved ? h('span', { className: 'dsa-hint' }, saved) : null            ),
             h('pre', { className: 'dsa-draft-out' }, out || t('draftEmpty')),
-            meta
-              ? h(
+            meta              ? h(
                   'div',
                   { className: 'dsa-draft-meta' },
                   h('span', null, meta.provider + ' / ' + meta.model),
                   meta.usage ? h('span', null, 'in ' + meta.usage.inputTokens + ' · out ' + meta.usage.outputTokens) : null,
                   h('span', null, (meta.elapsedMs / 1000).toFixed(1) + 's'),
-                  meta.missing && meta.missing.length ? h('span', null, '未提供：' + meta.missing.join('、')) : null
-                )
-              : null
-          )
+                  meta.missing && meta.missing.length ? h('span', null, '未提供：' + meta.missing.join('、')) : null                )              : null          )
         );
       }
-
       /* ------------------------------------------------------------------ *
        * 产物中心（v2）
        * 面板以前只能看数字：46 张 600dpi 的图、5 张表、5.6MB 的 docx 一个都打不开。
        * 这里把 output/ 当成可浏览的产物库：缩略图（服务端生成）、CSV 表格、文档下载。
        * ------------------------------------------------------------------ */
-
       var ARTIFACT_TABS = [
         { id: 'figures', label: '图', test: function (entry) { return /^\.(png|jpe?g|webp|gif|tiff?|hei[cf])$/.test(entry.ext); } },
         { id: 'tables', label: '表', test: function (entry) { return entry.ext === '.csv' || entry.ext === '.tsv'; } },
@@ -4470,7 +4595,6 @@
         },
         { id: 'all', label: '全部', test: function () { return true; } }
       ];
-
       /**
        * 宿主没重启时，新接口会回「未知接口 …」或裸 404：这时候要把话说清楚，
        * 而不是把后端那句「未知接口」原样甩给用户（client 能热更新、宿主不能）。
@@ -4482,33 +4606,63 @@
         }
         return text || (feature + '读取失败');
       }
-
       function artifactRawUrl(rel, download) {
         return API + '/artifacts/raw?path=' + encodeURIComponent(rel) + (download ? '&download=1' : '');
       }
-
       function artifactThumbUrl(rel, width) {
         return API + '/artifacts/thumb?path=' + encodeURIComponent(rel) + '&w=' + (width || 320);
       }
-
       // 浏览器能直接显示的图片格式；TIFF / HEIC 之类一律由服务端转成 PNG 再给前端
       var VIEWABLE_IMAGE = /^\.(png|jpe?g|webp|gif|bmp|avif)$/i;
-
       function extOf(rel) {
         var hit = String(rel || '').match(/\.[^./\\]+$/);
         return hit ? hit[0].toLowerCase() : '';
       }
-
       function artifactPreviewUrl(rel, ext) {
         var kind = String(ext || extOf(rel));
         return VIEWABLE_IMAGE.test(kind) ? artifactRawUrl(rel, false) : artifactThumbUrl(rel, 2400);
       }
-
       // 能直接给浏览器打开的地址：PDF 走 raw（内嵌阅读器/新窗口都靠它），图按上面的规则
       function artifactViewUrl(rel) {
         return extOf(rel) === '.pdf' ? artifactRawUrl(rel, false) : artifactPreviewUrl(rel);
       }
-
+      // 浏览器不直接显示、也不该单独占一张卡片的印刷原稿：有同名可预览图时收进那张卡
+      var HIDDEN_TWIN_EXT = /^\.(tiff?|hei[cf])$/i;
+      function artifactStem(rel) {
+        return String(rel || '').replace(/\.[^./\\]+$/, '');
+      }
+      /**
+       * 同目录同主名的 TIFF/HEIC 是 PNG 的印刷稿，不是另一张图。
+       * 网格里藏掉，点开 PNG 时在下载旁边给「下载 TIFF」。
+       * 没有同名可预览图时仍单独成卡（否则那张原稿就没入口了）。
+       */
+      function artifactTwins(files) {
+        var list = files || [];
+        var byStem = {};
+        list.forEach(function (entry) {
+          var stem = artifactStem(entry.rel);
+          var bucket = byStem[stem] || (byStem[stem] = []);
+          bucket.push(entry);
+        });
+        var hide = {};
+        var twinOf = {};
+        Object.keys(byStem).forEach(function (stem) {
+          var bucket = byStem[stem];
+          // 同名 PNG 自己都读不出来（超过 32MB 等）时就别藏它的原稿，否则两份都没入口
+          var preview = bucket.filter(function (entry) {
+            return VIEWABLE_IMAGE.test(entry.ext) && entry.viewable !== false;
+          })[0];
+          if (!preview) return;
+          bucket.forEach(function (entry) {
+            if (!HIDDEN_TWIN_EXT.test(entry.ext) || entry.rel === preview.rel) return;
+            hide[entry.rel] = true;
+            var current = twinOf[preview.rel];
+            // 同主名同时有 .tif 和 .tiff 时，优先完整的 .tiff
+            if (!current || extOf(entry.rel) === '.tiff') twinOf[preview.rel] = entry.rel;
+          });
+        });
+        return { hide: hide, twinOf: twinOf };
+      }
       function ArtifactsDialog(props) {
         var treeState = useState({ loading: true, ok: false, entries: [], error: '', totalFiles: 0, totalBytes: 0, truncated: false });
         var tree = treeState[0];
@@ -4523,12 +4677,10 @@
         var detail = detailState[0];
         var setDetail = detailState[1];
         var aliveRef = useRef(true);
-
         useEffect(function () {
           aliveRef.current = true;
           return function () { aliveRef.current = false; };
         }, []);
-
         var load = function () {
           return request('GET', '/artifacts/tree').then(function (json) {
             if (!aliveRef.current) return;
@@ -4543,20 +4695,17 @@
               entries: Array.isArray(json.entries) ? json.entries : [],
               totalFiles: Number(json.totalFiles) || 0,
               totalBytes: Number(json.totalBytes) || 0,
-              truncated: json.truncated === true
-            });
+              truncated: json.truncated === true            });
           }).catch(function (error) {
             if (!aliveRef.current) return;
             setTree({ loading: false, ok: false, entries: [], error: hostHint(error, '产物中心'), totalFiles: 0, totalBytes: 0, truncated: false });
           });
         };
-
         useEffect(function () {
           // 旧宿主没有这条路由：直接给结论，不发一个注定 404 的请求
           if (props.stale) return;
           void load();
         }, []);
-
         // 点任何产物都在弹层里看：图给大图、表给整张表、文本给全文、PDF 给内嵌阅读器
         var open = function (rel) {
           setSel(rel);
@@ -4579,23 +4728,26 @@
             setDetail({ loading: false, ok: false, error: String((error && error.message) || error), data: null });
           });
         };
-
         var files = (tree.entries || []).filter(function (entry) { return entry.kind === 'file'; });
+        var twins = artifactTwins(files);
+        var shown = files.filter(function (entry) { return !twins.hide[entry.rel]; });
+        var hiddenCount = files.length - shown.length;
+        var hiddenBytes = files.reduce(function (sum, entry) {
+          return twins.hide[entry.rel] ? sum + (Number(entry.size) || 0) : sum;
+        }, 0);
         var activeTab = ARTIFACT_TABS.filter(function (item) { return item.id === tab; })[0] || ARTIFACT_TABS[0];
-        var visible = files.filter(activeTab.test).sort(function (a, b) { return String(a.rel).localeCompare(String(b.rel)); });
-        // 弹层里能左右翻的只有图；顺序与网格一致
-        var imageList = visible
-          .filter(function (entry) { return entry.image === true || /^\.(png|jpe?g|webp|gif|tiff?|hei[cf])$/.test(entry.ext); })
+        var visible = shown.filter(activeTab.test).sort(function (a, b) { return String(a.rel).localeCompare(String(b.rel)); });
+        // 弹层里能左右翻的只有图；顺序与网格一致。成对的 TIFF 不进翻页，否则 ←/→ 会翻到同一张图
+        var imageList = visible          .filter(function (entry) { return entry.image === true || /^\.(png|jpe?g|webp|gif|tiff?|hei[cf])$/.test(entry.ext); })
           .map(function (entry) { return entry.rel; });
+        var twinRel = twins.twinOf[sel] || '';
         var viewIsImage = sel && imageList.indexOf(sel) >= 0;
         var selIndex = viewIsImage ? imageList.indexOf(sel) : -1;
-
         var stepBig = function (delta) {
           if (!imageList.length) return;
           var next = selIndex < 0 ? 0 : (selIndex + delta + imageList.length) % imageList.length;
           open(imageList[next]);
         };
-
         // 弹层开着时接管键盘：Esc 只关这一层（Modal 的 Esc 用 .dsa-lightbox 让路），左右翻图
         useEffect(function () {
           if (!sel || typeof window === 'undefined' || !window.addEventListener) return;
@@ -4614,14 +4766,8 @@
           window.addEventListener('keydown', onKey);
           return function () { window.removeEventListener('keydown', onKey); };
         }, [sel, imageList.join('|')]);
-
-        var body = props.stale
-          ? // 直接由 props 判，不走 state：不会先闪一下「正在读」再变成错误
-            h('div', { className: 'dsa-error', role: 'alert' }, hostHint('未知接口', '产物中心'))
-          : tree.loading
-          ? h('div', { className: 'dsa-hint' }, '正在读 output/…')
-          : !tree.ok
-            ? h(
+        var body = props.stale          ? // 直接由 props 判，不走 state：不会先闪一下「正在读」再变成错误
+            h('div', { className: 'dsa-error', role: 'alert' }, hostHint('未知接口', '产物中心'))          : tree.loading          ? h('div', { className: 'dsa-hint' }, '正在读 output/…')          : !tree.ok            ? h(
                 'div',
                 { className: 'dsa-error', role: 'alert' },
                 h('div', null, tree.error || '读不到产物目录'),
@@ -4636,13 +4782,9 @@
                         void load();
                       }
                     },
-                    '重试'
-                  )
+                    '重试'                  )
                 )
-              )
-            : !files.length
-              ? h('div', { className: 'dsa-hint' }, 'output/ 里还没有产物：先把阶段跑起来。')
-              : h(
+              )            : !shown.length              ? h('div', { className: 'dsa-hint' }, 'output/ 里还没有产物：先把阶段跑起来。')              : h(
                   'div',
                   null,
                   h(
@@ -4652,7 +4794,7 @@
                       'div',
                       { className: 'dsa-tabs', role: 'tablist' },
                       ARTIFACT_TABS.map(function (item, index) {
-                        var count = files.filter(item.test).length;
+                        var count = shown.filter(item.test).length;
                         return h(
                           'button',
                           {
@@ -4667,23 +4809,22 @@
                               var key = event && event.key;
                               if (key !== 'ArrowLeft' && key !== 'ArrowRight' && key !== 'Home' && key !== 'End') return;
                               event.preventDefault();
-                              var next = key === 'Home' ? 0
-                                : key === 'End' ? ARTIFACT_TABS.length - 1
-                                  : (index + (key === 'ArrowRight' ? 1 : -1) + ARTIFACT_TABS.length) % ARTIFACT_TABS.length;
+                              var next = key === 'Home' ? 0                                : key === 'End' ? ARTIFACT_TABS.length - 1                                  : (index + (key === 'ArrowRight' ? 1 : -1) + ARTIFACT_TABS.length) % ARTIFACT_TABS.length;
                               var target = ARTIFACT_TABS[next];
                               setTab(target.id);
-                              var node = event.currentTarget && event.currentTarget.parentNode
-                                && event.currentTarget.parentNode.children
-                                && event.currentTarget.parentNode.children[next];
+                              var node = event.currentTarget && event.currentTarget.parentNode                                && event.currentTarget.parentNode.children                                && event.currentTarget.parentNode.children[next];
                               try { if (node && node.focus) node.focus(); } catch (error) { /* ignore */ }
                             }
                           },
-                          item.label + ' ' + count
-                        );
+                          item.label + ' ' + count                        );
                       })
                     ),
                     h('span', { className: 'dsa-spacer' }),
-                    h('span', { className: 'dsa-hint' }, (tree.truncated ? '≥ ' : '') + tree.totalFiles + ' 个文件 · ' + sizeText(tree.totalBytes))
+                    h(
+                      'span',
+                      { className: 'dsa-hint', title: hiddenCount ? '另有 ' + hiddenCount + ' 个同名 TIFF/HEIC 收在对应图片的「下载」里，不单独计数' : '' },
+                      (tree.truncated ? '≥ ' : '') + Math.max(0, tree.totalFiles - hiddenCount) + ' 个文件 · ' + sizeText(Math.max(0, tree.totalBytes - hiddenBytes))
+                    )
                   ),
                   h(
                     'div',
@@ -4701,8 +4842,7 @@
                           title: entry.rel,
                           onClick: function () { open(entry.rel); }
                         },
-                        isImage && canPreview
-                          ? h('img', {
+                        isImage && canPreview                          ? h('img', {
                               className: 'dsa-art-thumb',
                               src: artifactThumbUrl(entry.rel, 320),
                               alt: entry.name,
@@ -4718,18 +4858,13 @@
                                 // 回退也用「能显示的」那个地址：TIFF 的 raw 浏览器一样打不开
                                 img.src = artifactPreviewUrl(entry.rel, entry.ext);
                               }
-                            })
-                          : h('span', { className: 'dsa-art-ext' }, (entry.ext || '?').replace('.', '').toUpperCase() || '?'),
+                            })                          : h('span', { className: 'dsa-art-ext' }, (entry.ext || '?').replace('.', '').toUpperCase() || '?'),
                         h('span', { className: 'dsa-art-name' }, entry.name),
                         h('span', { className: 'dsa-art-meta' }, sizeText(entry.size))
                       );
                     })
                   ),
-                  visible.length > 120
-                    ? h('div', { className: 'dsa-hint' }, '只显示前 120 个（这一类共 ' + visible.length + ' 个）。要找具体某个文件，让 AI 用 data_analysis_artifacts 按路径读，或直接看上面的相对路径。')
-                    : null
-                );
-
+                  visible.length > 120                    ? h('div', { className: 'dsa-hint' }, '只显示前 120 个（这一类共 ' + visible.length + ' 个）。要找具体某个文件，让 AI 用 data_analysis_artifacts 按路径读，或直接看上面的相对路径。')                    : null                );
         // 弹层内容：图给大图、表给整张表、文本给全文、PDF 内嵌阅读器、Word 给下载
         var overlayBody = null;
         if (detail.loading) {
@@ -4760,12 +4895,9 @@
           overlayBody = h(
             'div',
             { className: 'dsa-hint' },
-            '这是 Word 文档，浏览器不内嵌显示：点「下载」用 Word / WPS 打开，或在产物中心里看同名的图表。'
-          );
+            '这是 Word 文档，浏览器不内嵌显示：点「下载」用 Word / WPS 打开，或在产物中心里看同名的图表。'          );
         }
-
-        var lightbox = sel
-          ? h(
+        var lightbox = sel          ? h(
               'div',
               {
                 className: 'dsa-lightbox',
@@ -4784,55 +4916,53 @@
                   { className: 'dsa-lightbox-bar' },
                   h('b', { className: 'dsa-lightbox-name', title: sel }, sel),
                   h('span', { className: 'dsa-spacer' }),
-                  viewIsImage && imageList.length > 1
-                    ? h('span', { className: 'dsa-hint' }, selIndex + 1 + ' / ' + imageList.length)
-                    : null,
+                  viewIsImage && imageList.length > 1                    ? h('span', { className: 'dsa-hint' }, selIndex + 1 + ' / ' + imageList.length)                    : null,
                   h('a', { className: 'dsa-link', href: artifactViewUrl(sel), target: '_blank', rel: 'noreferrer' }, '新窗口打开'),
-                  h('a', { className: 'dsa-link', href: artifactRawUrl(sel, true) }, '下载'),
+                  h(
+                    'a',
+                    { className: 'dsa-link', href: artifactRawUrl(sel, true) },
+                    viewIsImage && twinRel                      ? '下载 ' + (extOf(sel).replace('.', '').toUpperCase() || '原图')                      : '下载'                  ),
+                  viewIsImage && twinRel                    ? h(
+                        'a',
+                        {
+                          className: 'dsa-link',
+                          href: artifactRawUrl(twinRel, true),
+                          title: twinRel                        },
+                        '下载 ' + extOf(twinRel).replace('.', '').toUpperCase()
+                      )                    : null,
                   h(Btn, { onClick: function () { setSel(''); }, title: '关闭（Esc）' }, '关闭')
                 ),
                 overlayBody,
-                viewIsImage && !VIEWABLE_IMAGE.test(extOf(sel))
-                  ? h('div', { className: 'dsa-hint' }, extOf(sel).replace('.', '').toUpperCase() + ' 浏览器不直接显示，这里看的是转码预览（最长边 2400px）；原图点「下载」。')
-                  : null,
-                viewIsImage && imageList.length > 1
-                  ? h(
+                viewIsImage && !VIEWABLE_IMAGE.test(extOf(sel))                  ? h('div', { className: 'dsa-hint' }, extOf(sel).replace('.', '').toUpperCase() + ' 浏览器不直接显示，这里看的是转码预览（最长边 2400px）；原图点「下载」。')                  : null,
+                viewIsImage && imageList.length > 1                  ? h(
                       'div',
                       { className: 'dsa-lightbox-navs' },
                       h('button', { type: 'button', className: 'dsa-lightbox-nav prev', 'aria-label': '上一张（←）', onClick: function () { stepBig(-1); } }, '‹'),
                       h('button', { type: 'button', className: 'dsa-lightbox-nav next', 'aria-label': '下一张（→）', onClick: function () { stepBig(1); } }, '›')
-                    )
-                  : null
-              )
-            )
-          : null;
-
+                    )                  : null              )
+            )          : null;
         return h(
           Modal,
           {
             title: '产物中心',
-            desc: 'output/ 里的图、表与文档。点任意一项就地弹层查看（图可 ←/→ 翻页，Esc 关闭）；只读，不改文件。',
-            onCancel: props.onCancel
-          },
+            desc: 'output/ 里的图、表与文档。点任意一项就地弹层查看（图可 ←/→ 翻页，Esc 关闭）；同名 TIFF 不单独占一张卡，点开 PNG 后可在旁边下载。只读，不改文件。',
+            onCancel: props.onCancel,
+            maskClose: true          },
           h('div', null, body, lightbox)
         );
       }
-
       /* ------------------------------------------------------------------ *
        * 契约卡（数据集 / 模型 / 产物 / 结论）
        * ------------------------------------------------------------------ */
-
       function RegistryCard(props) {
         var reg = props.registry;
         if (!reg) {
           // 旧宿主 / 还没重启：不留空白，说清楚这块是什么、怎么出现
-          return props.stale
-            ? h(
+          return props.stale            ? h(
                 'div',
                 { className: 'dsa-card dsa-pad' },
                 h('div', { className: 'dsa-hint' }, '契约卡需要新版宿主：面板已经是新的，DSH 主进程还在跑旧代码。重启 DSH 后这里会显示数据集 / 模型 / 产物 / 结论的登记情况。')
-              )
-            : null;
+              )            : null;
         }
         var counts = reg.counts || {};
         var issues = (reg.issues || []).filter(function (item) { return item && item.message; }).slice(0, 3);
@@ -4860,74 +4990,56 @@
               counts.warnings ? h(Chip, { tone: 'warn' }, '待核 ' + counts.warnings) : null,
               h('span', { className: 'dsa-spacer' }),
               h(Btn, { variant: 'ghost', onClick: props.onOpen }, '产物中心'),
-              reg.legacy
-                ? h(Btn, { variant: 'primary', disabled: props.busy, onClick: props.onAdopt }, props.busy ? '采纳中…' : '采纳现有产物')
-                : null
-            ),
-            reg.legacy
-              ? h(
+              reg.legacy                ? h(Btn, { variant: 'primary', disabled: props.busy, onClick: props.onAdopt }, props.busy ? '采纳中…' : '采纳现有产物')                : null            ),
+            reg.legacy              ? h(
                   'div',
                   { className: 'dsa-hint' },
-                  '还没有 v2 契约：点「采纳现有产物」按现状生成 datasets / models / artifacts 三份注册表。'
-                  + '推断出来的条目会标「待确认」，闸门在你确认或补齐之前只会判「判不了」，不会假绿。'
-                )
-              : h(
+                  '还没有 v2 契约：点「采纳现有产物」按现状生成 datasets / models / artifacts 三份注册表。'                  + '推断出来的条目会标「待确认」，闸门在你确认或补齐之前只会判「判不了」，不会假绿。'                )              : h(
                   'div',
                   { className: 'dsa-reg-lists' },
                   h(
                     'div',
                     { className: 'dsa-reg-list' },
                     h('div', { className: 'dsa-reg-h' }, '数据集'),
-                    datasets.length
-                      ? datasets.slice(0, 4).map(function (item) {
+                    datasets.length                      ? datasets.slice(0, 4).map(function (item) {
                           return h(
                             'div',
                             { key: item.id, className: 'dsa-reg-item' },
                             h('b', null, item.id),
-                            ' · ' + (item.rows || 0) + ' 行 / ' + (item.columns || 0) + ' 列'
-                              + (item.inAnalysis != null ? ' · 纳入 ' + item.inAnalysis : '')
+                            ' · ' + (item.rows || 0) + ' 行 / ' + (item.columns || 0) + ' 列'                              + (item.inAnalysis != null ? ' · 纳入 ' + item.inAnalysis : '')
                               + (item.confirmed ? '' : ' · 待确认')
                           );
-                        })
-                      : h('div', { className: 'dsa-hint' }, '没有登记数据集')
+                        })                      : h('div', { className: 'dsa-hint' }, '没有登记数据集')
                   ),
                   h(
                     'div',
                     { className: 'dsa-reg-list' },
                     h('div', { className: 'dsa-reg-h' }, '模型'),
-                    models.length
-                      ? models.slice(0, 4).map(function (item) {
+                    models.length                      ? models.slice(0, 4).map(function (item) {
                           return h(
                             'div',
                             { key: item.id, className: 'dsa-reg-item' },
                             h('b', null, item.id),
                             ' · ' + (item.estimator || '?') + (item.outcome ? ' → ' + item.outcome : '') + ' · N=' + (item.n == null ? '?' : item.n)
                           );
-                        })
-                      : h('div', { className: 'dsa-hint' }, '没有登记模型')
+                        })                      : h('div', { className: 'dsa-hint' }, '没有登记模型')
                   ),
                   h(
                     'div',
                     { className: 'dsa-reg-list' },
                     h('div', { className: 'dsa-reg-h' }, '普查'),
-                    sweep
-                      ? h('div', { className: 'dsa-reg-item' }, (sweep.outcomes || 0) + ' 个结局 · ' + (sweep.estimated || 0) + ' 个族已估 · ' + (sweep.undecided || 0) + ' 个未表态')
-                      : h('div', { className: 'dsa-hint' }, '还没跑模型族普查（让 AI 调 data_analysis_sweep）')
+                    sweep                      ? h('div', { className: 'dsa-reg-item' }, (sweep.outcomes || 0) + ' 个结局 · ' + (sweep.estimated || 0) + ' 个族已估 · ' + (sweep.undecided || 0) + ' 个未表态')                      : h('div', { className: 'dsa-hint' }, '还没跑模型族普查（让 AI 调 data_analysis_sweep）')
                   )
                 ),
-            issues.length
-              ? h(
+            issues.length              ? h(
                   'div',
                   { className: 'dsa-reg-issues', role: 'status' },
                   issues.map(function (item, index) {
                     return h('div', { key: index }, (item.severity === 'warn' ? '· ' : '✗ ') + (item.message || '').slice(0, 160));
                   })
-                )
-              : null
-          )
+                )              : null          )
         );
       }
-
       function SettingsDialog(props) {
         var rootState = useState((props.config && props.config.skillRoot) || '');
         var root = rootState[0];
@@ -4947,13 +5059,11 @@
         var catState = useState(null);
         var cat = catState[0];
         var setCat = catState[1];
-
         useEffect(function () {
           request('GET', '/assistant/models')
             .then(function (json) { if (json) setCat(json); })
             .catch(function () {});
         }, []);
-
         var providers = (cat && cat.providers) || [];
         var current = null;
         for (var i = 0; i < providers.length; i += 1) {
@@ -4976,8 +5086,7 @@
                 pythonPath: py.trim(),
                 modelMode: mode,
                 modelProvider: mode === 'custom' ? provider : '',
-                modelId: mode === 'custom' ? modelId : ''
-              });
+                modelId: mode === 'custom' ? modelId : ''              });
             }
           },
           h(
@@ -4987,8 +5096,7 @@
               label: t('skillRoot'),
               value: root,
               placeholder: 'F:\\...\\SPSS-Style-Charting-Skill',
-              onChange: setRoot
-            }),
+              onChange: setRoot            }),
             h(
               'div',
               { className: 'dsa-field' },
@@ -5005,11 +5113,8 @@
                 h('option', { value: 'follow' }, t('modelFollow')),
                 h('option', { value: 'custom' }, t('modelCustom'))
               ),
-              defaultRoute && defaultRoute.provider && defaultRoute.model
-                ? h('div', { className: 'dsa-model-line' }, 'DSH 默认：' + defaultRoute.provider + ' / ' + defaultRoute.model)
-                : h('div', { className: 'dsa-hint' }, defaultRoute && defaultRoute.error ? defaultRoute.error : 'DSH 未配置默认模型'),
-              mode === 'custom'
-                ? h(
+              defaultRoute && defaultRoute.provider && defaultRoute.model                ? h('div', { className: 'dsa-model-line' }, 'DSH 默认：' + defaultRoute.provider + ' / ' + defaultRoute.model)                : h('div', { className: 'dsa-hint' }, defaultRoute && defaultRoute.error ? defaultRoute.error : 'DSH 未配置默认模型'),
+              mode === 'custom'                ? h(
                     'div',
                     { className: 'dsa-split', style: { marginTop: '6px' } },
                     h(
@@ -5042,10 +5147,8 @@
                         })
                       )
                     )
-                  )
-                : null,
-              cat && cat.ok === false && cat.error ? h('div', { className: 'dsa-hint' }, t('modelsFail') + '：' + cat.error) : null
-            ),
+                  )                : null,
+              cat && cat.ok === false && cat.error ? h('div', { className: 'dsa-hint' }, t('modelsFail') + '：' + cat.error) : null            ),
         h(
               'div',
               { className: 'dsa-field' },
@@ -5056,51 +5159,35 @@
                 { className: 'dsa-inline', style: { marginTop: '6px' } },
                 // 这两颗是「出路」，不是页脚链接：主路（找 AI 装）用实心，次路（自己再看一眼）用带框按钮，
                 // 之前两颗都是 ghost（透明底透明边灰字），在设置页里看着就是一行文字。
-                props.onAi
-                  ? h(
+                props.onAi                  ? h(
                       Btn,
                       { variant: 'primary', disabled: props.busy || props.aiBusy, onClick: props.onAi },
-                      props.aiBusy ? '正在开临时会话…' : '让 AI 装好环境'
-                    )
-                  : null,
+                      props.aiBusy ? '正在开临时会话…' : '让 AI 装好环境'                    )                  : null,
                 h(Btn, { disabled: props.busy || props.aiBusy, onClick: props.onRecheck }, t('recheck')),
-                props.preflight && props.preflight.checkedAt
-                  ? h('span', { className: 'dsa-hint' }, t('checkedAt') + ' ' + props.preflight.checkedAt.replace('T', ' ').slice(0, 19))
-                  : null
-              )
+                props.preflight && props.preflight.checkedAt                  ? h('span', { className: 'dsa-hint' }, t('checkedAt') + ' ' + props.preflight.checkedAt.replace('T', ' ').slice(0, 19))                  : null              )
             ),
-            props.skill
-              ? h(
+            props.skill              ? h(
                   'div',
                   { className: props.skill.ok ? 'dsa-ok-note' : 'dsa-error' },
-                  props.skill.ok
-                    ? t('skillOk') + '：' + props.skill.version + ' · ' + props.skill.scripts.length + ' 脚本 · ' + props.skill.packageDir
-                    : t('skillMissing') + '：' + (props.skill.reason || '')
-                )
-              : null
-          )
+                  props.skill.ok                    ? t('skillOk') + '：' + props.skill.version + ' · ' + props.skill.scripts.length + ' 脚本 · ' + props.skill.packageDir                    : t('skillMissing') + '：' + (props.skill.reason || '')
+                )              : null          )
         );
       }
-
       /* ------------------------------------------------------------------ *
        * 材料库
        * ------------------------------------------------------------------ */
-
       var MOUNT_WORD = {
         ok: '有效',
         'not-link': '不是工作台建的挂载',
         'missing-link': '挂载不见了',
         retargeted: '指向被改过',
-        'missing-target': '目标不在了'
-      };
-
+        'missing-target': '目标不在了'      };
       function splitEntries(text) {
         return String(text || '')
           .split(/[\n,，;；]+/)
           .map(function (item) { return item.trim(); })
           .filter(Boolean);
       }
-
       /**
        * 材料库：用户的资料放在自己的目录里，工作台只记地址。
        * 挂到 data/ 下是目录联接（Windows）或镜像目录（macOS/Linux），一个字节都不复制；所以这里能删的只有挂载，删不掉原件。
@@ -5113,11 +5200,7 @@
         var text = String(value == null ? '' : value).trim();
         if (!text) return '';
         // 成对引号（中英文都有）
-        if (/^["'“”‘’].*["'“”‘’]$/.test(text)) text = text.slice(1, -1).trim();
-        if (/^file:\/\//i.test(text)) {
-          try {
-            text = decodeURI(text.replace(/^file:\/\/\/?/i, function (all) {
-              return all.endsWith(':///') ? '' : '/';
+        if (/^["'“”‘’].*["'“”‘’]$/.test(text)) text = text.slice(1, -1).trim();        if (/^file:\/\//i.test(text)) {          try {            text = decodeURI(text.replace(/^file:\/\/\/?/i, function (all) {              return all.endsWith(':///') ? '' : '/';
             }));
           } catch (error) {
             /* 解不了就按原样 */
@@ -5128,12 +5211,11 @@
         if (text.length > 1 && !/^[A-Za-z]:[\\/]$/.test(text)) text = text.replace(/[\\/]+$/, '');
         return text;
       }
-
-      /** 是不是 macOS / Linux 口径：快照里的平台先算数，弹窗自己拉的数据兜底 */      function macOSMode(data, platform) {
+      /** 是不是 macOS / Linux 口径：快照里的平台先算数，弹窗自己拉的数据兜底 */
+      function macOSMode(data, platform) {
         if (platform) return platform !== 'win32';
         return Boolean(data && data.isWindows === false);
       }
-
       function MaterialsDialog(props) {
         var dataState = useState(null);
         var data = dataState[0];
@@ -5175,21 +5257,18 @@
             aliveRef.current = false;
           };
         }, []);
-
         var refresh = function () {
           return request('GET', '/materials').then(function (json) {
             if (json && json.ok !== false) setData(json);
             return json;
           });
         };
-
         useEffect(function () {
           void refresh();
           // 识图在后台跑：弹窗开着时每 4 秒刷一次进度
           var timer = setInterval(function () { void refresh(); }, 4000);
           return function () { clearInterval(timer); };
         }, []);
-
         var call = function (path, body) {
           setBusy(true);
           setError('');
@@ -5209,12 +5288,10 @@
             return null;
           });
         };
-
         var sources = (data && data.sources) || [];
         var mounts = (data && data.mounts) || [];
         var derived = (data && data.derived) || [];
         var vision = (data && data.vision) || null;
-
         // 交给会话：拿工作台生成的交办文案（挂载路径 + 只读约束 + 产物约定），投进研究对话
         var handoff = function () {
           setHanding(true);
@@ -5241,7 +5318,6 @@
             return null;
           });
         };
-
         var addRow = h(
           'div',
           { className: 'dsa-card', style: { padding: '10px 12px', marginBottom: '10px' } },
@@ -5252,8 +5328,7 @@
               placeholder: 'F:\\资料\\刑事判决书',
               style: { flex: '3 1 320px', margin: 0 },
               disabled: busy,
-              onChange: setAddPath
-            }),
+              onChange: setAddPath            }),
             h('div', { className: 'dsa-field', style: { flex: '1 1 120px', margin: 0 } },
               h('label', null, '名称（可选）'),
               h('input', {
@@ -5280,13 +5355,9 @@
           h('div', { className: 'dsa-hint', style: { marginTop: '6px' } },
             '登记只记地址：回执会把目录里的文件按「直读 / 识图 / 待转换 / 不支持」分成四类报数，四类相加就是这个目录的总数。')
         );
-
-        var sourceRows = sources.length
-          ? sources.map(function (src) {
+        var sourceRows = sources.length          ? sources.map(function (src) {
               var scan = src.scan;
-              var usedText = src.usedBy.length
-                ? '已挂到：' + src.usedBy.map(function (u) { return u.project + ' → data/' + u.as; }).join('、')
-                : '还没有项目挂载它';
+              var usedText = src.usedBy.length                ? '已挂到：' + src.usedBy.map(function (u) { return u.project + ' → data/' + u.as; }).join('、')                : '还没有项目挂载它';
               return h(
                 'div',
                 { key: src.id, className: 'dsa-card', style: { padding: '10px 12px', marginBottom: '8px' } },
@@ -5307,9 +5378,7 @@
                       disabled: busy,
                       onClick: function () {
                         var used = src.usedBy.length;
-                        var question = used
-                          ? '这个目录还被 ' + used + ' 个项目挂着，仍然要从材料库删掉吗？（磁盘上的文件不会动，会先把这些挂载摘掉）'
-                          : '从材料库删掉「' + src.label + '」？（磁盘上的文件不会动）';
+                        var question = used                          ? '这个目录还被 ' + used + ' 个项目挂着，仍然要从材料库删掉吗？（磁盘上的文件不会动，会先把这些挂载摘掉）'                          : '从材料库删掉「' + src.label + '」？（磁盘上的文件不会动）';
                         confirmThen(question, function () {
                           void call('/materials/remove', { id: src.id, force: Boolean(used) });
                         });
@@ -5342,17 +5411,13 @@
                       void call('/materials/mount', {
                         sourceId: src.id,
                         entries: splitEntries(entries[src.id]),
-                        as: ''
-                      });
+                        as: ''                      });
                     }
                   }, '挂到当前项目')
                 )
               );
-            })
-          : h('div', { className: 'dsa-empty' }, '材料库是空的：先在上面登记一个目录');
-
-        var mountRows = mounts.length
-          ? mounts.map(function (mount) {
+            })          : h('div', { className: 'dsa-empty' }, '材料库是空的：先在上面登记一个目录');
+        var mountRows = mounts.length          ? mounts.map(function (mount) {
               var bad = mount.status !== 'ok';
               return h(
                 'div',
@@ -5362,12 +5427,10 @@
                     h('div', { className: 'dsa-inline', style: { gap: '6px' } },
                       h('span', { className: 'dsa-tag ' + (bad ? 'err' : ''), title: mount.detail || '' }, bad ? '✗' : '✓'),
                       h('b', { className: 'dsa-mono' }, 'data/' + mount.as),
-                      mount.mode === 'mirror' ? h('span', { className: 'dsa-hint' }, '镜像（逐文件软链）') : null
-                    ),
+                      mount.mode === 'mirror' ? h('span', { className: 'dsa-hint' }, '镜像（逐文件软链）') : null                    ),
                     h('div', { className: 'dsa-mono', style: { fontSize: '11px', color: 'var(--dsa-ink3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: mount.target },
                       mount.target + '（' + (MOUNT_WORD[mount.status] || mount.status) + '）'),
-                    mount.detail ? h('div', { className: 'dsa-hint' }, mount.detail) : null
-                  ),
+                    mount.detail ? h('div', { className: 'dsa-hint' }, mount.detail) : null                  ),
                   h('div', { className: 'dsa-inline', style: { gap: '6px' } },
                     h(Btn, {
                       variant: 'ghost',
@@ -5399,9 +5462,7 @@
                   )
                 )
               );
-            })
-          : null;
-
+            })          : null;
         var visionSummary = vision && vision.summary;
         // 识图不再是面板上的「一键跑」：跑不跑、跑哪些页由会话按任务决定（工具 data_analysis_vision）。
         // 面板只留两件事——看得见进度、人来点头（human_verified 必须是人给的，不能让模型自己盖章）。
@@ -5414,18 +5475,12 @@
               vision && vision.running ? '正在跑…' : '空闲')
           ),
           h('div', { className: 'dsa-hint', style: { marginTop: '4px' } },
-            '审计判为 image_only 的 PDF 与图片才需要它。识图由工作台直连多模态模型逐页转写，' +
-            '产物写进派生目录并挂回 data/；未经人工核对的识别稿，数字溯源闸门只会判「判不了」。'),
-          visionSummary && visionSummary.rows
-            ? h('div', { className: 'dsa-hint', style: { marginTop: '4px' } },
-                '已识别 ' + visionSummary.pagesOk + ' 页 / ' + visionSummary.files + ' 份 · 失败 ' + visionSummary.pagesFailed + ' 页 · 人工已核 ' + visionSummary.pagesVerified + ' 页')
-            : null,
+            '审计判为 image_only 的 PDF 与图片才需要它。识图由工作台直连多模态模型逐页转写，' +            '产物写进派生目录并挂回 data/；未经人工核对的识别稿，数字溯源闸门只会判「判不了」。'),
+          visionSummary && visionSummary.rows            ? h('div', { className: 'dsa-hint', style: { marginTop: '4px' } },
+                '已识别 ' + visionSummary.pagesOk + ' 页 / ' + visionSummary.files + ' 份 · 失败 ' + visionSummary.pagesFailed + ' 页 · 人工已核 ' + visionSummary.pagesVerified + ' 页')            : null,
           h('div', { className: 'dsa-inline', style: { marginTop: '8px', gap: '8px', flexWrap: 'wrap' } },
-            vision && vision.running
-              ? h(Btn, { variant: 'ghost', disabled: busy, onClick: function () { void call('/materials/vision/cancel', {}); } }, '停止')
-              : null,
-            visionSummary && visionSummary.pagesOk
-              ? h(Btn, {
+            vision && vision.running              ? h(Btn, { variant: 'ghost', disabled: busy, onClick: function () { void call('/materials/vision/cancel', {}); } }, '停止')              : null,
+            visionSummary && visionSummary.pagesOk              ? h(Btn, {
                   variant: 'ghost',
                   disabled: busy,
                   onClick: function () {
@@ -5433,12 +5488,10 @@
                       void call('/materials/vision/verify', { all: true });
                     });
                   }
-                }, '标记已核对')
-              : null,
+                }, '标记已核对')              : null,
             h('span', { className: 'dsa-hint' }, '要识别就直接跟 AI 说，或者用 data_analysis_vision 工具。')
           )
         );
-
         var handoffBlock = h(
           'div',
           { className: 'dsa-card', style: { padding: '10px 12px', marginTop: '10px' } },
@@ -5447,32 +5500,22 @@
             h('span', { className: 'dsa-hint' }, handing ? '正在投递…' : '只读挂载')
           ),
           h('div', { className: 'dsa-hint', style: { marginTop: '4px' } },
-            '资料已经挂在 data/ 下，全程只读。怎么解析、要不要识图、doc 要不要转，交给 DSH 会话按任务决定；' +
-            '工作台只管两件事：不许改原件，识别稿写进派生目录并记账。'),
+            '资料已经挂在 data/ 下，全程只读。怎么解析、要不要识图、doc 要不要转，交给 DSH 会话按任务决定；' +            '工作台只管两件事：不许改原件，识别稿写进派生目录并记账。'),
           h('div', { className: 'dsa-inline', style: { marginTop: '8px', gap: '8px', flexWrap: 'wrap' } },
             h(Btn, {
               variant: 'primary',
               disabled: busy || handing || !mounts.length,
               onClick: function () { void handoff(); }
-            }, '让 AI 处理这些材料'),
-            !mounts.length ? h('span', { className: 'dsa-hint' }, '先挂一个材料目录') : null
-          )
+            }, '让 AI 处理这些材料'),            !mounts.length ? h('span', { className: 'dsa-hint' }, '先挂一个材料目录') : null          )
         );
-
-        var derivedLine = derived.length
-          ? h('div', { className: 'dsa-hint', style: { marginTop: '8px' } },
-              '派生稿：' + derived.map(function (item) { return item.mountName + '（' + item.files + ' 份）'; }).join('、'))
-          : null;
-
+        var derivedLine = derived.length          ? h('div', { className: 'dsa-hint', style: { marginTop: '8px' } },
+              '派生稿：' + derived.map(function (item) { return item.mountName + '（' + item.files + ' 份）'; }).join('、'))          : null;
         return h(
           Modal,
-          { title: '材料库', onCancel: props.onCancel, desc: macOSMode(data, props.platform)
-            ? '材料留在你自己的目录里，工作台只记地址；挂到项目 data/ 下是「镜像目录」（真实目录 + 逐文件软链），不复制文件。'
-            : '材料留在你自己的目录里，工作台只记地址；挂到项目 data/ 下是目录联接（macOS/Linux 为镜像目录），不复制文件。' },
+          { title: '材料库', onCancel: props.onCancel, maskClose: true, desc: macOSMode(data, props.platform)            ? '材料留在你自己的目录里，工作台只记地址；挂到项目 data/ 下是「镜像目录」（真实目录 + 逐文件软链），不复制文件。'            : '材料留在你自己的目录里，工作台只记地址；挂到项目 data/ 下是目录联接（macOS/Linux 为镜像目录），不复制文件。' },
           error ? h('div', { className: 'dsa-error', style: { marginBottom: '10px' } }, error) : null,
           note ? h('div', { className: 'dsa-hint', style: { marginBottom: '10px' } }, note) : null,
-          ask
-            ? h('div', { className: 'dsa-ask' },
+          ask            ? h('div', { className: 'dsa-ask' },
               h('span', { className: 'dsa-ask-t' }, ask.text),
               h(Btn, {
                 variant: 'primary',
@@ -5484,25 +5527,20 @@
                 }
               }, '确认'),
               h(Btn, { variant: 'ghost', onClick: function () { setAsk(null); } }, '取消')
-            )
-            : null,
+            )            : null,
           h('div', { style: { maxHeight: '58vh', overflowY: 'auto', paddingRight: '2px' } },
             addRow,
             h('div', { className: 'dsa-rail-h', style: { padding: '6px 0' } }, '材料源'),
             sourceRows,
             h('div', { className: 'dsa-rail-h', style: { padding: '12px 0 6px' } }, '当前项目 data/ 下的挂载'),
             h('div', { className: 'dsa-hint', style: { marginBottom: '4px' } },
-              macOSMode(data, props.platform)
-                ? 'macOS/Linux 上没有目录联接，工作台建的是「镜像目录」：真实目录里逐个文件软链，源目录增删文件后点「修复」同步。'
-                : 'Windows 上建的是目录联接（junction）：data/ 下的目录直接指向材料目录，不占空间。'),
+              macOSMode(data, props.platform)                ? 'macOS/Linux 上没有目录联接，工作台建的是「镜像目录」：真实目录里逐个文件软链，源目录增删文件后点「修复」同步。'                : 'Windows 上建的是目录联接（junction）：data/ 下的目录直接指向材料目录，不占空间。'),
             mountRows || h('div', { className: 'dsa-empty' }, '还没有挂载任何材料目录'),
             derivedLine,
             visionBlock,
-            handoffBlock
-          )
+            handoffBlock          )
         );
       }
-
       function AdjudicateDialog(props) {
         var noteState = useState('');
         var note = noteState[0];
@@ -5525,8 +5563,7 @@
             title: t('adjudicateTitle') + ' · ' + props.gate.label,
             desc: t('adjudicateHint'),
             error: props.error,
-            onCancel: props.onCancel
-          },
+            onCancel: props.onCancel          },
           h(
             'div',
             { className: 'dsa-form' },
@@ -5534,17 +5571,12 @@
               'div',
               { className: 'dsa-card dsa-pad', style: { marginBottom: '4px' } },
               h('div', { style: { fontSize: '13px', lineHeight: 1.55 } }, props.gate.detail || '这条闸门需要你判断。'),
-              props.gate.source
-                ? h('div', { className: 'dsa-hint dsa-mono', style: { marginTop: '5px' } }, String(props.gate.source))
-                : null,
+              props.gate.source                ? h('div', { className: 'dsa-hint dsa-mono', style: { marginTop: '5px' } }, String(props.gate.source))                : null,
               h(
                 'div',
                 { className: 'dsa-hint', style: { marginTop: '6px' } },
-                '阶段：' + props.stage.name
-                  + (props.stage.lastRun
-                    ? ' · 最近运行 ' + (RUN_WORD[props.stage.lastRun.status] || props.stage.lastRun.status)
-                      + '（退出码 ' + (props.stage.lastRun.exitCode === null ? '—' : props.stage.lastRun.exitCode) + '）'
-                    : ' · 还没有运行记录')
+                '阶段：' + props.stage.name                  + (props.stage.lastRun                    ? ' · 最近运行 ' + (RUN_WORD[props.stage.lastRun.status] || props.stage.lastRun.status)
+                      + '（退出码 ' + (props.stage.lastRun.exitCode === null ? '—' : props.stage.lastRun.exitCode) + '）'                    : ' · 还没有运行记录')
               )
             ),
             h(
@@ -5569,14 +5601,12 @@
           )
         );
       }
-
       /* ------------------------------------------------------------------ *
        * 套用补丁前的确认
        *
        * 补丁会覆盖项目里的文件：不能点一下就落盘。先把目标、基线、备份策略与
        * 内容前 24 行摊开，人确认后才 POST /recheck/apply。
        * ------------------------------------------------------------------ */
-
       function PatchDialog(props) {
         var issue = props.issue || {};
         var patch = issue.patch || {};
@@ -5591,8 +5621,7 @@
             error: props.error,
             confirmText: t('patchApply'),
             onCancel: props.onCancel,
-            onConfirm: props.onConfirm
-          },
+            onConfirm: props.onConfirm          },
           h(
             'div',
             { className: 'dsa-form' },
@@ -5608,11 +5637,9 @@
           )
         );
       }
-
       /* ------------------------------------------------------------------ *
        * 图标与装配
        * ------------------------------------------------------------------ */
-
       function WorkbenchIcon() {
         return h(
           'svg',
@@ -5625,12 +5652,10 @@
             strokeWidth: 1.5,
             strokeLinecap: 'round',
             strokeLinejoin: 'round',
-            'aria-hidden': 'true'
-          },
+            'aria-hidden': 'true'          },
           h('path', { d: 'M3 3h14l-5 6v5.2l-4 1.8V9L3 3z' })
         );
       }
-
       function apply(ctx) {
         runtime.ctx = ctx;
         ctx.effect(installStyles, 'data-analysis: styles');
@@ -5649,16 +5674,21 @@
                   return t('title');
                 }
               },
-              WorkbenchIcon
-            );
+              WorkbenchIcon            );
           }));
-
           // 原生对话里的三处装饰 + 工具卡（全部只做加法，不替换宿主组件）
           offs.push(ctx.slots.inject('conversation.session.header.actions', function () {
             return ctx.slots.register(
-              { name: 'conversation.session.header.actions', id: 'data-analysis-workbench', order: 90 },
-              OpenWorkbenchAction
-            );
+              {
+                name: 'conversation.session.header.actions',
+                id: 'data-analysis-workbench',
+                order: 90,
+                // 拿到「这条对话是谁」：工作台据此把面板跟到对话所属的项目上
+                inject: function (sessionId) {
+                  return { sessionId: sessionId };
+                }
+              },
+              OpenWorkbenchAction            );
           }));
           offs.push(ctx.slots.inject('conversation.chat.turnTail', function () {
             return ctx.slots.register(
@@ -5670,8 +5700,7 @@
                   return { sessionId: sessionId };
                 }
               },
-              WorkbenchTail
-            );
+              WorkbenchTail            );
           }));
           offs.push(ctx.slots.inject('conversation.input.left', function () {
             return ctx.slots.register(
@@ -5683,15 +5712,13 @@
                   return { sessionId: sessionId };
                 }
               },
-              NextStepControl
-            );
+              NextStepControl            );
           }));
           DATA_TOOLS.forEach(function (toolName) {
             offs.push(ctx.slots.inject('tool.call.toolview', function () {
               return ctx.slots.register({ name: 'tool.call.toolview', key: toolName }, makeToolRow(toolName));
             }));
           });
-
           return function () {
             offs.forEach(function (off) {
               if (typeof off === 'function') off();
@@ -5704,12 +5731,7 @@
           };
         }, 'data-analysis: session');
       }
-
       return {
         inject: ['slots'],
-        apply: apply
-      };
-    }
-  });
-})();
-
+        apply: apply      };
+    }  });})();

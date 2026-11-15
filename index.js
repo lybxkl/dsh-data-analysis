@@ -2,7 +2,7 @@
  * @local/dsh-data-analysis —— 实证研究工作台（Host 半片）
  *
  * 职责：
- *   1. 登记一个 skill 包（只读），把它 scripts/ 下的脚本组织成 9 个阶段；
+ *   1. 登记一个 skill 包（只读），把它 scripts/ 下的脚本组织成 10 个阶段；
  *   2. 按阶段起子进程跑脚本，日志落项目的 runs/，退出状态如实记录；
  *   3. 只读解析产物（sample_flow / manifest / coef / number_issues），把闸门拆成
  *      pass / fail / unjudged 三态——判不了就说判不了；
@@ -110,6 +110,8 @@ export function apply(ctx, rawConfig = {}) {
     getConfig,
     store,
     runner,
+    // 宿主 context：只用来读「这条会话的 cwd」这种只读事实（自动关联的强信号）
+    hostCtx: ctx,
     onChange: (event) => {
       store.flushSoon(120);
       try {
@@ -125,6 +127,7 @@ export function apply(ctx, rawConfig = {}) {
 
   // 重跑链的回调不会跨进程回来：留在 running 的链会把「套用」永久挡住，这里统一标中断
   const interrupted = workbench.recoverChains();
+  workbench.recoverGateLeases().catch(error=>logger?.warn?.(`[data-analysis] 中断体检恢复失败：${error.message}`));
   if (interrupted) logger?.warn?.(`[data-analysis] ${interrupted} 条重跑链已标记为中断`);
 
   // LLM 桥：用宿主自己的模型选择（agentDefaultModel）与 llm 服务起草文本。
@@ -212,7 +215,22 @@ export function apply(ctx, rawConfig = {}) {
         .join('；');
       logger?.info?.(`[data-analysis] 环境自检${label}${pre.python ? ` · Python ${pre.python}` : ''}${problems ? `；${problems}` : ''}`);
     })
-    .catch(() => {});
+    .catch(() => {})
+    .finally(() => {
+      // 首屏预热：等自检与界面启动都过去了，再算一次快照，把「读盘 + 语料指纹」的缓存垫热，
+      // 结果直接丢掉。这样用户第一次点进面板不用等冷启动的整项目扫描（本机实测 2.8s → 约 0.2s）。
+      // 判定仍然每次现算：这里只提前把文件读进缓存，不缓存任何结论，也不改任何产物。
+      setTimeout(() => {
+        try {
+          if (!workbench.active().ok) return;
+          const started = Date.now();
+          workbench.snapshot();
+          logger?.info?.(`[data-analysis] 首屏预热完成（${Date.now() - started}ms）`);
+        } catch (error) {
+          logger?.warn?.(`[data-analysis] 首屏预热跳过：${String(error?.message || error)}`);
+        }
+      }, 3000)?.unref?.();
+    });
 
   const skill = workbench.skill();
   logger?.info?.(

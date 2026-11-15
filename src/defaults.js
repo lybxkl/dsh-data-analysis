@@ -3,7 +3,7 @@
  *
  * 设计约束（来自 PRODUCT.md 与 skills/empirical-research-pipeline 的隔离契约）：
  *   - 插件单向依赖 skill，只读 skillRoot；一切脚本调用走子进程。
- *   - 阶段登记表是「数据」，不是 11 个写死的按钮：脚本、参数、产物都能在面板里改，
+ *   - 阶段登记表是「数据」，不是 10 个写死的按钮：脚本、参数、产物都能在面板里改，
  *     模型现场写的新脚本也能登记进来（改 project.json 的 stages[].args / script 即可）。
  */
 
@@ -30,8 +30,13 @@ export const DEFAULT_CONFIG = {
 export const SKILL_PACKAGE = 'empirical-research-pipeline';
 
 /**
- * 9 个阶段。args 是默认参数模板；{dataDir}/{outputDir}/{projectRoot} 运行时替换。
+ * 10 个阶段。args 是默认参数模板；{dataDir}/{outputDir}/{projectRoot} 运行时替换。
  * script 为 null 表示这一步由人/模型完成（例如写 scope、拼分析宽表），面板只做验收。
+ *
+ * 多步阶段（audit / coding / verify / stats / figures / manuscript / qa）用 steps 描述：
+ *   - optionalArgs：运行时按文件是否存在追加 --flag file；
+ *   - optionalFlags：只追加一个开关（例如 --require-review）；
+ *   - whenFile：文件不存在就整步跳过（老项目没有 registry/decisions 时不制造失败）。
  */
 export const STAGE_DEFS = [
   {
@@ -49,20 +54,73 @@ export const STAGE_DEFS = [
     index: 2,
     name: '资料审计',
     short: '审计',
-    purpose: '逐份文件的可读性、重复、类型与字数审计，产出 sample_flow 与 corpus_files',
+    purpose: '逐份文件的可读性、重复、类型与字数审计；同时生成去重计划',
     script: 'scripts/audit_corpus.py',
-    args: ['--root', 'data', '--out-dir', 'output/audit', '--min-chars', '100'],
-    artifacts: ['output/audit/sample_flow.csv', 'output/audit/corpus_summary.json'],
+    args: ['--root', 'data', '--out-dir', 'output/audit', '--min-chars', '100', '--content-dedupe'],
+    steps: [
+      {
+        script: 'scripts/audit_corpus.py',
+        args: ['--root', 'data', '--out-dir', 'output/audit', '--min-chars', '100', '--content-dedupe'],
+        produces: ['output/audit/corpus_files.csv', 'output/audit/corpus_summary.json', 'output/audit/sample_flow.csv'],
+      },
+      {
+        // 去重只出计划（不动原件）：dedupe_corpus.py 默认写 dedupe_plan.csv，
+        // 真要移动得显式 --apply，插件永远不替用户动原始资料。
+        script: 'scripts/dedupe_corpus.py',
+        args: ['--root', 'data', '--audit', 'output/audit/corpus_files.csv', '--out-dir', 'output/audit'],
+        produces: ['output/audit/dedupe_plan.csv'],
+        continueOnError: true,
+      },
+    ],
+    artifacts: ['output/audit/sample_flow.csv', 'output/audit/corpus_summary.json', 'output/audit/dedupe_plan.csv'],
   },
   {
     id: 'coding',
     index: 3,
     name: '编码与抽取',
     short: '编码',
-    purpose: '按 profile 生成编码表；加 --extract 时落 dataset.csv 与 evidence.jsonl',
+    purpose: '按 profile 生成编码表；有 extract_profile.json 时落 dataset.csv 与 evidence.jsonl',
     script: 'scripts/make_coding_sheet.py',
-    args: ['--root', 'data', '--out', 'output/coding'],
-    artifacts: ['output/coding/coding_sheet.csv', 'output/coding/sample_flow.csv'],
+    args: ['--root', 'data', '--out', 'output/coding', '--audit', 'output/audit/corpus_files.csv'],
+    optionalArgs: [
+      { flag: '--dedupe-plan', file: 'output/audit/dedupe_plan.csv' },
+      { flag: '--extract', file: 'extract_profile.json' },
+      { flag: '--decisions', file: 'decisions.jsonl' },
+    ],
+    steps: [
+      {
+        script: 'scripts/make_coding_sheet.py',
+        args: ['--root', 'data', '--out', 'output/coding', '--audit', 'output/audit/corpus_files.csv'],
+        optionalArgs: [
+          { flag: '--dedupe-plan', file: 'output/audit/dedupe_plan.csv' },
+          // 字段抽取层：不传 --extract 只出编码表，不会凭空造 dataset.csv
+          { flag: '--extract', file: 'extract_profile.json' },
+          { flag: '--decisions', file: 'decisions.jsonl' },
+        ],
+        // 有判断台账时，未复审字段必须拦住：--require-review 让脚本 exit 2 并说明「不是成品」
+        optionalFlags: [{ flag: '--require-review', whenFile: 'decisions.jsonl' }],
+        produces: ['output/coding/coding_sheet.csv', 'output/coding/sample_flow.csv', 'output/coding/skipped_documents.csv'],
+      },
+      {
+        script: 'scripts/check_decisions.py',
+        args: [
+          '--root', 'data',
+          '--decisions', 'decisions.jsonl',
+          '--out', 'output/qa/decision_issues.csv',
+        ],
+        // 只有跑过 --extract 才有 extraction_review.csv；没有就不传，别让
+        // 「还没抽取」变成 check_decisions 的参数错误。
+        optionalArgs: [{ flag: '--review', file: 'output/coding/extraction_review.csv' }],
+        whenFile: 'decisions.jsonl',
+        produces: ['output/qa/decision_issues.csv'],
+        continueOnError: true,
+      },
+    ],
+    artifacts: [
+      'output/coding/coding_sheet.csv',
+      'output/coding/sample_flow.csv',
+      'output/coding/skipped_documents.csv',
+    ],
   },
   {
     id: 'dataset',
@@ -75,52 +133,150 @@ export const STAGE_DEFS = [
     artifacts: ['output/dataset/analysis.csv'],
   },
   {
-    id: 'stats',
+    id: 'verify',
     index: 5,
+    name: '全格复核',
+    short: '复核数据',
+    purpose: '逐格回源 + 独立复算：prepare 生成待核模板，final 通过后数据才允许进入统计',
+    script: 'scripts/verify_dataset.py',
+    args: [
+      '--registry', 'research_registry.json',
+      '--root', '.',
+      '--out', 'output/data_verification',
+      '--stage', 'prepare',
+    ],
+    steps: [
+      {
+        // 没有 research_registry.json 的老项目整步跳过：不制造「跑不了」的假失败
+        script: 'scripts/verify_dataset.py',
+        args: [
+          '--registry', 'research_registry.json',
+          '--root', '.',
+          '--out', 'output/data_verification',
+          '--stage', 'prepare',
+        ],
+        whenFile: 'research_registry.json',
+        continueOnError: true,
+      },
+    ],
+    artifacts: ['output/data_verification/dataset_verification.json'],
+  },
+  {
+    id: 'stats',
+    index: 6,
     name: '统计分析',
     short: '统计',
     purpose: '描述统计 + 回归 + 诊断，产出 coef_*.csv 与 model_meta.json',
     script: 'scripts/auto_stats.py',
-    args: ['--data', 'output/dataset/analysis.csv', '--out', 'output/models'],
+    args: [
+      '--data', 'output/dataset/analysis.csv',
+      '--out', 'output/models',
+      '--sample-flow', 'output/coding/sample_flow.csv',
+      '--vif',
+      '--roc',
+    ],
     // 项目根上有配置文件时自动带上：不传 --config 统计脚本会瞎猜结局变量，
     // 不传 --spec 则一张模型表都不产出（重跑一次就把已有模型洗掉）。
     optionalArgs: [
       { flag: '--config', file: 'chart_config.json' },
       { flag: '--spec', file: 'model_spec.json' },
     ],
-    artifacts: ['output/models/model_meta.json'],
+    steps: [
+      {
+        script: 'scripts/auto_stats.py',
+        args: [
+          '--data', 'output/dataset/analysis.csv',
+          '--out', 'output/models',
+          '--sample-flow', 'output/coding/sample_flow.csv',
+          '--vif',
+          '--roc',
+        ],
+        optionalArgs: [
+          { flag: '--config', file: 'chart_config.json' },
+          { flag: '--spec', file: 'model_spec.json' },
+        ],
+        produces: ['output/models/coef_all.csv', 'output/models/fit.csv', 'output/models/model_meta.json'],
+      },
+      {
+        // 方法包是显式选择：有 methods.json 才跑；前置条件不足时自己记 skipped
+        script: 'scripts/methods_pack.py',
+        args: ['--data', 'output/dataset/analysis.csv', '--out', 'output/methods', '--config', 'methods.json'],
+        whenFile: 'methods.json',
+        produces: ['output/methods/methods_report.md', 'output/methods/methods_manifest.csv'],
+        continueOnError: true,
+      },
+    ],
+    artifacts: ['output/models/model_meta.json', 'output/models/coef_all.csv', 'output/methods/methods_report.md'],
   },
   {
     id: 'figures',
-    index: 6,
+    index: 7,
     name: '出版级图表',
     short: '图表',
-    purpose: '全景图表包与 chart_manifest.csv（dpi / px_width / N / 调色板）',
+    purpose: '全景图表包与 chart_manifest.csv（dpi / px_width / N / 调色板）；有 paper.json 时出多面板图',
     script: 'scripts/auto_chart_pack.py',
-    args: ['--data', 'output/dataset/analysis.csv', '--out', 'output/chart_pack'],
+    args: ['--data', 'output/dataset/analysis.csv', '--out', 'output/chart_pack', '--no-tiff'],
     // 有 chart_config.json 就带上：不传的话脚本无法推断结局变量，直接退出 2。
     optionalArgs: [{ flag: '--config', file: 'chart_config.json' }],
-    artifacts: ['output/chart_pack/chart_manifest.csv'],
+    steps: [
+      {
+        // --no-tiff：TIFF 是新版默认产物，中文期刊投稿用不上，跑一次多 30% 时间
+        script: 'scripts/auto_chart_pack.py',
+        args: ['--data', 'output/dataset/analysis.csv', '--out', 'output/chart_pack', '--no-tiff'],
+        optionalArgs: [{ flag: '--config', file: 'chart_config.json' }],
+        produces: ['output/chart_pack/chart_manifest.csv'],
+      },
+      {
+        script: 'scripts/paper_figures.py',
+        args: ['--data', 'output/dataset/analysis.csv', '--paper', 'paper.json', '--out', 'output/figures'],
+        whenFile: 'paper.json',
+        produces: ['output/figures/paper_figures_manifest.csv'],
+        continueOnError: true,
+      },
+    ],
+    artifacts: ['output/chart_pack/chart_manifest.csv', 'output/figures/paper_figures_manifest.csv'],
   },
   {
     id: 'manuscript',
-    index: 7,
+    index: 8,
     name: '文稿组装',
     short: '文稿',
-    purpose: '按 spec 组装正文、图表与题注',
+    purpose: '按 spec 组装正文、图表与题注；有 figure_map.json 时回填 600dpi 图并导出 PDF',
     script: 'scripts/assemble_manuscript.py',
     // --spec 是必填项：没有 manuscript.json 时让脚本自己报「spec not found」，比 argparse 的用法错误可读
     args: ['--spec', 'manuscript.json', '--out', 'output/manuscript.docx'],
-    artifacts: ['output/manuscript.docx'],
+    steps: [
+      {
+        script: 'scripts/assemble_manuscript.py',
+        args: ['--spec', 'manuscript.json', '--out', 'output/manuscript.docx'],
+        // 声明本步会写哪些文件：下一步的 whenFile 判定要据此知道「它可能在本次运行里才出现」，
+        // runner 也会在执行到该步时再检查一次（first-run 不再漏掉 PDF 导出）。
+        produces: ['output/manuscript.docx', 'output/manuscript_numbers.csv', 'output/figure_map.json'],
+      },
+      {
+        // Word 里嵌的是降采样图；出 PDF 时按 figure_map 回填 600dpi 原图
+        script: 'scripts/export_pdf_hires.py',
+        args: [
+          '--docx', 'output/manuscript.docx',
+          '--out-pdf', 'output/manuscript.pdf',
+          '--figure-map', 'output/figure_map.json',
+        ],
+        whenFile: 'output/figure_map.json',
+        produces: ['output/manuscript.pdf'],
+        continueOnError: true,
+      },
+    ],
+    artifacts: ['output/manuscript.docx', 'output/manuscript_numbers.csv', 'output/figure_map.json'],
   },
   {
     id: 'qa',
-    index: 8,
+    index: 9,
     name: '终检',
     short: '终检',
-    purpose: '图表合规 + 数字溯源 + 交付清单，任何未过项都不许报成功',
+    purpose: '图表合规 + 数字溯源 + 研究总闸门 + 复核包，任何未过项都不许报成功',
     script: 'scripts/qa_outputs.py',
-    // 终检要跑两步：qa_outputs 出合规报告，verify_numbers 出数字溯源。
+    // 终检要跑四步：qa_outputs 出合规报告，verify_numbers 出数字溯源，
+    // research_gate 汇总全格复核/模型回查/回执，review_pack 出人可读的复核包。
     // --exit-zero：让「跑完了」与「有没有过」分开，过没过由闸门读报告决定。
     steps: [
       {
@@ -132,9 +288,15 @@ export const STAGE_DEFS = [
           '--manifest', 'output/chart_pack/chart_manifest.csv',
           '--audit', 'output/audit/corpus_files.csv',
           '--min-dpi', '600',
+          // 显式给最小字号，qa 才做「实际安置字号」实测；位图没有文字层时降级为未核，
+          // 不把扫描/栅格图误判成不合规（未核 ≠ 通过，闸门会照实说）。
+          '--min-fontsize', '7.2',
+          '--allow-raster-text',
           '--out', 'output/qa/qa_report.json',
           '--exit-zero',
         ],
+        optionalArgs: [{ flag: '--pdf', file: 'output/manuscript.pdf' }],
+        produces: ['output/qa/qa_report.json'],
         continueOnError: true,
       },
       {
@@ -143,9 +305,49 @@ export const STAGE_DEFS = [
           '--out', 'output/verify',
           '--tables', 'output/models',
           '--figures-manifest', 'output/chart_pack/chart_manifest.csv',
-          '--sample-flow', 'output/audit/sample_flow.csv',
+          '--sample-flow', 'output/coding/sample_flow.csv',
           '--docx', 'output/manuscript.docx',
         ],
+        // 叙述数字（扫描文件总数之类）只能从组装器产出的 numbers.csv 承接，
+        // 不传的话 V-03 会把它们全报成「正文数字找不到」
+        optionalArgs: [{ flag: '--numbers', file: 'output/manuscript_numbers.csv' }],
+        produces: ['output/verify/number_issues.csv', 'output/verify/number_trace.csv'],
+        // 数字溯源有 error 时脚本 exit 2，但后面的总闸门/复核包仍要跑：
+        // 终检要一次把「哪里没过」和「复核包」都摆出来，不能第一步失败就全停。
+        continueOnError: true,
+      },
+      {
+        script: 'scripts/research_gate.py',
+        args: [
+          '--registry', 'research_registry.json',
+          '--root', '.',
+          '--verification', 'output/data_verification/dataset_verification.json',
+          '--out', 'output/research_gate.json',
+        ],
+        whenFile: 'output/data_verification/dataset_verification.json',
+        produces: ['output/research_gate.json'],
+        continueOnError: true,
+      },
+      {
+        script: 'scripts/review_pack.py',
+        // review_pack 吃的是**文件**不是目录：清单 CSV、number_issues.csv、
+        // qa_report.json 各一份。传目录时脚本的 isfile 判定会静默跳过，
+        // 复核包里会少掉图表、数字、终检三节——看起来「生成了」，其实缺内容。
+        args: [
+          '--data', 'output/dataset/analysis.csv',
+          '--stats', 'output/models',
+          '--figures', 'output/chart_pack/chart_manifest.csv',
+          '--qa', 'output/qa/qa_report.json',
+          '--verify', 'output/verify/number_issues.csv',
+          '--sample-flow', 'output/coding/sample_flow.csv',
+          '--out', 'output/review/review_pack.md',
+        ],
+        optionalArgs: [
+          { flag: '--decisions', file: 'decisions.jsonl' },
+          { flag: '--research-gate', file: 'output/research_gate.json' },
+        ],
+        whenFile: 'research_registry.json',
+        continueOnError: true,
       },
     ],
     args: [
@@ -155,14 +357,23 @@ export const STAGE_DEFS = [
       '--manifest', 'output/chart_pack/chart_manifest.csv',
       '--audit', 'output/audit/corpus_files.csv',
       '--min-dpi', '600',
+      '--min-fontsize', '7.2',
+      '--allow-raster-text',
       '--out', 'output/qa/qa_report.json',
       '--exit-zero',
     ],
-    artifacts: ['output/qa/qa_report.json', 'output/verify/number_issues.csv'],
+    // 项目若把 qa 改成单步覆盖（不走 steps），PDF 仍要按存在与否带上。
+    optionalArgs: [{ flag: '--pdf', file: 'output/manuscript.pdf' }],
+    artifacts: [
+      'output/qa/qa_report.json',
+      'output/verify/number_issues.csv',
+      'output/research_gate.json',
+      'output/review/review_pack.md',
+    ],
   },
   {
     id: 'recheck',
-    index: 9,
+    index: 10,
     name: '复核与修订',
     short: '复核',
     purpose: '机器复算 + 交叉核对 + 模型审计，问题逐条可裁定，修完重跑受影响阶段',

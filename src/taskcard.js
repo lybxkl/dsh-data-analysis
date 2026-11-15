@@ -60,7 +60,7 @@ const MANUAL_BRIEF = {
     '先调 data_analysis_manuscript action=scaffold 生成骨架（按图表清单的 section 分组，figure 块的 png/caption 照抄清单，正文留「待补」；png 缺失或 status 不是 ok 的图会被跳过）。',
     '再按 action=brief 的改稿说明把「待补」写成正文，只改 manuscript.json；不要凭空手写一份 spec 绕过骨架。',
     '正文里的每个数字都要能落到 output/models/*.csv 或 output/dataset/analysis.csv 的原值；图注里的 N 不要重复加。',
-    '改完必须重跑第 7 阶段（data_analysis_run_stage(stageId="manuscript")）生成 output/manuscript.docx——闸门只认这个 docx；再跑第 8 阶段终检。',
+    '改完必须重跑第 8 阶段（data_analysis_run_stage(stageId="manuscript")）生成 output/manuscript.docx——闸门只认这个 docx；再跑第 9 阶段终检。',
     '不要手改 docx 绕过统计结果；数字对不上就回到 stats/figures 修产物。',
   ],
   recheck: [
@@ -165,6 +165,6 @@ export function buildTaskCard({ project, projectRoot, stage, stages, commands = 
     lines.push('');
   }
 
-  lines.push('完成后：回到「实证研究工作台」点「刷新」，闸门会按产物自动重算。仍不过就继续修产物，不要改判定。');
+  lines.push('完成后：查看 data_analysis_status 的 gateMode 与闸门。skill/compare 模式如缺少当前报告，调用 data_analysis_gates(action="inspect")；完成体检后刷新。仍不过就按证据修输入并重跑，不要改判定。');
   return { ok: true, text: lines.join('\n') };
 }

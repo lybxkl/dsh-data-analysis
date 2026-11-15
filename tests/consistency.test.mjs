@@ -22,6 +22,7 @@ const client = read('client.js');
 const routes = read('src/routes.js');
 const tools = read('src/tools.js');
 const service = read('src/service.js');
+const audit = read('src/audit.js');
 const gates = read('src/gates.js');
 
 let failed = 0;
@@ -180,9 +181,11 @@ report(
 
 /* ---------------- 5. 面板读的快照字段 ---------------- */
 
-// 只在 snapshot() 的方法体里抓键：抓全文会把别处同缩进的键也算进来，「改名」就发现不了
+// 只在快照方法体里抓键：抓全文会把别处同缩进的键也算进来，「改名」就发现不了。
+// snapshot() 可能只是薄包装（例如包一层读盘去重作用域），真正返回键的是 buildSnapshot()。
 const snapshotBody = (() => {
-  const start = service.indexOf('  snapshot() {');
+  const name = service.includes('  buildSnapshot() {') ? '  buildSnapshot() {' : '  snapshot() {';
+  const start = service.indexOf(name);
   if (start < 0) return '';
   const end = service.indexOf('\n  }', start);
   return service.slice(start, end > start ? end : start + 6000);
@@ -211,8 +214,11 @@ report('面板只读快照里有的字段', unknownSnapFields.length === 0, unkn
 // 不报错。这里按「客户端读了、服务端必须产出」对一遍。
 const clientArtifactReads = new Set();
 for (const match of client.matchAll(/artifacts\.([A-Za-z0-9_]+)/g)) clientArtifactReads.add(match[1]);
+// artifacts 快照由 audit.js 的 scanArtifacts 产出，service.js 只做透传；
+// 两边都算「服务端产出」，否则会被误判成幽灵字段。
 const ghostArtifacts = [...clientArtifactReads]
-  .filter((key) => !new RegExp('\\b' + key + '\\s*:').test(service))
+  .filter((key) => !new RegExp('\\b' + key + '\\s*:').test(service)
+    && !new RegExp('\\b' + key + '\\s*:').test(audit))
   .sort();
 report(
   '面板读的 artifacts 二级字段，服务端都产出了',

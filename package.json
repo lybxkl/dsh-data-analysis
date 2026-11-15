@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-data-analysis",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "实证研究工作台：把 empirical-research-pipeline 技能变成可点、可看、可拦住的数据分析流水线（面板 + 工具）。",
   "type": "module",
@@ -48,7 +48,9 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node tests/materials.test.mjs && node tests/runner.test.mjs && node tests/gates.test.mjs && node tests/registry.test.mjs && node tests/provenance.test.mjs && node tests/artifacts.test.mjs && node tests/recheck.test.mjs && node tests/consistency.test.mjs && node tests/client-smoke.test.mjs && node tests/visual.mjs",
+    "test": "node tests/materials.test.mjs && node tests/runner.test.mjs && node tests/gates.test.mjs && node tests/registry.test.mjs && node tests/provenance.test.mjs && node tests/artifacts.test.mjs && node tests/recheck.test.mjs && node tests/readcache.test.mjs && node tests/consistency.test.mjs && node tests/skill-contract.test.mjs && node tests/binding.test.mjs && node tests/gating.test.mjs && node tests/regression-20261113.test.mjs && node tests/client-smoke.test.mjs && node tests/visual.mjs",
+    "test:readcache": "node tests/readcache.test.mjs",
+    "test:gates:integration": "node tests/gate-report.test.mjs && node tests/gate-workflow.test.mjs && node tests/gate-audit.test.mjs",
     "test:visual": "node tests/visual.mjs",
     "test:e2e": "node tests/e2e-corpus.test.mjs",
     "test:client": "node tests/client-smoke.test.mjs",
@@ -56,7 +58,10 @@
     "test:gates": "node tests/gates.test.mjs",
     "test:registry": "node tests/registry.test.mjs",
     "test:provenance": "node tests/provenance.test.mjs",
-    "test:artifacts": "node tests/artifacts.test.mjs"
+    "test:artifacts": "node tests/artifacts.test.mjs",
+    "test:skill-contract": "node tests/skill-contract.test.mjs",
+    "test:binding": "node tests/binding.test.mjs",
+    "test:regression": "node tests/regression-20261113.test.mjs"
   },
   "keywords": [
     "dsh",
@@ -67,3 +72,4 @@
   ],
   "license": "MIT"
 }
+

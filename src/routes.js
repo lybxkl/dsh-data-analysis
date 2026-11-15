@@ -189,7 +189,9 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
       // 原生对话里的徽章轮询它：只回摘要，避免每 8 秒搬一次图表清单。
       path: `${basePath}/api/summary`,
       method: 'GET',
-      handler: () => workbench.summary(),
+      // 对话里的徽章带着 sessionId 来问：按「这条对话自己的项目」回答，
+      // 而不是按左栏最近点开的那个——否则在 A 的对话里看到的是 B 的进度
+      handler: (_body, query) => workbench.runForSession(String(query?.sessionId || ''), () => workbench.summary()),
     },
     {
       path: `${basePath}/api/project/create`,
@@ -238,12 +240,54 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
       },
     },
     {
+      // 项目 ⇄ 研究对话：一条会话只属于一个项目。
+      // sessionId 为空 = 解绑；projectId 为空 = 当前项目；会话已经绑在别处且没 force 时回 409，
+      // 让面板去问用户，而不是悄悄改绑。
       path: `${basePath}/api/project/session`,
       method: 'POST',
       handler: (body) => {
-        const result = workbench.bindSession(String(body?.sessionId || ''));
-        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
-        return { ok: true, sessionId: result.sessionId, state: workbench.snapshot() };
+        const sessionId = String(body?.sessionId || '').trim();
+        const projectId = String(body?.projectId || '').trim();
+        if (!sessionId) {
+          const cleared = workbench.unbindSession(projectId);
+          return { ok: true, sessionId: '', projectId: cleared.projectId, cleared: cleared.cleared, state: workbench.snapshot() };
+        }
+        const result = workbench.bindSessionTo(sessionId, projectId, { force: body?.force === true });
+        if (!result.ok) {
+          return {
+            status: result.code === 'SESSION_BOUND_ELSEWHERE' ? 409 : 400,
+            payload: { ok: false, code: result.code || '', error: result.error, bound: result.bound || null },
+          };
+        }
+        return { ok: true, sessionId: result.sessionId, projectId: result.projectId, movedFrom: result.movedFrom || '', state: workbench.snapshot() };
+      },
+    },
+    {
+      // 这条会话属于哪个项目：面板跟着对话走、对话里的徽章判断「是不是我的项目」都问它
+      path: `${basePath}/api/session/project`,
+      method: 'GET',
+      handler: (_body, query) => workbench.projectForSession(String(query?.sessionId || '')),
+    },
+    {
+      // 触发门（档②）：显式启用一条对话。绑定项目会自动启用；这个入口给「还没有项目」的
+      // 临时会话用（面板的「让 AI 装环境」就是这种），也留给将来面板的启用按钮。
+      path: `${basePath}/api/session/arm`,
+      method: 'POST',
+      handler: (body) => workbench.armSession(String(body?.sessionId || ''), String(body?.reason || 'panel')),
+    },
+    {
+      // 停用只清显式登记；还关联着项目的对话仍然是启用的（要停就先解绑）
+      path: `${basePath}/api/session/disarm`,
+      method: 'POST',
+      handler: (body) => workbench.disarmSession(String(body?.sessionId || '')),
+    },
+    {
+      // 「现在屏幕上是哪条对话」：只在对话里那条工作台按钮出现时报一次，宿主只记事实
+      path: `${basePath}/api/chat/focus`,
+      method: 'POST',
+      handler: (body) => {
+        const result = workbench.focusSession(String(body?.sessionId || ''));
+        return { ok: true, sessionId: result.sessionId, bound: result.bound || null, focus: workbench.focusSnapshot() };
       },
     },
     {
@@ -338,20 +382,22 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
     {
       path: `${basePath}/api/task-card`,
       method: 'GET',
-      handler: (_body, query) => {
+      // 任务卡要按「哪条对话要的」来生成：卡的正文里写着投递到哪条会话
+      handler: (_body, query) => workbench.runForSession(String(query?.sessionId || ''), () => {
         const result = workbench.taskCard(String(query?.stageId || ''));
         if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
         return result;
-      },
+      }),
     },
     {
       path: `${basePath}/api/stage/run`,
       method: 'POST',
-      handler: (body) => {
+      // 输入行那个「运行下一步」是在某条对话里点的：就让它跑那条对话的项目
+      handler: (body) => workbench.runForSession(String(body?.sessionId || ''), () => {
         const result = workbench.runStage(String(body?.stageId || ''), { force: isTrue(body?.force) });
         if (!result.ok) return { status: 409, payload: { ok: false, error: result.error, blockers: result.blockers || [] } };
         return { ok: true, run: result.run, command: result.command, state: workbench.snapshot() };
-      },
+      }),
     },
     {
       path: `${basePath}/api/stage/cancel`,
@@ -439,6 +485,25 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
       },
     },
     {
+      path: `${basePath}/api/gates/control`,
+      method: 'POST',
+      handler: body => workbench.gateControl(body || {}),
+    },
+    {
+      path: `${basePath}/api/gates/resource`,
+      method: 'GET',
+      handler: (_body,query) => {
+        const result=workbench.gateResource({stageId:String(query?.stageId||''),gateId:String(query?.gateId||''),resourceId:String(query?.resourceId||'')});
+        if(!result.ok){const error=new Error(result.error);error.status=409;throw error;}
+        return {__file:result.abs,__type:'application/octet-stream',__download:true,__name:path.basename(result.abs)};
+      },
+    },
+    {
+      path: `${basePath}/api/gates/evidence`,
+      method: 'GET',
+      handler: (_body,query) => workbench.gateEvidence({stageId:String(query?.stageId||''),gateId:String(query?.gateId||'')}),
+    },
+    {
       path: `${basePath}/api/recheck`,
       method: 'GET',
       handler: () => workbench.recheckState(),
@@ -480,6 +545,17 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
         const result = workbench.cancelChain();
         if (!result.ok) return { status: 409, payload: { ok: false, error: result.error } };
         return { ok: true, state: workbench.snapshot() };
+      },
+    },
+    {
+      // 人工步骤（数据集宽表、复核 final、前置闸门未过）停下后的续跑入口。
+      // force 只在这一步生效：用户已经看过 blockers 并决定跳过。
+      path: `${basePath}/api/recheck/resume-chain`,
+      method: 'POST',
+      handler: (body) => {
+        const result = workbench.resumeChain({ force: isTrue(body?.force) });
+        if (!result.ok) return { status: 409, payload: { ok: false, error: result.error, chain: result.chain || null } };
+        return { ok: true, ...result, state: workbench.snapshot() };
       },
     },
     {

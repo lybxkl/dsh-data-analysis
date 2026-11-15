@@ -1,6 +1,7 @@
 // 闸门判定测试：不跑脚本，直接把产物摆成各种形状，看 evaluateProject 给什么结论。
 // 关注点是「判不了 ≠ 通过」：该 unjudged 的不能 pass，该拦的不能只提醒。
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -63,13 +64,13 @@ function judge(root, options = {}) {
   return { stages, all, byId, stageById };
 }
 
-const ALLOWED = new Set(['pass', 'fail', 'unjudged']);
+const ALLOWED = new Set(['pass', 'fail', 'unjudged', 'na']);
 
 // ── 1. 空项目：不能抛，状态词只能是三种 ─────────────────────────────
 check('空项目能判，且不抛异常', () => {
   const root = makeProject();
   const { stages, all } = judge(root);
-  assert.equal(stages.length, 9);
+  assert.equal(stages.length, 10);
   for (const g of all) assert.ok(ALLOWED.has(g.status), `闸门 ${g.id} 状态异常：${g.status}`);
   for (const stage of stages) assert.ok(['todo', 'review', 'blocked', 'done', 'running'].includes(stage.status), `阶段 ${stage.id} 状态异常`);
 });
@@ -84,25 +85,39 @@ check('空项目里审计新鲜度是「判不了」而不是「通过」', () =
 check('没干过活的阶段是 todo，且 gateTotals 跳过 todo', () => {
   const root = makeProject();
   const { stages, stageById } = judge(root);
-  assert.equal(stageById('coding').status, 'todo');
-  assert.equal(stageById('coding').gates.some((g) => g.status === 'fail'), true, 'coding 确实带着一条 fail（缺编码表）');
+  // 严格契约（默认）下，只要有分析宽表，验数据这一关就会显形并拦住；
+  // 这个空项目没有宽表，所以 verify 不该被当成「干过活」。
+  assert.equal(stageById('verify').status, 'todo', '空项目的 verify 必须是 todo');
+  // 没有审计账时判不了语料形态，编码阶段按「需要编码」保守处理（不替老项目改成不适用）：
+  // 它带着一条 fail，但阶段仍是 todo——「没干过活」优先于「缺产物」。
+  assert.equal(stageById('coding').status, 'todo', stageById('coding').gates.map((g) => `${g.id}:${g.status}`).join(','));
   const totals = gateTotals(stages);
   const blockedFails = stages
     .filter((s) => s.status !== 'todo')
     .reduce((n, s) => n + s.gates.filter((g) => g.status === 'fail').length, 0);
   assert.equal(totals.fail, blockedFails, 'todo 阶段的 fail 不该计入总数');
-  assert.equal(totals.fail, 1, '只有 scope 的 scope-doc 该计数');
+  // dataset 阶段现在也能把 in_analysis 判成 fail，所以只要求「scope 的那条一定在内」。
+  // 真正的意图（todo 不计数）由上面那条等式保证。
+  assert.ok(totals.fail >= 1, 'todo 阶段的 fail 一个都不该进总数，非 todo 的必须如实计入');
   const counts = summarizeStages(stages);
   const sum = Object.values(counts).reduce((n, v) => n + v, 0);
-  assert.equal(sum, 9, '九个阶段都要被归类');
+  assert.equal(sum, 10, '十个阶段都要被归类');
 });
 
 // ── 2. 审计是否新鲜 ────────────────────────────────────────────────
-function auditSeed(files = 2, bytes = 100) {
+// corpus_files.csv 现在带 md5：内容是不是变了由它证明，而不是「文件数 + 总字节数」。
+function auditSeed(files = 2, bytes = 100, { content } = {}) {
   const rows = [];
-  for (let i = 0; i < files; i += 1) rows.push(`安徽/a${i}.pdf,安徽/a${i}.pdf,安徽,a${i}.pdf,.pdf,docx,${bytes}`);
+  const seed = {};
+  for (let i = 0; i < files; i += 1) {
+    const body = (content ?? 'x').repeat(bytes);
+    const rel = `安徽/a${i}.pdf`;
+    seed[`data/${rel}`] = body;
+    rows.push(`${rel},${rel},安徽,a${i}.pdf,.pdf,docx,${bytes},valid,${crypto.createHash('md5').update(body).digest('hex')}`);
+  }
   return {
-    'output/audit/corpus_files.csv': `rel_path,relpath,top,name,ext,kind,bytes\r\n${rows.join('\r\n')}\r\n`,
+    ...seed,
+    'output/audit/corpus_files.csv': `rel_path,relpath,top,name,ext,kind,bytes,status,md5\r\n${rows.join('\r\n')}\r\n`,
     'output/audit/corpus_summary.json': JSON.stringify({
       total_files: files,
       valid_files: files,
@@ -113,18 +128,34 @@ function auditSeed(files = 2, bytes = 100) {
 
 check('data/ 与审计快照一致 → audit-freshness pass', () => {
   const seed = auditSeed(2, 50);
-  seed['data/安徽/a0.pdf'] = 'x'.repeat(50);
-  seed['data/安徽/a1.pdf'] = 'x'.repeat(50);
   const root = makeProject(seed);
   const { byId } = judge(root);
   assert.equal(byId('audit-freshness').status, 'pass', byId('audit-freshness').detail);
   assert.equal(byId('audit-freshness').level, 'warn');
 });
 
+check('同大小改内容（AAA→BBB）→ audit-freshness fail(error)', () => {
+  // 2026-11-13 复核复现的缺陷：只比大小，「同字节数改内容」永远通过。
+  const seed = auditSeed(2, 50);
+  seed['data/安徽/a1.pdf'] = 'y'.repeat(50);
+  const root = makeProject(seed);
+  const { byId } = judge(root);
+  const g = byId('audit-freshness');
+  assert.equal(g.status, 'fail');
+  assert.equal(g.level, 'error');
+  assert.match(g.detail, /内容/);
+});
+
+check('审计账没有 md5 → unjudged（不许靠大小冒充内容没变）', () => {
+  const seed = auditSeed(2, 50);
+  seed['output/audit/corpus_files.csv'] = 'rel_path,relpath,top,name,ext,kind,bytes,status\r\n安徽/a0.pdf,安徽/a0.pdf,安徽,a0.pdf,.pdf,docx,50,valid\r\n安徽/a1.pdf,安徽/a1.pdf,安徽,a1.pdf,.pdf,docx,50,valid\r\n';
+  const root = makeProject(seed);
+  const { byId } = judge(root);
+  assert.equal(byId('audit-freshness').status, 'unjudged', byId('audit-freshness').detail);
+});
+
 check('data/ 变了 → audit-freshness fail(error)：拦住', () => {
   const seed = auditSeed(2, 50);
-  seed['data/安徽/a0.pdf'] = 'x'.repeat(50);
-  seed['data/安徽/a1.pdf'] = 'x'.repeat(50);
   seed['data/安徽/a2.pdf'] = 'x'.repeat(50); // 审计之后又放进一份
   const root = makeProject(seed);
   const { byId } = judge(root);
@@ -134,7 +165,7 @@ check('data/ 变了 → audit-freshness fail(error)：拦住', () => {
   assert.match(g.detail, /先重跑审计/);
 });
 
-check('缺 fingerprint → audit-freshness unjudged（不许当成通过）', () => {
+check('缺 fingerprint 与审计账 → audit-freshness unjudged（不许当成通过）', () => {
   const root = makeProject({
     'output/audit/corpus_summary.json': JSON.stringify({ total_files: 1 }),
   });
@@ -250,15 +281,72 @@ check('识图全部人工核对 → qa-vision pass', () => {
   assert.equal(byId('qa-vision').status, 'pass');
 });
 
-check('dataset-in-analysis：有 spec 却没引用 in_analysis → fail(error)', () => {
+check('dataset-in-analysis：有 spec 却没引用 in_analysis 也不改 in_analysis 列 → pass', () => {
+  // skill 的 apply_filter 在没有 keep_out_of_scope 时**默认**先按 in_analysis == 1 过滤，
+  // 所以「配置没写 in_analysis」不等于「排除样本会进统计」。以前只查字符串，这里是假 fail。
   const root = makeProject({
     'output/dataset/analysis.csv': 'id,in_analysis\r\na,1\r\nb,0\r\n',
     'model_spec.json': JSON.stringify({ models: [{ id: 'm1', formula: 'y ~ x' }] }),
   });
   const { byId } = judge(root);
   const g = byId('dataset-in-analysis');
+  assert.equal(g.status, 'pass', g.detail);
+  assert.match(g.detail, /纳入 1 \/ 排除 1/);
+});
+
+check('dataset-in-analysis：in_analysis 全为 0 → fail（纳入样本为 0）', () => {
+  // 旧实现看到「全为同一值」就说「无静默混入风险」，于是全 0 也 pass。
+  const root = makeProject({
+    'output/dataset/analysis.csv': 'id,in_analysis\r\na,0\r\nb,0\r\n',
+  });
+  const { byId } = judge(root);
+  const g = byId('dataset-in-analysis');
   assert.equal(g.status, 'fail', g.detail);
   assert.equal(g.level, 'error');
+  assert.match(g.detail, /纳入样本为 0/);
+});
+
+check('dataset-in-analysis：只有 note 里写了 in_analysis 不算引用 → 不再据此判通过', () => {
+  const root = makeProject({
+    'output/dataset/analysis.csv': 'id,in_analysis\r\na,1\r\nb,0\r\n',
+    'chart_config.json': JSON.stringify({ note: 'in_analysis' }),
+  });
+  const { byId } = judge(root);
+  const g = byId('dataset-in-analysis');
+  assert.equal(g.status, 'pass', g.detail);
+  // 实质上仍要过：默认闸门生效。但 detail 不能声称「配置引用了 in_analysis」
+  assert.ok(!/引用了 in_analysis/.test(g.detail), g.detail);
+});
+
+check('dataset-in-analysis：filter_query 把 in_analysis=1 筛掉 → fail', () => {
+  const root = makeProject({
+    'output/dataset/analysis.csv': 'id,in_analysis\r\na,1\r\nb,0\r\n',
+    'chart_config.json': JSON.stringify({ filter_query: 'in_analysis == 0' }),
+  });
+  const { byId } = judge(root);
+  const g = byId('dataset-in-analysis');
+  assert.equal(g.status, 'fail', g.detail);
+  assert.match(g.detail, /筛掉了/);
+});
+
+check('dataset-in-analysis：keep_out_of_scope=true → unjudged（研究决定，不能当通过）', () => {
+  const root = makeProject({
+    'output/dataset/analysis.csv': 'id,in_analysis\r\na,1\r\nb,0\r\n',
+    'chart_config.json': JSON.stringify({ keep_out_of_scope: true }),
+  });
+  const { byId } = judge(root);
+  assert.equal(byId('dataset-in-analysis').status, 'unjudged');
+});
+
+check('dataset-in-analysis：模型 N 超过纳入样本 → fail（排除行真的进了模型）', () => {
+  const root = makeProject({
+    'output/dataset/analysis.csv': 'id,in_analysis\r\na,1\r\nb,0\r\n',
+  });
+  const artifacts = { models: { models: [{ id: 'm1', fitN: 2 }] } };
+  const { byId } = judge(root, { artifacts });
+  const g = byId('dataset-in-analysis');
+  assert.equal(g.status, 'fail', g.detail);
+  assert.match(g.detail, /大于纳入样本/);
 });
 
 check('fig-dpi：596 → fail；597 → pass', () => {
@@ -336,12 +424,12 @@ check('manuscript.json 里有 null 块时，复核不把整个面板打挂', () 
     'manuscript.json': JSON.stringify({ blocks: [null, { type: 'figure', png: 'figures/x.png' }] }),
   });
   const { stages, all } = judge(root);
-  assert.equal(stages.length, 9);
+  assert.equal(stages.length, 10);
   for (const g of all) assert.ok(ALLOWED.has(g.status), `闸门 ${g.id} 状态异常：${g.status}`);
   assert.ok(stages.find((stage) => stage.id === 'recheck'), '复核阶段仍在');
 });
 
-check('改了 manuscript.json 没重跑第 7 阶段 → manuscript-fresh 判不了', () => {
+check('改了 manuscript.json 没重跑第 8 阶段 → manuscript-fresh 判不了', () => {
   const root = makeProject({
     'output/manuscript.docx': 'docx-bytes',
     'manuscript.json': JSON.stringify({ blocks: [{ type: 'para', text: '正文' }] }),
@@ -354,7 +442,7 @@ check('改了 manuscript.json 没重跑第 7 阶段 → manuscript-fresh 判不�
   const fresh = byId('manuscript-fresh');
   assert.ok(fresh, '应当出现 manuscript-fresh 闸门');
   assert.equal(fresh.status, 'unjudged');
-  assert.match(fresh.detail, /重跑第 7 阶段/);
+  assert.match(fresh.detail, /重跑第 8 阶段/);
 });
 
 check('docx 比 manuscript.json 新时不报新鲜度问题', () => {

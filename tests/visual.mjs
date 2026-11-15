@@ -235,8 +235,8 @@ function serialize(node) {
   return open + inner + '</' + tag + '>';
 }
 
-function buildPage({ panel, css, snap, pre, width, theme, selected = 'audit' }) {
-  globalThis.__DSA__ = { snap, pre, loading: false, dialog: null, width, theme, selected };
+function buildPage({ panel, css, snap, pre, width, theme, selected = 'audit', loading = false }) {
+  globalThis.__DSA__ = { snap, pre, loading, dialog: null, width, theme, selected };
   const tree = renderRoot(panel, {});
   const body = serialize(tree);
   return [
@@ -444,6 +444,8 @@ function projects(count) {
           ? '环境资源犯罪裁判文书实证分析'
           : '项目 ' + (i + 1) + (i % 4 === 0 ? '（生态修复·长江流域十年样本）' : ''),
       path: 'F:\\测试文件\\' + (i === 0 ? 'spss_analysis' : 'proj-' + (i + 1)),
+      // 当前项目挂着它的研究对话：左栏那行要显示「当前对话」，顶栏要显示「本对话」
+      sessionId: i === 0 ? 'sess-1' : '',
       updatedAt: '2026-11-12T09:00:00Z',
       exists: i !== 13,
     });
@@ -480,6 +482,8 @@ function snapshot(projectCount) {
       createdAt: '2026-11-01T00:00:00Z',
       skillDrift: false,
     },
+    // 屏幕右上角那条对话就属于当前项目：顶栏给「本对话」，左栏给「当前对话」
+    focus: { sessionId: 'sess-1', projectId: 'p0', projectName: '环境资源犯罪裁判文书实证分析', projectPath: 'F:\\测试文件\\spss_analysis' },
     error: '',
     preflight: { status: 'pass', checkedAt: '2026-11-12T10:00:00Z', checks: [] },
     stages,
@@ -776,6 +780,37 @@ const PROBE = `(() => {
     viewWidth: window.innerWidth,
     docHeight: document.documentElement.scrollHeight,
     viewHeight: window.innerHeight,
+    // 首屏骨架：占位条数量与骨架容器是否真的渲染了
+    skeleton: Boolean(document.querySelector('.dsa-skeleton')),
+    skBars: document.querySelectorAll('.dsa-sk-bar').length,
+    skTopBar: (() => {
+      // 窄屏左栏是隐藏的（display:none），第一条骨架条量出来是 0：量第一条「看得见」的
+      const bars = [...document.querySelectorAll('.dsa-sk-bar')];
+      const el = bars.find((bar) => bar.getBoundingClientRect().height > 0) || null;
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
+    })(),
+    // 骨架页不该出现「从一个资料目录开始」那张空态卡
+    emptyCard: Boolean(document.querySelector('.dsa-empty b')),
+    // 骨架条的底色必须和它所在的卡片/页面底色分得开：暗色主题下最容易写成「同色 = 看不见」
+    skBarBg: (() => {
+      const bars = [...document.querySelectorAll('.dsa-sk-bar')];
+      const bar = bars.find((item) => item.getBoundingClientRect().height > 0);
+      if (!bar) return { bar: '', around: '', apart: false };
+      const barColor = getComputedStyle(bar).backgroundColor;
+      let node = bar.parentElement;
+      let around = '';
+      while (node) {
+        const value = getComputedStyle(node).backgroundColor;
+        if (value && value !== 'rgba(0, 0, 0, 0)' && value !== 'transparent') {
+          around = value;
+          break;
+        }
+        node = node.parentElement;
+      }
+      return { bar: barColor, around, apart: Boolean(around) && barColor !== around };
+    })(),
     boxes: {
       top: rect('.dsa-top'),
       body: rect('.dsa-body'),
@@ -913,6 +948,9 @@ const PROBE = `(() => {
 // 断点以 client.js 的 widthOf() 为准：<=860 narrow / <=1100 compact / <=1240 mid / else wide。
 // 这里每一档都要真的测到：mid（1101–1240）之前从没被渲染过，等于漏了一整个断点。
 const VARIANTS = [
+  { key: 'gates-compare', width: 1560, height: 1000, widthClass: 'wide', theme: 'light', projects: 3, gateMode:'compare' },
+  { key: 'gates-checking', width: 820, height: 900, widthClass: 'narrow', theme: 'dark', projects: 3, gateMode:'skill', gateChecking:true },
+  { key: 'gates-recovery', width: 1180, height: 900, widthClass: 'mid', theme: 'light', projects: 3, gateMode:'skill', gateRecoveryNeeded:true },
   { key: 'wide', width: 1560, height: 1000, widthClass: 'wide', theme: 'light', projects: 14 },
   { key: 'mid', width: 1180, height: 900, widthClass: 'mid', theme: 'light', projects: 14 },
   { key: 'compact', width: 1000, height: 900, widthClass: 'compact', theme: 'light', projects: 14 },
@@ -921,6 +959,14 @@ const VARIANTS = [
   // 第 7 阶段的手稿骨架卡：宽屏与窄屏各渲一次，量它的宽度与按钮
   { key: 'manuscript', width: 1560, height: 1000, widthClass: 'wide', theme: 'light', projects: 3, selected: 'manuscript' },
   { key: 'manuscript-narrow', width: 820, height: 900, widthClass: 'narrow', theme: 'light', projects: 2, selected: 'manuscript' },
+  // 屏幕上的对话属于另一个项目：顶栏那个「⇄ 对话在「X」」按钮要被量到（项目名可能很长）
+  { key: 'chat-other', width: 1560, height: 1000, widthClass: 'wide', theme: 'light', projects: 6, chatOther: true },
+  // 首屏骨架：还没有快照、正在读的那一刻。这时不能画「无项目」，也不能有横向溢出，
+  // 否则数据回来时整页会跳一下
+  { key: 'loading', width: 1560, height: 1000, widthClass: 'wide', theme: 'light', projects: 0, skeleton: true },
+  // 暗色下也要看得见：骨架条用的是设计令牌，不是写死的浅灰
+  { key: 'loading-dark', width: 1560, height: 1000, widthClass: 'wide', theme: 'dark', projects: 0, skeleton: true },
+  { key: 'loading-narrow', width: 820, height: 900, widthClass: 'narrow', theme: 'light', projects: 0, skeleton: true },
 ];
 
 async function main() {
@@ -934,10 +980,31 @@ async function main() {
 
   await withChrome(async ({ port }) => {
     for (const variant of VARIANTS) {
-      const snap = snapshot(variant.projects);
+      const snap = variant.skeleton ? null : snapshot(variant.projects);
+      if (variant.gateMode) {
+        snap.gateMode=variant.gateMode;
+        snap.gateChecking=variant.gateChecking?{stageId:'audit',startedAt:'2026-11-15T09:00:00Z'}:null;
+        snap.gateRecoveryNeeded=Boolean(variant.gateRecoveryNeeded);
+        const fact={id:'audit-freshness',label:'资料内容与审计记录一致',level:'error',status:'unjudged',source:'skill',
+          detail:'输入已变化，请重新审计后体检',validationReason:'binding-mismatch',advice:'重新运行资料审计',
+          generatedAt:'2026-11-15T09:00:00Z',reportId:'report-synthetic-fixture',
+          resources:[{id:'project:data/source.csv',rootId:'project',path:'data/source.csv',exists:true,sha256:'a'.repeat(64)}],
+          evidence:[{kind:'structure',resourceRef:'project:data/source.csv',expected:'current input',actual:'changed'}]};
+        if(variant.gateMode==='compare')snap.stages.find(s=>s.id==='audit').gateComparison=[fact];
+        else snap.stages.find(s=>s.id==='audit').gates=[fact];
+      }
       if (variant.selected === 'manuscript') {
         // 第 7 阶段的「手稿骨架」卡只有在选中该阶段时才渲染，这里给它一份真实的 spec
         snap.artifacts.manuscriptSpec = { exists: true, blocks: 14, figures: 3, tables: 1, placeholders: 5 };
+      }
+      if (variant.chatOther) {
+        // 对话属于 p1（很长的一个项目名）：面板显示的还是 p0，顶栏要出「⇄ 对话在「…」」
+        snap.focus = {
+          sessionId: 'sess-other',
+          projectId: 'p1',
+          projectName: '项目 2（生态修复·长江流域十年样本）',
+          projectPath: 'F:\\测试文件\\proj-2',
+        };
       }
       const html = buildPage({
         panel,
@@ -947,6 +1014,7 @@ async function main() {
         width: variant.widthClass,
         theme: variant.theme,
         selected: variant.selected || 'audit',
+        loading: Boolean(variant.skeleton),
       });
       const file = path.join(OUT, 'panel-' + variant.key + '.html');
       fs.writeFileSync(file, html, 'utf8');
@@ -958,6 +1026,18 @@ async function main() {
       });
       try {
         const probe = await page.eval(PROBE);
+        if(variant.gateMode){
+          await page.eval(`(() => {
+            for(const detail of document.querySelectorAll('details')){
+              const label=detail.querySelector('summary')?.textContent||'';
+              if(label.includes('技能体检对照')||label.includes('查看判定依据'))detail.open=true;
+            }
+            const label=[...document.querySelectorAll('.dsa-hint')].find(el=>el.textContent.startsWith('判定来源：'));
+            label?.scrollIntoView({block:'start'});
+          })()`);
+          const width=await page.eval('document.documentElement.scrollWidth');
+          if(width>variant.width)throw new Error('expanded gate evidence overflows viewport');
+        }
         await page.screenshot(path.join(OUT, 'panel-' + variant.key + '.png'));
         results.push({ variant, probe });
       } finally {
@@ -1018,6 +1098,18 @@ async function main() {
     const tag = variant.key + '(' + variant.width + 'px)';
     check(probe.docWidth <= probe.viewWidth + 2, tag + ' 有横向溢出：' + probe.docWidth + ' > ' + probe.viewWidth);
     check(probe.overflow.length === 0, tag + ' 有元素横向溢出：' + JSON.stringify(probe.overflow.slice(0, 3)));
+    if (variant.skeleton) {
+      // 首屏骨架只占位：要有骨架、不能出现空态卡、不能已经长出真数据
+      check(probe.skeleton, tag + ' 没渲染出首屏骨架');
+      check(probe.skBars >= 12, tag + ' 骨架占位条太少：' + probe.skBars);
+      check(!probe.emptyCard, tag + ' 骨架页里闪出了「从一个资料目录开始」空态卡');
+      check(probe.kpiCount === 0 && probe.stageCount === 0, tag + ' 骨架上不该有真实数据（KPI ' + probe.kpiCount + ' / 阶段 ' + probe.stageCount + '）');
+      check(probe.skTopBar && probe.skTopBar.h >= 8 && probe.skTopBar.h <= 16, tag + ' 骨架条高度不对：' + (probe.skTopBar && probe.skTopBar.h));
+      check(probe.skBarBg.apart, tag + ' 骨架条和底色分不开：' + JSON.stringify(probe.skBarBg));
+      check(probe.smallText.length === 0, tag + ' 骨架页有 ' + probe.smallText.length + ' 处小于 11px 的字');
+      check(probe.styles.top && probe.styles.top.h === 58, tag + ' 骨架页顶栏不是 58px');
+      continue;
+    }
     check(probe.kpiCount === 5, tag + ' KPI 应该是 5 个，实际 ' + probe.kpiCount);
     check(probe.kpiCols >= 2, tag + ' KPI 挤成 ' + probe.kpiCols + ' 列');
     check(probe.kpiValues.every((v) => v && v !== 'undefined' && v !== 'NaN'), tag + ' KPI 数值有空的：' + probe.kpiValues.join(' | '));

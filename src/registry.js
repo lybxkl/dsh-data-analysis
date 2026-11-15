@@ -389,6 +389,100 @@ function readJsonlFile(projectRoot, rel, normalize, validate) {
   return { exists: true, rows, error: '', issues };
 }
 
+/**
+ * 从 skill 的 research_registry.json 生成 v2 数据集视图。
+ *
+ * 为什么要有这条桥：skill 的注册表已经是「数据集 → 路径 / 主键 / 单位 / codebook / 证据账 / 复核」
+ * 的唯一真相，再造一份 output/datasets/index.json 等于让用户维护两处，迟早漂移。
+ * 这里只在 index.json **不存在**时按 skill 注册表推导一份只读视图（derivedFrom 标明来源）；
+ * 一旦用户真的写了 index.json，就以内那份为准（可以覆盖 derived 的推断）。
+ *
+ * 注意：推导只做机械映射——行数、列、in_analysis 计数都从 CSV 实算：
+ * 不猜列类型语义、不猜缺失原因，这些仍由研究者在 index.json / codebook 里声明。
+ */
+function readResearchDatasets(projectRoot) {
+  const rel = 'research_registry.json';
+  const abs = path.join(projectRoot, rel);
+  if (!statOf(abs).exists) return { rows: [], issues: [] };
+  let value = null;
+  try {
+    value = JSON.parse(fs.readFileSync(abs, 'utf8').replace(/^\uFEFF/, ''));
+  } catch {
+    return { rows: [], issues: [] };
+  }
+  const list = Array.isArray(value?.datasets) ? value.datasets : [];
+  const issues = [];
+  const rows = [];
+  for (const [index, item] of list.entries()) {
+    const where = `${rel}#datasets[${index}]`;
+    const id = text(item?.id, 64);
+    const pathRel = relSafe(item?.path);
+    if (!id || !pathRel) {
+      issues.push(issue('bridge.id', where, '缺 id 或 path', 'error'));
+      continue;
+    }
+    const fileAbs = projectPath(projectRoot, pathRel);
+    if (!statOf(fileAbs).exists) {
+      issues.push(issue('bridge.path', where, `数据集文件不存在：${pathRel}`, 'error'));
+      continue;
+    }
+    const csv = readCsv(fileAbs);
+    if (!csv?.header?.length) {
+      issues.push(issue('bridge.path', where, `数据集 CSV 读不出来：${pathRel}`, 'error'));
+      continue;
+    }
+    const keys = (Array.isArray(item?.key) ? item.key : [item?.key]).map((k) => text(k, 80)).filter(Boolean);
+    if (!keys.length) issues.push(issue('bridge.key', where, '缺 key（主键）', 'error'));
+    const missingKeys = keys.filter((key) => !csv.header.includes(key));
+    if (missingKeys.length) issues.push(issue('bridge.key', where, `主键列不在 CSV 表头：${missingKeys.join('、')}`, 'error'));
+    const columns = csv.header.map((name) => {
+      const values = csv.rows.slice(0, 200).map((row) => String(row[name] ?? '').trim()).filter(Boolean);
+      const numeric = values.length > 0 && values.every((v) => /^[-+]?\d*\.?\d+(e[-+]?\d+)?$/i.test(v));
+      const boolish = values.length > 0 && values.every((v) => /^(0|1|true|false)$/i.test(v));
+      const missing = csv.rows.reduce((acc, row) => (String(row[name] ?? '').trim() ? acc : acc + 1), 0);
+      return {
+        name: text(name, 80),
+        type: /^in_analysis$/i.test(name) ? 'boolean' : boolish ? 'boolean' : numeric ? 'number' : 'category',
+        unit: '',
+        missing,
+        missingKind: missing ? 'unknown' : 'unknown',
+        note: '',
+      };
+    });
+    const flagAt = csv.header.indexOf('in_analysis');
+    let inN = null;
+    if (flagAt >= 0) {
+      inN = csv.rows.reduce((acc, row) => (String(row.in_analysis ?? '').trim() === '1' ? acc + 1 : acc), 0);
+    }
+    rows.push({
+      id,
+      title: text(item?.title || item?.unit || `数据集 ${id}`, 120),
+      unit: DATASET_UNITS.includes(item?.unit) ? item.unit : 'other',
+      grainKeys: keys,
+      file: pathRel,
+      rows: csv.rows.length,
+      columns,
+      inAnalysis: { column: flagAt >= 0 ? 'in_analysis' : '', rule: flagAt >= 0 ? 'in_analysis == 1' : '', n: inN },
+      source: { mount: '', files: null },
+      provenance: {
+        cells: relSafe(item?.provenance),
+        derived: '',
+        sourceColumn: '',
+        quoteColumn: '',
+        sourceRoot: relSafe(value?.source_root) || 'data',
+      },
+      generatedBy: rel,
+      confidence: 'declared',
+      confirmedByHuman: false,
+      updatedAt: '',
+      derivedFrom: rel,
+      review: relSafe(item?.review),
+      codebook: relSafe(item?.codebook),
+    });
+  }
+  return { rows, issues };
+}
+
 /** 读三份注册表 + 两本台账；任何一份读不懂都要报出来，不许当成空表。 */
 export function readRegistry(projectRoot) {
   const registry = emptyRegistry();
@@ -406,6 +500,18 @@ export function readRegistry(projectRoot) {
       const check = validateDataset(item);
       for (const err of check.errors) registry.datasets.issues.push({ ...err, where: `${REGISTRY_FILES.datasets}#${item.id || '?'}` });
       for (const warn of check.warnings) registry.datasets.issues.push({ ...warn, where: `${REGISTRY_FILES.datasets}#${item.id || '?'}` });
+    }
+  } else {
+    // index.json 不存在：如果 skill 的 research_registry.json 在，就用它生成只读视图，
+    // 避免「两套注册表各维护一份」的漂移。写回 index.json 时会把这些条目落成真记录。
+    const bridge = readResearchDatasets(projectRoot);
+    if (bridge.rows.length || bridge.issues.length) {
+      // 有 id/path 写错、文件读不出来的条目时也必须让视图「存在」并带上 error，
+      // 否则会退回「没有注册表」的 unjudged——那等于说「你还没登记」，而事实是登记错了。
+      registry.datasets.exists = true;
+      registry.datasets.derivedFrom = 'research_registry.json';
+      registry.datasets.rows = bridge.rows;
+      registry.datasets.issues = bridge.issues;
     }
   }
 

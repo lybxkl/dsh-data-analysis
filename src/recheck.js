@@ -1,5 +1,5 @@
 /**
- * 第 9 阶段「复核与修订」：把「让模型再看一遍」拆成三件可验证的事。
+ * 第 10 阶段「复核与修订」：把「让模型再看一遍」拆成三件可验证的事。
  *
  *   L1 机器复算  —— 这里：行数闭合、模型 N、图与数据的先后、脚本里的静默丢样。
  *   L2 交叉核对  —— 这里：图注 N、正文数字（复用 verify_numbers）、文稿图表数。
@@ -20,6 +20,10 @@ import {
   readVerify,
   statOf,
 } from './audit.js';
+import { readRegistry } from './registry.js';
+import { readJsonl } from './research.js';
+import { analyseInAnalysis, readSampleSettings } from './sample.js';
+import {safePath,strictJson} from './gate-report.js';
 
 /** 复核清单：固定 12 项，缺一项就是「没有复核」，不是「没问题」。 */
 export const RECHECK_ITEMS = [
@@ -98,6 +102,42 @@ export function inAnalysisCount(analysis) {
 }
 
 function checkR1(projectRoot) {
+  // 有 v2 注册表时，上游就是登记的每份数据集 + 它的逐格证据账——
+  // 不再硬编码 output/coding/dataset.csv（那是文本编码项目的中间产物，表格项目根本没有）。
+  const registry = readRegistry(projectRoot);
+  if (registry.datasets.rows.length) {
+    const missingFile = [];
+    const missingEvidence = [];
+    const partial = [];
+    for (const dataset of registry.datasets.rows) {
+      if (!dataset.file || !statOf(path.join(projectRoot, dataset.file)).exists) {
+        missingFile.push(dataset.id);
+        continue;
+      }
+      const ledger = dataset.provenance?.cells;
+      if (!ledger || !statOf(path.join(projectRoot, ledger)).exists) {
+        missingEvidence.push(dataset.id);
+        continue;
+      }
+      const parsed = readJsonl(path.join(projectRoot, ledger), { limit: 20000 });
+      if (!parsed.rows.length) {
+        missingEvidence.push(dataset.id);
+        continue;
+      }
+      const keys = new Set();
+      for (const row of parsed.rows) {
+        const key = Array.isArray(row.key) ? row.key.join('\u0001') : String(row.key ?? '');
+        if (key) keys.add(key);
+      }
+      const rows = Number(dataset.rows) || 0;
+      if (rows && keys.size < rows) partial.push(`${dataset.id} ${keys.size}/${rows} 行有证据`);
+    }
+    if (missingFile.length) return check('R1', 'fail', `${missingFile.length} 份登记的数据集文件不存在：${missingFile.join('、')}`);
+    if (missingEvidence.length) return check('R1', 'unjudged', `${missingEvidence.length} 份数据集没有可读的逐格证据账：${missingEvidence.join('、')}`);
+    if (partial.length) return check('R1', 'unjudged', `证据账没有覆盖每一行（${partial.slice(0, 3).join('，')}）：血缘没有闭合`);
+    return check('R1', 'pass', `${registry.datasets.rows.length} 份登记数据集的每一行都有逐格证据`);
+  }
+
   const dataset = readDataset(projectRoot);
   const analysis = readAnalysis(projectRoot);
   if (!dataset || !dataset.rows.length) return check('R1', 'unjudged', '缺 output/coding/dataset.csv：没有可核对的上游');
@@ -121,33 +161,17 @@ function checkR1(projectRoot) {
 function checkR2(projectRoot) {
   const analysis = readAnalysis(projectRoot);
   if (!analysis || !analysis.rows.length) return check('R2', 'unjudged', '缺 analysis.csv');
-  if (!analysis.header.includes('in_analysis')) {
-    return check('R2', 'fail', 'analysis.csv 没有 in_analysis 列：统计与图表无法只吃纳入样本');
-  }
-  const values = new Set(analysis.rows.map((row) => String(row.in_analysis).trim()));
-  const mixed = values.has('0') && values.has('1');
-  if (!mixed) return check('R2', 'pass', '全部行都是纳入样本，不存在混合筛选');
-  // 与 dataset-in-analysis 闸门同一口径：model_spec.json 或 chart_config.json 任一引用即可，
-  // 只认其中一个会在这两个文件分开放的时候假报 fail（而 recheck-machine 是 error 级，会卡住复核）。
-  const configNames = ['model_spec.json', 'chart_config.json'].filter((name) => statOf(path.join(projectRoot, name)).exists);
-  if (!configNames.length) {
-    return check('R2', 'unjudged', '存在 in_analysis=0 的行，但还没有 model_spec.json / chart_config.json：判不了统计与图表会不会吃回去');
-  }
-  const hits = [];
-  for (const name of configNames) {
-    const text = (() => {
-      try {
-        return fs.readFileSync(path.join(projectRoot, name), 'utf8');
-      } catch {
-        return '';
-      }
-    })();
-    if (text.includes('in_analysis')) hits.push(name);
-  }
-  if (hits.length) {
-    return check('R2', 'pass', `存在 in_analysis=0 的行，${hits.join('、')} 已引用 in_analysis`);
-  }
-  return check('R2', 'fail', `存在 in_analysis=0 的行，但 ${configNames.join('、')} 都没有引用 in_analysis：统计与图表会把排除样本吃回去`);
+  // 与 dataset-in-analysis 同一口径（sample.js）：不查字符串出现，
+  // 查「纳入样本量 + 配置有没有关掉默认闸门/反向筛选 + 模型 N 有没有超」。
+  const verdict = analyseInAnalysis({
+    csv: analysis,
+    settings: readSampleSettings(projectRoot),
+    models: readModels(projectRoot),
+    source: analysisFile(projectRoot).rel,
+  });
+  if (verdict.state === 'pass') return check('R2', 'pass', verdict.detail);
+  if (verdict.state === 'fail') return check('R2', 'fail', verdict.detail);
+  return check('R2', 'unjudged', verdict.detail);
 }
 
 function checkR3(projectRoot) {
@@ -175,7 +199,10 @@ function checkR3(projectRoot) {
 function figuresInfo(projectRoot) {
   const figures = readFigures(projectRoot);
   if (!figures?.file) return { rel: '', abs: '', rows: [] };
-  return { rel: figures.file, abs: path.join(projectRoot, figures.file), rows: figures.rows || [] };
+  // 契约：status 不是 ok 的行不是交付物。复核只针对可交付图，
+  // 否则「skipped 的行没写 data_hash」会把 R4 判成失败。
+  const rows = (figures.rows || []).filter((row) => row.deliverable !== false);
+  return { rel: figures.file, abs: path.join(projectRoot, figures.file), rows };
 }
 
 function checkR4(projectRoot) {
@@ -326,27 +353,47 @@ export function coverageFile(projectRoot) {
 }
 
 export function readCoverage(projectRoot) {
-  const data = readJson(coverageFile(projectRoot));
+  let data;
+  try{
+    const file=safePath(projectRoot,'output/recheck/coverage.json');
+    if(fs.statSync(file).size>8*1024*1024)throw Error('coverage budget');
+    data=strictJson(fs.readFileSync(file,'utf8').replace(/^\uFEFF/,''));
+  }catch{data=null;}
   const entries = {};
   if (data && typeof data === 'object') {
     for (const item of RECHECK_ITEMS) {
       const value = data[item.id];
       if (value && typeof value === 'object') {
-        entries[item.id] = { status: String(value.status || ''), note: String(value.note || '') };
+        entries[item.id] = { status: String(value.status || ''), note: String(value.note || ''), ...(value.snapshotHash?{snapshotHash:String(value.snapshotHash)}:{}) };
       }
     }
   }
   return entries;
 }
 
-function checkR12(projectRoot) {
+function checkR12(projectRoot, machineChecks = []) {
   const entries = readCoverage(projectRoot);
   const missing = RECHECK_ITEMS.filter((item) => !entries[item.id] || !['checked', 'unchecked'].includes(entries[item.id].status));
   if (!Object.keys(entries).length) return check('R12', 'unjudged', '还没有 output/recheck/coverage.json：模型没交覆盖表');
   if (missing.length) return check('R12', 'fail', `覆盖表缺 ${missing.length} 项（${missing.map((m) => m.id).join('、')}）`);
   const unchecked = RECHECK_ITEMS.filter((item) => entries[item.id].status === 'unchecked');
   if (unchecked.length) return check('R12', 'unjudged', `${unchecked.length} 项标了 unchecked（未核），需人判断是否可接受`, unchecked.map((m) => `${m.id}: ${entries[m.id].note || '无理由'}`).join('\n'));
-  return check('R12', 'pass', '12 项全部 checked');
+  // 覆盖表是「人/模型说核过了」，它本身不是证据：机器复算仍判不了或判 fail 的项，
+  // 不能因为覆盖表写了 checked 就跟着变绿。2026-11-13 的复核就是靠这一点把 10 项 unjudged 洗成 done 的。
+  const byId = new Map(machineChecks.map((item) => [item.id, item]));
+  const contradicted = RECHECK_ITEMS
+    .filter((item) => item.id !== 'R12')
+    .map((item) => ({ item, machine: byId.get(item.id) }))
+    .filter((pair) => pair.machine && pair.machine.status !== 'pass');
+  const fails = contradicted.filter((pair) => pair.machine.status === 'fail');
+  const unknown = contradicted.filter((pair) => pair.machine.status === 'unjudged');
+  if (fails.length) {
+    return check('R12', 'fail', `覆盖表把 ${fails.length} 项机器复算不通过的写成 checked（${fails.map((pair) => pair.item.id).join('、')}）：覆盖表不能改写机器事实`);
+  }
+  if (unknown.length) {
+    return check('R12', 'unjudged', `${unknown.length} 项在覆盖表里写了 checked，但机器复算仍判不了（${unknown.map((pair) => pair.item.id).join('、')}）：人/模型的 checked 不能替代证据，逐项补证据或说明为什么机器判不了`);
+  }
+  return check('R12', 'pass', `12 项全部 checked，且 11 项机器复算都有证据且通过`);
 }
 
 export function issuesFile(projectRoot) {
@@ -374,11 +421,27 @@ export function readIssues(projectRoot) {
   return out;
 }
 
+/** Formal delivery must never turn an unreadable or malformed ledger into zero issues. */
+export function readIssueLedger(projectRoot) {
+  const file=safePath(projectRoot,'output/recheck/issues.jsonl');
+  if(fs.statSync(file).size>8*1024*1024)throw Error('问题台账超过核验预算');
+  const rows=[],ids=new Set();
+  for(const [index,line] of fs.readFileSync(file,'utf8').replace(/^\uFEFF/,'').split('\n').entries()){
+    if(!line.trim())continue;
+    const issue=strictJson(line);
+    if(!issue||typeof issue.id!=='string'||!issue.id.trim()||ids.has(issue.id)||
+      !['error','warning','info'].includes(issue.severity)||!['open','fixed','wontfix','deferred'].includes(issue.status||'open')||
+      (issue.status==='wontfix'&&!(typeof issue.note==='string'&&issue.note.trim())))throw Error(`问题台账第 ${index+1} 行无效或身份重复`);
+    ids.add(issue.id);rows.push({...issue,status:issue.status||'open'});
+  }
+  return rows;
+}
+
 export function writeIssues(projectRoot, issues) {
-  const file = issuesFile(projectRoot);
+  const file = safePath(projectRoot,'output/recheck/issues.jsonl');
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const body = issues.map((issue) => JSON.stringify(issue)).join('\n') + (issues.length ? '\n' : '');
-  const tmp = `${file}.tmp`;
+  const tmp = safePath(projectRoot,'output/recheck/issues.jsonl.tmp');
   fs.writeFileSync(tmp, body, 'utf8');
   fs.renameSync(tmp, file);
 }
@@ -445,7 +508,9 @@ export function buildEvidence(projectRoot, { project, runs, checks, issues }) {
 
 /** 一次性把这一阶段的机器检查都算出来。 */
 export function runChecks(projectRoot, { project, runs } = {}) {
-  const checks = [
+  // R12（覆盖表）要用 R1–R11 的机器结论判断「checked 有没有被拿来洗白」，
+  // 所以先算前 11 项，再把它作为证据传进去。
+  const machine = [
     checkR1(projectRoot),
     checkR2(projectRoot),
     checkR3(projectRoot),
@@ -457,9 +522,8 @@ export function runChecks(projectRoot, { project, runs } = {}) {
     checkR9(projectRoot),
     checkR10(projectRoot),
     checkR11(projectRoot, project, runs),
-    checkR12(projectRoot),
   ];
-  return checks;
+  return [...machine, checkR12(projectRoot, machine)];
 }
 
 /**

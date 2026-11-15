@@ -8,6 +8,9 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+import { readResearchLayer } from './research.js';
 
 /** 15 cm 版心 → 5.9055 英寸；有效 dpi = px_width / 5.9055。 */
 export const PLOT_INCHES = 15 / 2.54;
@@ -78,11 +81,12 @@ export function assessPalette(value) {
 
 /* ------------------------------- CSV ------------------------------- */
 
-export function parseCsv(text) {
+export function parseCsv(text,{strict=false}={}) {
   const rows = [];
   let row = [];
   let field = '';
   let quoted = false;
+  let closed=false;
   const src = String(text || '').replace(/^\uFEFF/, '');
   for (let i = 0; i < src.length; i += 1) {
     const ch = src[i];
@@ -93,6 +97,7 @@ export function parseCsv(text) {
           i += 1;
         } else {
           quoted = false;
+          closed=true;
         }
       } else {
         field += ch;
@@ -100,21 +105,26 @@ export function parseCsv(text) {
       continue;
     }
     if (ch === '"') {
+      if(strict&&(field.length||closed))throw Error('invalid CSV quote');
       quoted = true;
     } else if (ch === ',') {
       row.push(field);
       field = '';
+      closed=false;
     } else if (ch === '\n') {
       row.push(field);
       rows.push(row);
       row = [];
       field = '';
+      closed=false;
     } else if (ch === '\r') {
       // 等等 \n
     } else {
+      if(strict&&closed&&!/\s/.test(ch))throw Error('CSV data after closing quote');
       field += ch;
     }
   }
+  if(strict&&quoted)throw Error('unterminated CSV quote');
   if (field.length || row.length) {
     row.push(field);
     rows.push(row);
@@ -122,6 +132,7 @@ export function parseCsv(text) {
   const clean = rows.filter((cells) => cells.some((cell) => String(cell).trim() !== ''));
   if (!clean.length) return { header: [], rows: [] };
   const header = clean[0].map((cell) => cell.trim());
+  if(strict&&(!header.length||header.some(h=>!h)||new Set(header).size!==header.length||clean.slice(1).some(cells=>cells.length!==header.length)))throw Error('invalid CSV columns or row width');
   const records = clean.slice(1).map((cells) => {
     const record = {};
     header.forEach((key, index) => {
@@ -132,29 +143,72 @@ export function parseCsv(text) {
   return { header, rows: records };
 }
 
-export function readCsv(file) {
+/* --------------------------- 一次快照内的读盘去重 --------------------------- */
+
+/**
+ * 同一批产物在一次快照里会被反复读：
+ *   analysis.csv 在 scanArtifacts、闸门与复核里一共读 8 次，corpus_files.csv 读 3 次。
+ * 内容在一次同步计算里不会变，重复读只是把同样的字节再读、再解析一遍（实测占了打开面板等待的一大半）。
+ *
+ * 作用域是「一次同步计算」，不是全局 TTL 缓存：
+ *   - 面板拿到的永远是这次现读出来的结果，不会出现「显示的是上一轮的旧绿灯」；
+ *   - 计算一结束作用域就丢，下一次 /state 重新读盘——判定仍然不缓存。
+ */
+const readScope = new AsyncLocalStorage();
+
+/** 把一段同步计算包进「读盘去重」作用域；嵌套调用复用外层，不重置已读到的内容。 */
+export function withReadCache(fn) {
+  if (readScope.getStore()) return fn();
+  return readScope.run(new Map(), fn);
+}
+
+function absKey(file) {
+  const text = String(file || '');
   try {
-    return parseCsv(fs.readFileSync(file, 'utf8'));
+    return path.resolve(text);
   } catch {
-    return null;
+    return text;
   }
+}
+
+function memo(key, load) {
+  const store = readScope.getStore();
+  if (!store) return load();
+  if (store.has(key)) return store.get(key);
+  const value = load();
+  store.set(key, value);
+  return value;
+}
+
+export function readCsv(file) {
+  return memo(`csv:${absKey(file)}`, () => {
+    try {
+      return parseCsv(fs.readFileSync(file, 'utf8'));
+    } catch {
+      return null;
+    }
+  });
 }
 
 function readJson(file) {
-  try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return null;
-  }
+  return memo(`json:${absKey(file)}`, () => {
+    try {
+      return JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch {
+      return null;
+    }
+  });
 }
 
 export function statOf(file) {
-  try {
-    const st = fs.statSync(file);
-    return { exists: true, size: st.size, mtimeMs: st.mtimeMs };
-  } catch {
-    return { exists: false, size: 0, mtimeMs: 0 };
-  }
+  return memo(`stat:${absKey(file)}`, () => {
+    try {
+      const st = fs.statSync(file);
+      return { exists: true, size: st.size, mtimeMs: st.mtimeMs };
+    } catch {
+      return { exists: false, size: 0, mtimeMs: 0 };
+    }
+  });
 }
 
 /** 项目内相对路径 → 绝对路径；防止产物里写的 ../ 逃出项目。 */
@@ -179,23 +233,39 @@ export function readFlow(projectRoot) {
     const abs = path.join(projectRoot, candidate.rel);
     const csv = readCsv(abs);
     if (!csv || !csv.rows.length) continue;
+    const KINDS = new Set(['stage', 'excluded', 'model']);
     const steps = csv.rows
-      .map((row) => ({
-        stage: row.stage || row['阶段'] || '',
-        n: Number(String(row.n ?? row['数量'] ?? '').replace(/,/g, '')),
-        note: row.note || row['说明'] || '',
-      }))
+      .map((row) => {
+        const nText = String(row.n ?? row['数量'] ?? '').trim().replace(/,/g, '');
+        return {
+          stage: row.stage || row['阶段'] || '',
+          // 空 n 不能变成 0：那会在漏斗里凭空多一档 0，后面全被判成回升。
+          n: nText === '' ? NaN : Number(nText),
+          // kind：stage = 漏斗的一档；excluded = 复审排除（不是漏斗档位，数量可以回升）；
+          // model 是另一条业务线。旧文件没有 kind 列 → 一律按 stage（向后兼容）。
+          kind: String(row.kind || '').trim().toLowerCase() || 'stage',
+          note: row.note || row['说明'] || '',
+        };
+      })
       .filter((step) => step.stage && Number.isFinite(step.n));
     if (!steps.length) continue;
-    const monotonic = steps.every((step, index) => index === 0 || step.n <= steps[index - 1].n);
+    // 契约：kind 只认 stage/excluded/model，非法值要报出来，不能悄悄当成
+    // 「非漏斗行」跳过——否则写错一个字母就等于绕过了单调性检查。
+    const invalidKinds = steps.filter((step) => !KINDS.has(step.kind));
+    // 单调性只对真正的漏斗档位成立：把「复审排除」也算进去，6→5→4 会被误判成漏斗回升。
+    const funnel = steps.filter((step) => step.kind === 'stage');
+    const monotonic = funnel.every((step, index) => index === 0 || step.n <= funnel[index - 1].n);
     chains.push({
       file: candidate.rel,
       source: candidate.source,
       unit: candidate.unit,
       steps,
+      funnel,
+      other: steps.filter((step) => step.kind !== 'stage'),
+      invalidKinds,
       monotonic,
-      first: steps[0].n,
-      last: steps[steps.length - 1].n,
+      first: (funnel.length ? funnel : steps)[0].n,
+      last: (funnel.length ? funnel : steps)[(funnel.length ? funnel : steps).length - 1].n,
     });
   }
   return chains;
@@ -213,6 +283,10 @@ export function readCorpusSummary(projectRoot) {
     validFiles: json.valid_files ?? null,
     uniqueValidFiles: json.unique_valid_files ?? null,
     unreadableFiles: json.unreadable_files ?? null,
+    // metadata / hidden 不计入「原始资料」：.DS_Store、._ 附属文件、隐藏目录
+    // 都不该让来源覆盖账永远差几份。
+    metadataFiles: json.metadata_files ?? null,
+    hiddenFiles: json.hidden_files ?? null,
     truncated: Boolean(json.truncated),
     hashDisabled: Boolean(json.hash_disabled),
     generatedAt: json.generated_at || '',
@@ -247,66 +321,135 @@ function parseNumber(value) {
 }
 
 export function readFigures(projectRoot) {
-  for (const rel of MANIFEST_CANDIDATES) {
-    const abs = path.join(projectRoot, rel);
-    const csv = readCsv(abs);
-    if (!csv || !csv.rows.length) continue;
-    const baseDir = path.dirname(abs);
-    // 实测值（output/artifacts/measure.json，由 figure_check.py 从 PDF 里量出来）优先于清单声明：
-    // 清单常常没有 min_fontsize，而闸门不能因为「清单没写」就永远判不了。
-    const measured = readJson(path.join(projectRoot, 'output', 'artifacts', 'measure.json')) || {};
-    const byPng = measured && measured.byPng && typeof measured.byPng === 'object' ? measured.byPng : {};
-    const rows = csv.rows.map((row) => {
-      const pngRel = pick(row, ['png', 'file']);
-      const pngAbs = pngRel
-        ? (path.isAbsolute(pngRel) ? pngRel : path.resolve(baseDir, pngRel))
-        : '';
-      const pngName = pngRel ? path.basename(pngRel) : '';
-      // 有些 manifest 的 png 写的是项目相对路径，两种都试
-      const pngProjectAbs = pngRel ? insideProject(projectRoot, pngRel) : null;
-      const exists = Boolean((pngAbs && statOf(pngAbs).exists) || (pngProjectAbs && statOf(pngProjectAbs).exists));
-      const note = pick(row, ['note']);
-      const fontMatch = note.match(/min_fontsize\s*=\s*([0-9]+(?:\.[0-9]+)?)/i);
-      const pxWidth = parseNumber(pick(row, ['px_width', 'pxwidth']));
-      const declaredDpi = parseNumber(pick(row, ['dpi']));
-      const effectiveDpi = pxWidth ? pxWidth / PLOT_INCHES : null;
-      const nText = pick(row, ['n']);
-      const n = parseNumber(nText);
-      const measureKey = pngRel ? String(pngRel).replace(/\\/g, '/') : '';
-      const hit = byPng[measureKey] || byPng[pngName] || null;
-      const minFontMeasured = hit ? parseNumber(hit.minFont) : null;
-      const dpiMeasured = hit ? parseNumber(hit.dpi) : null;
-      const pxWidthMeasured = hit ? parseNumber(hit.pxWidth) : null;
-      return {
-        id: pick(row, ['id']) || pngName,
-        question: pick(row, ['question', 'title']),
-        chartType: pick(row, ['chart_type', 'type']),
-        variables: pick(row, ['variables', 'variable']),
-        section: pick(row, ['section']),
-        n,
-        nText,
-        nScope: pick(row, ['n_scope']),
-        caption: pick(row, ['caption', 'caption_text']),
-        png: pngRel,
-        pngExists: exists,
-        note,
-        status: pick(row, ['status']),
-        palette: pick(row, ['palette']),
-        declaredDpi,
-        pxWidth: pxWidth ?? pxWidthMeasured,
-        effectiveDpi: effectiveDpi ?? (pxWidthMeasured ? pxWidthMeasured / PLOT_INCHES : null),
-        // 实测值不许被清单自报盖掉：清单写 9pt、实测 6pt 时，按 6pt 判（取两者更小的）
-        minFontsize: fontMatch && minFontMeasured !== null
-          ? Math.min(Number(fontMatch[1]), minFontMeasured)
-          : (fontMatch ? Number(fontMatch[1]) : minFontMeasured),
-        minFontMeasured: minFontMeasured !== null,
-        measuredDpi: dpiMeasured,
-        dataHash: pick(row, ['data_hash']),
-      };
-    });
-    return { file: rel, rows };
+  // 两套清单可以同时存在（chart_pack 全景图 + paper_figures 多面板图）：
+  // 只说「取最新那份」会让旧清单里的图彻底从检查视图里消失——「没查到」被显示成「没有」。
+  // 这里按清单各读一份，再合并成一份交付视图（同一张 png 以较新的清单为准）。
+  const candidates = MANIFEST_CANDIDATES
+    .map((rel) => ({ rel, abs: path.join(projectRoot, rel), mtimeMs: statOf(path.join(projectRoot, rel)).mtimeMs || 0 }))
+    .filter((item) => statOf(item.abs).exists)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+  if (!candidates.length) return { file: '', files: [], rows: [], manifests: [] };
+
+  // 实测值（output/artifacts/measure.json，由 figure_check.py 从 PDF 里量出来）优先于清单声明：
+  // 清单常常没有 min_fontsize，而闸门不能因为「清单没写」就永远判不了。
+  const measured = readJson(path.join(projectRoot, 'output', 'artifacts', 'measure.json')) || {};
+  const byPng = measured && measured.byPng && typeof measured.byPng === 'object' ? measured.byPng : {};
+  // qa_outputs 的 PDF 实测：给了 --min-fontsize 时 checks.figures.pdfs[] 会写
+  // min_fontsize_effective（实际安置字号）。这是机器证据里最硬的一条——
+  // 清单常常没有 min_fontsize，只靠 measure.json 会让 fig-font 永远未核。
+  const qaFonts = new Map();
+  for (const report of readQaReports(projectRoot)) {
+    const pdfs = report?.json?.checks?.figures?.pdfs;
+    for (const item of Array.isArray(pdfs) ? pdfs : []) {
+      const value = parseNumber(item?.min_fontsize_effective ?? item?.min_fontsize);
+      const name = path.basename(String(item?.file || ''));
+      if (!name || value === null) continue;
+      const key = name.replace(/\.[^.]+$/, '').toLowerCase();
+      // 报告按 mtime 新→旧排列：先到的是最新结论，旧报告不能覆盖它。
+      if (!qaFonts.has(key)) qaFonts.set(key, value);
+    }
   }
-  return { file: '', rows: [] };
+
+  const manifests = [];
+  // 同一张图可能在两套清单里都登记（chart_pack 与 paper_figures 引用同一个 png）。
+  // 合并键用**解析后的绝对路径**：两条清单的相对写法不同（figures/x.png 与
+  // ../chart_pack/figures/x.png），按字符串比会把同一张图算成两张。
+  const seenPng = new Set();
+  const merged = [];
+  for (const { rel, abs, mtimeMs } of candidates) {
+    const csv = readCsv(abs);
+    if (!csv || !csv.rows.length) {
+      manifests.push({ file: rel, mtimeMs, rows: 0, empty: true });
+      continue;
+    }
+    const rows = [];
+    const baseDir = path.dirname(abs);
+    for (const row of csv.rows) {
+      const built = buildFigureRow(row, { projectRoot, baseDir, byPng, qaFonts });
+      built.manifest = rel;
+      built.manifestMtime = mtimeMs;
+      rows.push(built);
+      const key = built.pngAbs
+        ? path.resolve(built.pngAbs).toLowerCase()
+        : `${rel}#${built.id}`;
+      if (!seenPng.has(key)) {
+        seenPng.add(key);
+        merged.push(built);
+      }
+    }
+    manifests.push({ file: rel, mtimeMs, rows: rows.length, empty: false });
+  }
+  return { file: candidates[0].rel, files: candidates.map((item) => item.rel), rows: merged, manifests };
+}
+
+function buildFigureRow(row, { projectRoot, baseDir, byPng, qaFonts }) {
+  const pngRel = pick(row, ['png', 'file']);
+  const pngAbs = pngRel
+    ? (path.isAbsolute(pngRel) ? pngRel : path.resolve(baseDir, pngRel))
+    : '';
+  const pngName = pngRel ? path.basename(pngRel) : '';
+  // 有些 manifest 的 png 写的是项目相对路径，两种都试
+  const pngProjectAbs = pngRel ? insideProject(projectRoot, pngRel) : null;
+  const exists = Boolean((pngAbs && statOf(pngAbs).exists) || (pngProjectAbs && statOf(pngProjectAbs).exists));
+  const note = pick(row, ['note']);
+  const fontMatch = note.match(/min_fontsize\s*=\s*([0-9]+(?:\.[0-9]+)?)/i);
+  const declaredStatus = String(pick(row, ['status'])).trim();
+  // 契约：status 不是 ok（skipped/error）的行不是交付物，不进分母。
+  // 但它们仍然要显示出来——否则「12 张图里 6 张没渲染」会被悄悄藏掉。
+  const deliverable = !declaredStatus || /^ok$/i.test(declaredStatus);
+  const pxWidth = parseNumber(pick(row, ['px_width', 'pxwidth']));
+  const declaredDpi = parseNumber(pick(row, ['dpi']));
+  const effectiveDpi = pxWidth ? pxWidth / PLOT_INCHES : null;
+  const nText = pick(row, ['n']);
+  const n = parseNumber(nText);
+  const measureKey = pngRel ? String(pngRel).replace(/\\/g, '/') : '';
+  const hit = byPng[measureKey] || byPng[pngName] || null;
+  const minFontMeasured = hit ? parseNumber(hit.minFont) : null;
+  const dpiMeasured = hit ? parseNumber(hit.dpi) : null;
+  const pxWidthMeasured = hit ? parseNumber(hit.pxWidth) : null;
+  // 三处字号证据取最小：清单自报 / PDF 实测 / qa_outputs 的安置字号。
+  // 任何一处说字小了，就是小了——不许被另一处的大数字盖掉。
+  const qaFont = qaFonts.get(String(pngName).replace(/\.[^.]+$/, '').toLowerCase()) ?? null;
+  const fontCandidates = [fontMatch ? Number(fontMatch[1]) : null, minFontMeasured, qaFont].filter(
+    (value) => value !== null && Number.isFinite(Number(value)),
+  );
+  const minFontsize = fontCandidates.length ? Math.min(...fontCandidates.map(Number)) : null;
+  const fontSource = !fontCandidates.length
+    ? ''
+    : qaFont !== null && minFontsize === qaFont
+      ? 'qa'
+      : minFontMeasured !== null && minFontsize === minFontMeasured
+        ? 'measure'
+        : 'note';
+  return {
+    id: pick(row, ['id']) || pngName,
+    question: pick(row, ['question', 'title']),
+    chartType: pick(row, ['chart_type', 'type']),
+    variables: pick(row, ['variables', 'variable']),
+    section: pick(row, ['section']),
+    n,
+    nText,
+    nScope: pick(row, ['n_scope']),
+    caption: pick(row, ['caption', 'caption_text']),
+    png: pngRel,
+    // 合并检查视图时按解析后的绝对路径去重（两份清单的相对写法可能不同）
+    pngAbs: (pngProjectAbs && statOf(pngProjectAbs).exists) ? pngProjectAbs : pngAbs,
+    pngExists: exists,
+    note,
+    status: declaredStatus,
+    deliverable,
+    palette: pick(row, ['palette']),
+    declaredDpi,
+    pxWidth: pxWidth ?? pxWidthMeasured,
+    effectiveDpi: effectiveDpi ?? (pxWidthMeasured ? pxWidthMeasured / PLOT_INCHES : null),
+    // 实测值不许被清单自报盖掉：清单写 9pt、实测 6pt 时，按 6pt 判（取两者更小的）
+    minFontsize,
+    minFontMeasured: minFontMeasured !== null,
+    minFontQa: qaFont,
+    fontSource,
+    measuredDpi: dpiMeasured,
+    dataHash: pick(row, ['data_hash']),
+  };
 }
 
 /** 一张图的合规徽章（三态：pass / fail / unjudged，绝不把 unjudged 画成通过）。 */
@@ -356,7 +499,10 @@ export function readModels(projectRoot) {
     } catch {
       continue;
     }
-    const coefs = entries.filter((name) => /^coef_.*\.csv$/i.test(name));
+    // coef_all.csv 是「所有模型的系数合并表」，不是第 N 个模型：
+    // 把它当模型数会让「2 个模型」实际只有 1 个，N 对账也会多出一行假模型。
+    const coefs = entries.filter((name) => /^coef_.*\.csv$/i.test(name) && !/^coef_all\.csv$/i.test(name));
+    const aggregate = entries.some((name) => /^coef_all\.csv$/i.test(name));
     const fits = entries.filter((name) => /^fit.*\.csv$/i.test(name));
     const meta = readJson(path.join(abs, 'model_meta.json'));
     if (!coefs.length && !fits.length && !meta) continue;
@@ -377,7 +523,7 @@ export function readModels(projectRoot) {
         rows: csv ? csv.rows.length : 0,
       });
       if (!csv) continue;
-      fitByStem.set(stem.toLowerCase(), entryOf(csv.rows.find((row) => row.n) || null));
+      fitByStem.set(stem.toLowerCase(), entryOf(csv.rows.find((row) => parseNumber(row.n) !== null) || null));
       for (const row of csv.rows) {
         const key = String(row.model || '').trim().toLowerCase();
         if (key) fitByModel.set(key, entryOf(row));
@@ -386,7 +532,7 @@ export function readModels(projectRoot) {
 
     const models = coefs.map((name) => {
       const csv = readCsv(path.join(abs, name));
-      const first = csv ? csv.rows.find((row) => row.n) : null;
+      const first = csv ? csv.rows.find((row) => parseNumber(row.n) !== null) : null;
       const id = name.replace(/^coef_/i, '').replace(/\.csv$/i, '');
       const fit = fitByModel.get(id.toLowerCase()) || fitByStem.get(id.toLowerCase()) || fitByStem.get('main') || null;
       return {
@@ -403,10 +549,11 @@ export function readModels(projectRoot) {
       models,
       fits: [...fitByStem.values()],
       flowChecks: Array.isArray(meta?.flow_checks) ? meta.flow_checks : [],
+      aggregate,
       meta,
     };
   }
-  return { dir: '', models: [], fits: [], flowChecks: [], meta: null };
+  return { dir: '', models: [], fits: [], flowChecks: [], aggregate: false, meta: null };
 }
 
 /* ---------------------------- 数字溯源 ---------------------------- */
@@ -417,11 +564,31 @@ export function readVerify(projectRoot) {
     'output/qa/number_issues.csv',
     'output/terminal/number_issues.csv',
   ];
+  const versionOf = (text) => {
+    const match = String(text || '').match(/([0-9]+)\.([0-9]+)\.([0-9]+)/);
+    return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+  };
+  const atLeast = (a, b) => {
+    if (!a) return false;
+    for (let i = 0; i < 3; i += 1) {
+      if (a[i] > b[i]) return true;
+      if (a[i] < b[i]) return false;
+    }
+    return true;
+  };
   for (const rel of candidates) {
-    const csv = readCsv(path.join(projectRoot, rel));
+    const abs = path.join(projectRoot, rel);
+    const csv = readCsv(abs);
     if (!csv || !csv.header.length) continue;
-    const counts = { error: 0, warning: 0, info: 0, unjudged: 0, deferred: 0, input: 0 };
+    // run.json 的 version 是工具版本：1.0.1 起 V-05 用 n（实际估计样本），
+    // 1.0.1 之前误把 n_dropna（被剔除行数）当 N。两者必须分开解释。
+    const runJson = readJson(path.join(path.dirname(abs), 'run.json')) || {};
+    const toolVersion = String(runJson.version || '').trim();
+    const parsedVersion = versionOf(toolVersion);
+    const v05Legacy = !parsedVersion || !atLeast(parsedVersion, [1, 0, 1]);
+    const counts = { error: 0, warning: 0, info: 0, unjudged: 0, deferred: 0, input: 0, v05Error: 0, v05Unverifiable: 0 };
     const deferred = [];
+    const v05Errors = [];
     for (const row of csv.rows) {
       const severity = String(row.severity || '').toLowerCase();
       const check = String(row.check || row.check_id || row.rule || row.id || '').trim();
@@ -429,12 +596,26 @@ export function readVerify(projectRoot) {
       // 两者在台账里都记 error，但结论必须分开说。
       const inputClass = /^(input|parse|io|read|missing)$/i.test(check);
       if (inputClass) counts.input += 1;
-      // V-05 用 fit.csv.n_dropna 当 N（verify_numbers.py:1058-1062），而 n_dropna 是被剔除的行数。
-      // 直接当 error 会假拦正确模型 / 放过错误模型，所以单列「待按 fit.n 复核」，不并入 error。
       if (/^V[-_]?0?5$/i.test(check)) {
-        counts.deferred += 1;
-        deferred.push(row);
-        continue;
+        if (v05Legacy) {
+          // 旧版结果：n_dropna 语义错误，不能当统计结论，也不能长期当「待复核」规则。
+          counts.deferred += 1;
+          deferred.push(row);
+          continue;
+        }
+        if (severity === 'error') {
+          // V-05 的差异不等于数据错误（契约 §13）：单列，由 qa-v05 判「待复核」，
+          // 不并进 qa-numbers 的 error——否则每个 N 口径没解释清的项目都会卡死在终检。
+          counts.v05Error += 1;
+          v05Errors.push(row);
+          continue;
+        }
+        if (severity === 'warning' || severity === 'warn') {
+          // 新版：只有 n_dropna 没有 n 时 V-05 明说「无法核对」——这是 unjudged，不是通过
+          counts.v05Unverifiable += 1;
+          counts.unjudged += 1;
+          continue;
+        }
       }
       if (severity === 'error') counts.error += 1;
       else if (severity === 'warning' || severity === 'warn') counts.warning += 1;
@@ -446,6 +627,10 @@ export function readVerify(projectRoot) {
       rows: csv.rows.length,
       counts,
       deferred,
+      v05Errors,
+      v05Legacy,
+      toolVersion,
+      mtimeMs: statOf(abs).mtimeMs || 0,
       sample: csv.rows.slice(0, 20),
     };
   }
@@ -462,12 +647,14 @@ export function readQaReports(projectRoot) {
   }
   return entries
     .filter((name) => name.endsWith('.json'))
-    .slice(0, 10)
     .map((name) => {
       const abs = path.join(dir, name);
       return { name, json: readJson(abs), mtimeMs: statOf(abs).mtimeMs || 0 };
     })
-    .filter((entry) => entry.json);
+    .filter((entry) => entry.json)
+    // 最新的一份排前面：多次终检时，字号/错误数都该看最近这次，不能按文件名撞运气。
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .slice(0, 10);
 }
 
 /* ------------------------- 分析宽表 / 语料集合定位 ------------------------- */
@@ -487,6 +674,17 @@ export function analysisFile(projectRoot) {
     if (fs.existsSync(abs)) return { rel, abs, exists: true };
   }
   return { rel: ANALYSIS_CANONICAL, abs: path.join(projectRoot, ANALYSIS_CANONICAL), exists: false };
+}
+
+/**
+ * output/audit/corpus_files.csv 的原始行：内容新鲜度要用「审计当时记下的 md5」逐份比对。
+ * 返回空数组表示没有这份账（不能当成「没有变化」）。
+ */
+export function readCorpusFiles(projectRoot) {
+  const file = 'output/audit/corpus_files.csv';
+  const csv = readCsv(path.join(projectRoot, file));
+  if (!csv || !csv.rows.length) return { file, exists: Boolean(csv), rows: [] };
+  return { file, exists: true, rows: csv.rows };
 }
 
 /** output/audit/corpus_files.csv → 审计走过的文件集合（valid 与非 valid 分开）。 */
@@ -540,20 +738,25 @@ export function readSkippedSet(projectRoot) {
 let corpusScanCache = new Map();
 const CORPUS_SCAN_TTL = 5000;
 const CORPUS_SCAN_MAX = 20000;
+/** 与 audit_corpus.py 的默认 --skip-dir 一致：隔离目录不是语料，扫进来会让新鲜度永远对不上。 */
+const CORPUS_SKIP_DIRS = new Set(['_duplicates']);
 
 /**
- * 当前 data/ 的轻量签名（文件数 + 字节数），只 stat 不 hash。
- * 用来发现「审计之后 data/ 又变了」——corpus_summary 里的 fingerprint 是审计当时的快照。
+ * 当前 data/ 的清单：文件数 + 字节数 + 逐文件 size/mtime（不哈希）。
+ * 新鲜度判定用这份清单核对审计账（corpus_files.csv）的 md5；
+ * 只 stat 不 hash，所以可以每 2–8 秒扫一次（哈希由 fingerprint.js 按 mtime 缓存）。
  */
 export function corpusCurrentSignature(projectRoot, { force = false } = {}) {
   const root = path.join(projectRoot, 'data');
+  const cacheKey = path.resolve(root);
   const now = Date.now();
-  const cached = corpusScanCache.get(root);
+  const cached = corpusScanCache.get(cacheKey);
   if (!force && cached && now - cached.at < CORPUS_SCAN_TTL) return cached.value;
   let files = 0;
   let bytes = 0;
   let truncated = false;
   const seen = new Set();
+  const inventory = new Map();
   const walk = (dir) => {
     let entries;
     try {
@@ -575,6 +778,7 @@ export function corpusCurrentSignature(projectRoot, { force = false } = {}) {
         return;
       }
       const name = entry.name;
+      if (CORPUS_SKIP_DIRS.has(name)) continue;
       // 注意：技能的 audit_corpus.py 把隐藏文件也算进 total_files（只是状态记为 hidden/metadata），
       // 所以这里不能再跳过点开头的文件，否则挂了带 .DS_Store 的材料就会假报「新鲜度对不上」。
       const abs = path.join(dir, name);
@@ -593,12 +797,54 @@ export function corpusCurrentSignature(projectRoot, { force = false } = {}) {
       if (!stat.isFile()) continue;
       files += 1;
       bytes += stat.size;
+      const rel = path.relative(root, abs).replace(/\\/g, '/');
+      inventory.set(rel, { rel, abs, bytes: stat.size, mtimeMs: stat.mtimeMs });
     }
   };
   walk(root);
-  const value = { root, files, bytes, truncated };
-  corpusScanCache.set(root, { at: now, value });
+  const value = { root, files, bytes, truncated, inventory };
+  corpusScanCache.set(cacheKey, { at: now, value });
   return value;
+}
+
+/**
+ * 语料形态：哪些文件是表格数据（CSV/TSV/JSON/XLSX…），哪些是需要编码的文本。
+ *
+ * 依据是 skill 自己的分岔：make_coding_sheet.py 对 STRUCTURED_EXTS / kind=spreadsheet
+ * 直接跳过并提示「use auto_stats or CSV pipeline」。插件的编码闸门必须跟着资料形态走，
+ * 而不是对着一份 CSV 硬要 coding_sheet.csv。
+ */
+const TABULAR_EXTS = new Set(['csv', 'tsv', 'json', 'jsonl', 'ndjson', 'xlsx', 'xlsm', 'xls', 'sav', 'dta']);
+
+export function corpusProfile(projectRoot) {
+  const csv = readCsv(path.join(projectRoot, 'output/audit/corpus_files.csv'));
+  if (!csv || !csv.rows.length) {
+    return { known: false, total: 0, valid: 0, tabular: 0, documents: 0, other: 0, mode: 'unknown', sample: [] };
+  }
+  let valid = 0;
+  let tabular = 0;
+  let documents = 0;
+  let other = 0;
+  const tabularSample = [];
+  const docSample = [];
+  for (const row of csv.rows) {
+    const status = String(row.status || '').trim().toLowerCase();
+    if (status !== 'valid') continue;
+    valid += 1;
+    const ext = String(row.ext || '').trim().toLowerCase().replace(/^\./, '');
+    const kind = String(row.kind || '').trim().toLowerCase();
+    if (TABULAR_EXTS.has(ext) || kind === 'spreadsheet') {
+      tabular += 1;
+      if (tabularSample.length < 5) tabularSample.push(String(row.rel_path || row.relpath || row.name || ''));
+    } else if (['pdf', 'docx', 'odt', 'pptx', 'html', 'text', 'legacy_office', 'image'].includes(kind)) {
+      documents += 1;
+      if (docSample.length < 5) docSample.push(String(row.rel_path || row.relpath || row.name || ''));
+    } else {
+      other += 1;
+    }
+  }
+  const mode = !valid ? 'empty' : tabular === valid ? 'tables' : tabular === 0 ? 'documents' : 'mixed';
+  return { known: true, total: csv.rows.length, valid, tabular, documents, other, mode, sample: mode === 'tables' ? tabularSample : docSample };
 }
 
 export function clearCorpusScan() {
@@ -668,7 +914,7 @@ function figureSummary(rows) {
 
 /** 把项目里所有产物扫一遍，返回面板要的只读快照。 */
 /**
- * manuscript.json 的现状：第 7 阶段真正吃的是它，docx 只是产物。
+ * manuscript.json 的现状：第 8 阶段真正吃的是它，docx 只是产物。
  * 骨架里会留「待补」占位段，这里数出来，面板才能说清「还差几段正文」。
  */
 export function readManuscriptSpec(projectRoot) {
@@ -730,10 +976,15 @@ export function readManuscriptSpec(projectRoot) {
     const rel = String((block && block.csv) || '').trim();
     const csv = rel ? readCsv(path.isAbsolute(rel) ? rel : path.join(projectRoot, rel)) : null;
     const cols = csv ? csv.header.length : 0;
-    const presentation = block && block.presentation && Array.isArray(block.presentation.columns) && block.presentation.columns.length
+    // assemble_manuscript.py 的列选择是 table 块的顶层 columns: [{col,label,fmt}]；
+    // presentation.columns 是旧写法，仍兼容读取，但新稿必须写 columns。
+    const topLevel = Array.isArray(block?.columns) ? block.columns.length : 0;
+    const legacy = block && block.presentation && Array.isArray(block.presentation.columns)
       ? block.presentation.columns.length
       : 0;
-    return { n: index + 1, cols, presentation, csv: rel, exists: Boolean(csv) && cols > 0 };
+    const selected = topLevel || legacy;
+    const selectedBy = topLevel ? 'columns' : legacy ? 'presentation' : '';
+    return { n: index + 1, cols, presentation: selected, selectedBy, csv: rel, exists: Boolean(csv) && cols > 0 };
   });
   const paraChars = paraBlocks.reduce((acc, block) => {
     const textValue = String((block && block.text) || '').trim();
@@ -791,6 +1042,11 @@ export function readManuscriptSpec(projectRoot) {
 export function scanArtifacts(projectRoot) {
   const figures = readFigures(projectRoot);
   const enriched = figures.rows.map((row) => ({ ...row, badges: figureBadges(row) }));
+  // 契约：status 不是 ok 的行不是交付物。闸门的分母只数交付物，
+  // 但「清单里还有 N 行被跳过/报错」必须保留——那是另一个问题（渲染失败），不能静默丢。
+  const deliverable = enriched.filter((row) => row.deliverable);
+  const skipped = enriched.filter((row) => !row.deliverable && !String(row.status || '').toLowerCase().startsWith('error'));
+  const errored = enriched.filter((row) => !row.deliverable && String(row.status || '').toLowerCase().startsWith('error'));
   let tables = 0;
   try {
     tables = fs.readdirSync(path.join(projectRoot, 'output', 'tables')).filter((name) => name.endsWith('.csv')).length;
@@ -802,14 +1058,26 @@ export function scanArtifacts(projectRoot) {
     flow: readFlow(projectRoot),
     corpus: readCorpusSummary(projectRoot),
     corpusSet: readCorpusSet(projectRoot),
+    corpusFiles: readCorpusFiles(projectRoot),
+    corpusProfile: corpusProfile(projectRoot),
     codingSet: readCodingSet(projectRoot),
     skippedSet: readSkippedSet(projectRoot),
     corpusCurrent: corpusCurrentSignature(projectRoot),
-    figures: { file: figures.file, rows: enriched, summary: figureSummary(enriched) },
+    figures: {
+      file: figures.file,
+      files: figures.files || [],
+      manifests: figures.manifests || [],
+      rows: enriched,
+      deliverable,
+      skipped,
+      errored,
+      summary: { ...figureSummary(deliverable), declared: enriched.length, notDeliverable: skipped.length + errored.length },
+    },
     models: readModels(projectRoot),
     verify: readVerify(projectRoot),
     qa: readQaReports(projectRoot),
     manuscript: { ...statOf(path.join(projectRoot, 'output', 'manuscript.docx')), spec: readManuscriptSpec(projectRoot) },
+    research: readResearchLayer(projectRoot),
     analysisRel: analysisTarget.rel,
     analysisCsv: statOf(analysisTarget.abs),
     analysis: readAnalysisSummary(projectRoot),

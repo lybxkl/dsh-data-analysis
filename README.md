@@ -1,6 +1,6 @@
 # 实证研究工作台（dsh-data-analysis）
 
-把 `empirical-research-pipeline` 技能包变成**可点、可看、可拦住**的数据分析流水线：9 个阶段、子进程运行、产物只读解析、闸门三态判定。最后一阶段「复核与修订」把「让模型再看一遍」拆成机器复算 + 模型提案 + 人裁定 + 自动重跑。
+把 `empirical-research-pipeline` 技能包变成**可点、可看、可拦住**的数据分析流水线：10 个阶段、子进程运行、产物只读解析、闸门三态判定。最后一阶段「复核与修订」把「让模型再看一遍」拆成机器复算 + 模型提案 + 人裁定 + 自动重跑。
 
 它不是第二套研究方法，而是技能的**操作台**——脚本还是技能里那些 Python 脚本，工作台负责登记、运行、展示与拦截。
 
@@ -10,11 +10,49 @@
 ## 它解决什么
 
 - **跑没跑**：每次运行都是一个 `run-*` 记录，命令、退出码、信号、日志尾部全部落盘。
-  终检是两步（`qa_outputs.py` + `verify_numbers.py`），日志合并进同一次运行，任何一步非零就停。
+  终检是四步（`qa_outputs.py` → `verify_numbers.py` → `research_gate.py` → `review_pack.py`），日志合并进同一次运行，任何一步非零就停。
 - **产物在哪**：只读解析 `sample_flow.csv`、`chart_manifest.csv`、`coef_*.csv`/`fit*.csv`、`number_issues.csv`、`qa_report.json`，面板直接给结构。
 - **能不能交付**：每条闸门只有三种状态——`✓ 通过`、`✗ 未过`、`? 判不了`。
   **判不了不等于通过**：PNG 没有文字层，字号就是未核；没声明调色板，配色就是未核。
 - **别被旧结论骗**：人工裁定早于该阶段最近一次运行结束时，裁定自动失效、退回待裁定。
+
+## 适配新版 skill（2026-11-13）
+
+技能包升到 24 个脚本 / 12 篇 references 后，插件逐条对齐了下面这些点；每一条都有闸门或
+`tests/skill-contract.test.mjs` 兜住，技能再改 CLI 会直接红。
+
+- **阶段**：新增第 5 阶段「全格复核」（`verify_dataset.py --stage prepare`），统计/图表/文稿/终检顺延为第 6–9 阶段，复核为第 10 阶段。
+- **参数**：编码接 `--audit/--dedupe-plan/--extract/--decisions/--require-review`；统计加 `--sample-flow --vif --roc`；图表默认 `--no-tiff`；
+  终检加 `--min-fontsize 7.2 --allow-raster-text`（有 PDF 时再带 `--pdf`）；`verify_numbers` 接 `--numbers`。
+  多步阶段支持步骤级 `optionalArgs / optionalFlags / whenFile`——某一步的产物存在才追加对应参数。
+- **解析**：`sample_flow.csv` 认 `kind`（`excluded` 不参与漏斗单调性）；图表清单按 `status` 过滤分母（`skipped`/`error` 行不是交付物），
+  并把 qa 报告里 PDF 实测字号并进 `fig-font`；`coef_all.csv` 不再当模型；手稿表格改认顶层 `columns`（旧 `presentation.columns` 仍兼容）。
+- **V-05**：按契约 §13 以 `n`（实际估计样本）为准；读 `output/verify/run.json` 的版本，1.0.1 之前的结果标「旧版字段语义错误，等待重新核查」，
+  新版差异或无法核对单列「待复核」，不并进 `qa-numbers` 的 error。
+- **研究层**：新增 registry / 逐格复核 / 来源覆盖 / 模型计划 / 判断台账 / 研究总闸门 / 复核包七类闸门，
+  以及 `data_analysis_verify_dataset`（prepare/final）、`data_analysis_research_gate`、`data_analysis_decisions`、`data_analysis_review_pack` 四个工具。
+  没有 `research_registry.json` 的老项目一律 `? 判不了`，不拦（新项目见下面「项目契约」）。
+- **去重**：资料审计后自动跑 `dedupe_corpus.py` 生成去重计划（不自动移动文件），编码阶段读这份计划排除重复件。
+
+## 可信度修复（2026-11-13 第二轮复核）
+
+上一轮 review 里「判不了被汇总成通过、原件改了旧结论还有效、样本筛选检查只是查字符串」这三类问题，在这一轮改的是**行为**，不是再加闸门：
+
+| 问题 | 现在的行为 | 位置 |
+|---|---|---|
+| 10 项 `unjudged` 能汇总成 `pass` | `recheck-machine` 分三态：有 fail 判 fail，有 unjudged 判 **unjudged**（文案「判不了不等于通过」），全过才 pass；`recheck-coverage` 的 `checked` 不能改写机器事实——机器判不了的项，覆盖表写 checked 也只会 unjudged | `src/gates.js`（recheck 段）、`src/recheck.js:checkR12` |
+| 原文 AAA→BBB 审计仍 pass | 审计新鲜度改成**逐文件 md5 比对** `output/audit/corpus_files.csv`；同大小改内容会 fail，账上没有 md5 就 unjudged（不再拿大小冒充内容）；账里一份可核内容的文件都没有时也是 unjudged——「没核到」不是「一致」 | `src/fingerprint.js`、`src/gates.js`（audit-freshness） |
+| 全格复核在原件改动后仍有效 | 直接核对 skill 自己写的 `output/data_verification/verification_snapshot.json` 的 `bindings`（registry/数据集/codebook/provenance/每份原件/适配器）与 final 报告的 `review_bindings` 的 sha256；旧报告没有绑定、绑定为 0 条或超限没核完，都只判 unjudged | `src/research.js`、`src/fingerprint.js` |
+| `in_analysis` 全 0 还说「全部行都是纳入样本」 | 纳入为 0 → fail；取值不是 0/1 → unjudged；`keep_out_of_scope: true` → unjudged（研究决定，要说明）；`filter_query` 反向筛掉纳入行 → fail；模型实际 N 超过纳入样本 → fail | `src/sample.js` |
+| 只写了 `"note":"in_analysis"` 也判已过滤 | 只认真正会传给脚本的字段（`filter_query` / `filter.in_analysis` / `models[].subset`） | `src/sample.js` |
+| 新项目没有默认严格模式 | `project.json` 写入 `schemaVersion: 2` + `contract.mode: "strict"`：缺 `research_registry.json` 就是 error；老项目（schemaVersion 1）仍按 legacy 只判 unjudged；要升级显式改 `contract.mode` | `src/projects.js`、`src/gates.js:contractMode` |
+| 纯 CSV/Excel 项目卡在编码表 | 按审计账判断语料形态：有效资料全是表格 → `coding-applicable = — 不适用`，阶段状态 `na`，不再要求 `coding_sheet.csv`；混有文本仍要求编码；项目可登记 `stages.coding.applicability`（与形态不符时判 unjudged，不能拿登记绕闸门） | `src/gates.js:codingApplicability` |
+| 首次组稿跳过 PDF 导出 | `whenFile` 改到**执行到那一步时**判断；步骤用 `produces` 声明产物。首次组稿现在就会跑 `export_pdf_hires.py` | `src/runner.js:next`、`src/service.js:commandFor` |
+| 多数据集 / 两套图表清单 | 数据阶段按注册表验收（几份就几份），`stats/figures` 在缺 `analysis.csv` 时用登记的第一份数据集；`research_registry.json` 直接在无 `index.json` 时桥接成数据集视图；两套清单合并进同一检查视图（同一张 png 按绝对路径去重） | `src/gates.js`、`src/registry.js`、`src/audit.js` |
+| 修订后重跑链 | 按「资料→审计→编码→数据集→复核→模型→图→文稿→终检」算失效范围；无脚本阶段（数据集/复核 final）变**等待点**；runStage 不再统一 `force:true`；新增 `data_analysis_recheck action=chain resume/cancel` | `src/service.js:downstreamStages / beginChainStep / resumeChain` |
+| 普查带裁判文书烙印 | 结局清单改由 codebook（`outcome: true` / `outcome_type`）、registry 的 `outcomes`、已登记模型的 `outcome` 决定；列名提示只做「疑似」候选；小样本只写诊断，不再把族判成 blocked；`blocked` 必须写 why | `assets/sweep_models.py` |
+
+回归测试：`tests/regression-20261113.test.mjs`（40 条，含首次运行、原件变更、未知状态汇总、纯表格流程、多数据集、契约版本、重跑链失效范围与等待点、「空证据不冒充一致」）。
 
 ## 安装
 
@@ -38,7 +76,7 @@
 
 - `git clone` 技能包并放进 `~/.agents/skills/`（或 `~/.dsh/skills/`）；
 - 检查 Python：没有就装最新的 Python 3（Windows `winget install Python.Python.3.13`，macOS `brew install python`，Linux 用发行版包管理器）；
-- `pip install` 那 9 个依赖；
+- `pip install` 那 10 个依赖；
 - 装完自己跑一遍 `data_analysis_doctor`，必要时把 `pythonPath` / `skillRoot` 填进设置。
 
 装完回到面板，它每 12 秒复查一次，环境齐了就自动放行。也可以直接在对话里说「把实证研究工作台的环境装好」。
@@ -95,30 +133,54 @@ pip3 install -r SPSS-Style-Charting-Skill/requirements.txt
 | 检查 | 判据 | 失败会怎样 |
 | --- | --- | --- |
 | 技能包 | `skillRoot` 能解析到 `SKILL.md` + `scripts/` | 所有阶段都没脚本可跑 |
-| 阶段脚本 | 登记了脚本的 6 个阶段共 7 个脚本（含 `steps`）都在 | 对应阶段运行即报「脚本不存在」 |
+| 阶段脚本 | 登记了脚本的 7 个阶段（含 `steps` 的多步阶段）共 15 个脚本都在 | 对应阶段运行即报「脚本不存在」 |
 | Python | 能执行 `pythonPath -c ...`，版本 ≥ 3.9 | 所有脚本阶段都跑不起来 |
-| 依赖 | `pandas`、`numpy`、`scipy`、`statsmodels`、`matplotlib`、`fitz`(PyMuPDF)、`docx`(python-docx)、`openpyxl`、`PIL`(Pillow) 可导入 | 审计/统计/图表/终检按缺的包失败 |
+| 依赖 | `pandas`、`numpy`、`scipy`、`statsmodels`、`matplotlib`、`fitz`(PyMuPDF)、`docx`(python-docx)、`openpyxl`、`PIL`(Pillow)、`jsonschema` 可导入 | 审计/统计/图表/终检按缺的包失败 |
 | Word→PDF | `pywin32` 可导入（另需本机 Word） | Windows 上 **warn**，只影响 Word 转 PDF；macOS/Linux 判「判不了」（没有 COM） |
 
 自检只读探测：**不安装任何东西、不修改技能包**。有 fail 项时面板会被整块拦住（顶栏还在），给三个出口：
 「让 AI 装好环境」（开临时会话自动装）、「手动配置」（设置弹窗自己填路径）、「重新检查」。被拦期间面板每 12 秒强制复查一次。
 改过 `skillRoot` / `pythonPath` 会立即作废旧结论并重查；平时结果缓存 5 分钟，设置里可点「重新检查」。
 
-## 9 个阶段
+## 10 个阶段
 
 | # | 阶段 | 脚本 | 关键产物 |
 | --- | --- | --- | --- |
 | 1 | 范围与口径 | 人工 | `docs/scope.md` |
-| 2 | 资料审计 | `audit_corpus.py` | `output/audit/sample_flow.csv`、`corpus_summary.json` |
-| 3 | 编码与抽取 | `make_coding_sheet.py` | `output/coding/coding_sheet.csv` |
+| 2 | 资料审计 | `audit_corpus.py` → `dedupe_corpus.py`（只出计划） | `sample_flow.csv`、`corpus_summary.json`、`dedupe_plan.csv` |
+| 3 | 编码与抽取 | `make_coding_sheet.py` → `check_decisions.py`（有台账时） | `output/coding/coding_sheet.csv`、`sample_flow.csv`、`skipped_documents.csv` |
 | 4 | 数据集 | 人工 | `output/dataset/analysis.csv` |
-| 5 | 统计分析 | `auto_stats.py` | `output/models/coef_*.csv`、`fit*.csv` |
-| 6 | 出版级图表 | `auto_chart_pack.py` | `output/chart_pack/chart_manifest.csv` |
-| 7 | 文稿组装 | `assemble_manuscript.py` | `manuscript.json`（输入）→ `output/manuscript.docx`（闸门证据） |
-| 8 | 终检 | `qa_outputs.py` → `verify_numbers.py` | `output/qa/qa_report.json`、`output/verify/number_issues.csv` |
-| 9 | 复核与修订 | 机器复算 + 模型审计（无脚本） | `output/recheck/issues.jsonl`、`coverage.json`、`report.md` |
+| 5 | 全格复核 | `verify_dataset.py`（prepare） | `output/data_verification/dataset_verification.json`、`review_template_*.jsonl` |
+| 6 | 统计分析 | `auto_stats.py` → `methods_pack.py`（可选） | `output/models/coef_*.csv`、`fit.csv` |
+| 7 | 出版级图表 | `auto_chart_pack.py` → `paper_figures.py`（可选） | `output/chart_pack/chart_manifest.csv`、`output/figures/paper_figures_manifest.csv` |
+| 8 | 文稿组装 | `assemble_manuscript.py` → `export_pdf_hires.py` | `manuscript.json`（输入）→ `output/manuscript.docx` + `manuscript.pdf` |
+| 9 | 终检 | `qa_outputs.py` → `verify_numbers.py` → `research_gate.py` → `review_pack.py` | `output/qa/qa_report.json`、`output/verify/number_issues.csv`、`output/research_gate.json`、`output/review/review_pack.md` |
+| 10 | 复核与修订 | 机器复算 + 模型审计（无脚本） | `output/recheck/issues.jsonl`、`coverage.json`、`report.md` |
 
 登记表是数据：项目里的 `project.json` 可以覆盖每阶段的 `script` / `args` / `steps`，现场写的新脚本放 `scripts/` 并登记即可。
+
+> 统计对账用的是**编码漏斗** `output/coding/sample_flow.csv`（档名：文件总数 / 有效文件 / 通过筛选 / 编码完成 / 抽取字段完成），不是审计那四档；`model_spec.json` 的 `flow_stage` 要写编码漏斗里的名字。只跑了审计、还没编码时，插件会回退到审计漏斗。
+
+### 技能脚本与阶段对照
+
+技能包里的 24 个脚本，哪些进流水线、哪些是手动工具，一次说清（阶段表之外的不占闸门）：
+
+| 技能脚本 | 工作台位置 |
+| --- | --- |
+| `audit_corpus` / `dedupe_corpus` | 第 2 阶段（两步；去重只出计划，不移动原件） |
+| `make_coding_sheet` / `check_decisions` | 第 3 阶段（两步；后者只在有 `decisions.jsonl` 时跑） |
+| `verify_dataset` | 第 5 阶段（prepare）+ 工具 `data_analysis_verify_dataset`（final） |
+| `auto_stats` / `methods_pack` | 第 6 阶段（两步；后者需要 `methods.json`） |
+| `auto_chart_pack` / `paper_figures` | 第 7 阶段（两步；后者需要 `paper.json`） |
+| `assemble_manuscript` / `export_pdf_hires` | 第 8 阶段（两步；后者在执行到那一步时检查 `output/figure_map.json`——首次组稿就会跑，不再等第二次） |
+| `qa_outputs` / `verify_numbers` / `research_gate` / `review_pack` | 第 9 阶段（四步） |
+| `run_model` | 不单独成阶段：模型要复算时由模型/人按 `model_plan.jsonl` 调用并写回执，`models-plan` 闸门核对回执 |
+| `verify_source` | 不单独成阶段：按数据集逐格生成 `output/datasets/<id>/extract.meta.json` 证据账，终检的 `provenance-cells` 读它 |
+| `text_extract` / `source_guard` / `csv_to_spss_syntax` | 一次性工具，不占阶段：在会话里直接调（如扫描件先 `text_extract`，交付时导 SPSS 语法） |
+| `analysis_utils` / `pubfig` / `extract_lib` / `methods_lib` | 被上面脚本 import 的库，不单独运行 |
+
+其余可选开关（`audit_corpus --fail-on-issues`、`auto_chart_pack --max-charts/--n-scope`、`qa_outputs --colorblind` 等）
+默认不传——默认值就是安全默认；项目确实需要时在 `project.json` 的 `stages.<id>.args` 里加。
 
 **两步以上的阶段用 `steps`**，与 `args` 二选一：
 
@@ -129,27 +191,52 @@ pip3 install -r SPSS-Style-Charting-Skill/requirements.txt
 ] } }
 ```
 
+步骤上的三个可选字段：
+
+| 字段 | 语义 |
+|---|---|
+| `args` | 这一步自己的参数（不继承阶段级 `args`） |
+| `whenFile` | **执行到这一步时**文件不存在就跳过（运行记录里该步记 `skipped`）。不要用它表达「前一步会生成它」——那正是首次组稿漏掉 PDF 的原因 |
+| `produces` | 这一步会写出哪些文件。只用于「启动前判断某个条件步骤这次本来就不跑」，不参与 `whenFile` 的运行时判断 |
+
 ## 界面
 
 面板是三段式工作区：左边阶段、中间当前阶段、右边运行台。**面板不自己算结论**，
 所有状态都来自服务端快照（闸门三态、运行记录、产物解析都在 host 侧算好）。
 
+**首屏不空等**：面板每次挂载都会重新拉 `/state`（host 侧是整项目的只读扫描，面板侧省不掉），
+但第一帧先用上一次的快照渲染（刷新键显示「读取中…」），不再先闪一屏「从一个资料目录开始」——
+那会让「读数据」看起来像「进来是个空工作台」。一次都没拉到过时显示三栏骨架，数据回来位置不变；
+读取中技能包徽章显示「环境检查中…」，不把默认值当成「技能包未就位」。
+这一帧旧快照只用于显示，不据此发任何请求（比如「跟着对话切项目」会等新快照到了再判断）。
+缓存跟着**最后一次真正看到的状态**走：打开项目、绑定研究对话、保存产物这些操作回来的新快照也会顺手记进缓存，
+所以换过项目再重进面板，第一帧就是新项目，不会先闪一下上一个。
+
+host 侧三件事让这次扫描快了一个数量级（实测 `/state` 740–790ms → 82–204ms，冷启动 2.8s → 热缓存）：
+一次快照内的读盘去重（`analysis.csv` 原来被 `scanArtifacts`、闸门、复核读 8 次，现在 1 次）、
+语料指纹命中缓存时不再逐个 `stat`（键是「路径 + size + mtime」，与 `digestFile` 同一套语义）、
+宿主启动后预热一次快照（结果直接丢弃，只把缓存垫热）。
+**判定仍然每次现算**：读盘去重的作用域是「一次同步计算」，算完就丢；不缓存任何结论。
+
 视觉是**卡片仪表盘**：浅灰底上浮白卡片，圆角 12px、阴影极轻，状态一律「软色底 + 文字徽章」——
 不靠色点认状态（色弱、灰度打印都读得出），数字用等宽字体对齐。
 
 打开面板时先过一道**环境闸门**：技能包 / 阶段脚本 / Python / 依赖有任何一项 fail，主体就不显示，
-只留「让 AI 装好环境｜手动配置｜重新检查」和一屏检查结果——九个阶段都靠这份环境跑，缺了它点进去也是白点。
+只留「让 AI 装好环境｜手动配置｜重新检查」和一屏检查结果——十个阶段都靠这份环境跑，缺了它点进去也是白点。
 
 ```
-[研] 实证研究工作台 · <项目名>        [技能包就位 · v]  AI 接手▾  材料  产物  设置  项目▾  刷新
+[研] 实证研究工作台 · <项目名>    [技能包就位 · v]  AI 接手▾  💬 对话●  材料  产物  设置  项目▾  刷新
 ────────────────────────────────────────────────────────────────────────────────────────
 项目 14          ← 左栏上部：项目列表【自己滚】，多到 14 个也不挤走下面
  ▣ 环境资源犯罪裁判文书实证分析        ×   ← 悬停出现 ×：从列表移除（二次确认）
+   F:\测试文件\spss_analysis
+   ● 研究对话 当前对话 →                  ← 每个项目一条：屏幕右上角那条对话就属于它（点一下回去）
  ▣ 生态修复论文项目            （最多占左栏 46%，超了就出滚动条）
+   ● 研究对话 还没有 →                    ← 没绑过：点一下在项目目录里建一条并进去
  + 新建   打开…
 资料
  ▤ 材料库 · 3 条挂载 · 1 个材料源
-阶段 1–9        ← 左栏下部（独立滚动）：阶段行 = 圆号 + 名称 + 状态徽章
+阶段 1–10       ← 左栏下部（独立滚动）：阶段行 = 圆号 + 名称 + 状态徽章
  ① 范围与口径        完成
  ② 资料审计          待裁定
  ③ 编码与抽取        拦住
@@ -170,7 +257,8 @@ pip3 install -r SPSS-Style-Charting-Skill/requirements.txt
 五个区域：
 
 - **顶栏（58px）**：品牌标 + 项目名 + 技能包指纹（SKILL.md 与项目记录不一致时标 ⚠）、`AI 接手▾`（起草 /
-  在对话里做这一步 / 复核）、`🗂 材料`（材料库：把项目外的资料挂进来）、`▦ 产物`（产物中心：图库 / 表格 /
+  在对话里做这一步 / 复核）、`💬 对话`（当前项目的研究对话：已绑定就直接进去，没有就建一条，色点标状态）、
+  `🗂 材料`（材料库：把项目外的资料挂进来）、`▦ 产物`（产物中心：图库 / 表格 /
   文档，只读）、`⚙ 设置`（技能目录 · Python · 台账位置 · 模型）、`项目▾`（打开 · 新建）、刷新。
   材料、产物与设置是**常驻入口**——它们是配置/查看动作，不是项目动作，藏在菜单里等于让人找不到；窄屏下只留图标。
 - **左栏**：分三区，从上到下是「你在哪儿干活 → 喂给它什么 → 它跑到哪」：
@@ -180,8 +268,13 @@ pip3 install -r SPSS-Style-Charting-Skill/requirements.txt
     拿信息换空间，已经改掉。每行右侧的 `×` 是**移除**：点了要先勾一句「我明白这是移除登记」才放行，
     移除的是台账条目（连同这个项目的运行记录、人工裁定、复核链），**磁盘上的文件一个都不删**；
     目录已经不见的项目会标红并常显 `×`，因为它已经没有别的动作可做了。
+    每行下面还常驻一条 **`研究对话`**：绿点 + `已绑定` 表示这个项目有一条 DSH 会话，
+    `当前对话` 表示屏幕右上角那条对话就属于它，`还没有` 表示没建过。点一下 = 切到该项目（不是当前项目时先切）→
+    复用它的会话，没有就在项目目录里建一条并绑定 → 直接跳到那条原生对话接着聊；
+    会话没了会自愈成一条新的。会话 id 记在宿主台账（`/state` 的 `projects[].sessionId` + `bindings` 反向表），
+    面板还留了一份本地副本，宿主没重启时也能先显示状态。
   - **资料**：材料库入口，副标题 `N 条挂载`（材料源不止一个时补 ` · M 源`），挂载失效时整条变红。
-  - **阶段 1–9**：圆号 + 名称 + 右侧状态徽章（`完成` / `拦住` / `待裁定` / `待办`）。
+  - **阶段 1–10**：圆号 + 名称 + 右侧状态徽章（`完成` / `拦住` / `待裁定` / `待办`）。
     还没轮到的阶段退成灰字，但不透明到看不清。
 - **中栏**：hero 卡（阶段名 + 一句话目的 + 最近一次运行 + 主按钮）→ KPI 条（有效语料 / 总体积 /
   阶段完成 / 待裁定 / 闸门未过）→**契约卡**（数据集 / 模型 / 产物 / 结论的计数与待核项，
@@ -193,12 +286,17 @@ pip3 install -r SPSS-Style-Charting-Skill/requirements.txt
   `运行本阶段` 只负责启动——**退出码 0 不等于阶段完成**，完成与否看中间那排闸门。
 - **弹窗**：设置、打开项目、新建项目、移除项目（二次确认）、AI 起草、人工裁定、材料库、产物中心、补丁预览（共 9 种）。
   全部自绘，Esc 关闭，打开时焦点进弹窗、Tab 圈在里面、关掉回到原来的位置。
-  复核区（第 9 阶段）不是弹窗，它长在中栏里。
+  **材料库与产物中心**这类浏览为主的弹窗，点旁边空白处（遮罩）就能关；新建/打开项目、设置、人工裁定这些有输入要保护的
+  仍是只能按「取消」或 Esc。遮罩用 `mousedown` 判定，从卡片里按下、拖到外面松开不会误关。
+  复核区（第 10 阶段）不是弹窗，它长在中栏里。
 - **产物中心**：图表 tab 是缩略图网格，**点任意一项就地弹层查看**，不再把详情塞在网格下面让人滚到底部找按钮——
   图给大图（多张时 `←`/`→` 翻页并标「第 n / 共 m 张」），表给整张可滚动表格（行 × 列写在上面，超 200 行提示去下载），
-  文本/JSON 给全文 `pre`，PDF 用内嵌阅读器，Word 给下载提示；顶栏统一是 `新窗口打开` / `下载` / `关闭`，`Esc` 只关这一层（弹窗还开着）。
-  **TIFF / HEIC 浏览器自己显示不了**，这两类由服务端 `thumb.py` 转成 PNG（最长边 2400，缓存 `output/.thumbs/`）再给面板；
-  大图下面会写明「这是转码预览，原图点下载」。
+  文本/JSON 给全文 `pre`，PDF 用内嵌阅读器，Word 给下载提示；顶栏是 `新窗口打开` / `下载` / `关闭`，`Esc` 只关这一层（弹窗还开着）。
+  **同目录同主名的 TIFF / HEIC 不单独占一张卡**：`Figure1.png` 旁边的 `Figure1.tiff` 从网格和翻页里收掉，
+  点开那张图时顶栏把「下载」改成「下载 PNG」（按实际格式，JPEG 就是「下载 JPEG」），旁边多一个「下载 TIFF」（HEIC 同理）。
+  图 / 表 / 文档 / 全部的计数，以及右上角的文件数与体积，都不算这些被收掉的原稿。没有同名可预览图的 TIFF / HEIC 仍单独成卡。
+  这两类浏览器自己显示不了，由服务端 `thumb.py` 转成 PNG（最长边 2400，缓存 `output/.thumbs/`）再给面板；
+  单独打开时大图下面会写明「这是转码预览，原图点下载」。
 - **选文件夹**：凡是让你填目录的地方（新建项目、打开项目、设置里的技能包目录、材料库登记材料源），
   路径框右边都有「选择…」，点它弹的是**系统原生文件夹选择框**，选完把绝对路径填回去——不用去资源管理器复制路径。
   桌面端走宿主的选择器桥，Web 端走宿主的 `directoryPicker/pick`（在 DSH 所在那台机器上弹框）；
@@ -251,12 +349,12 @@ KPI 2 列。中栏永远只有一个实心主按钮（运行 / 去拍板 / AI �
 ### 6. 终检与复核
 
 `⑧ 终检` 是两步：`qa_outputs.py` 出合规报告、`verify_numbers.py` 做数字溯源，任一步非零就停。
-`AI 接手 → 复核` 进入第 9 阶段：12 项机器复算 → 模型逐条提问题（severity / 证据 / 修法）→ 人裁定 →
+`AI 接手 → 复核` 进入第 10 阶段：12 项机器复算 → 模型逐条提问题（severity / 证据 / 修法）→ 人裁定 →
 改 `scripts/` 或 `data/` 后自动重跑下游。补丁不会直接落盘，要人点「套用」。
 
 ### 7. 让模型代笔（可选）
 
-`AI 接手 → 写一份草稿`：用 DSH 当前默认模型起草研究范围 / 变量字典 / 图表解读 / 文稿小节 / 质检说明。
+`AI 接手 → 写一份草稿`：用 DSH 当前默认模型起草研究范围 / 变量字典 / 图表解读 / 复核说明 / 文稿小节 / 质检说明。
 默认只回文本，`save` 才写进 `docs/`。**草稿里的每个数字都必须能溯源**，找不到出处就标未核，不许顺补。
 
 ### 用工具跑（等价于点按钮）
@@ -282,7 +380,7 @@ data_analysis_status
   已通过项折叠成一行；命令、日志、覆盖表都收在「技术细节」里，默认不占版面。
 - **单一主行动**：每屏只有一个实心主按钮。有脚本时是「运行/重跑」，需要人拍板时是「去拍板」，
   没有脚本时是「AI 接手」；其余动作都在次级菜单里。`AI 接手 ▾` 统一提供三件事：
-  写一份草稿（不跑脚本，落 `docs/`）、在对话里做这一步（会改文件）、复核（第 9 阶段）。
+  写一份草稿（不跑脚本，落 `docs/`）、在对话里做这一步（会改文件）、复核（第 10 阶段）。
 - **产物按阶段归属**：选中审计只看审计链，选中图表只看图表清单，选中终检只看数字溯源与终检报告，
   不会再把全项目的图表/模型堆到每个阶段。没有产物的阶段不渲染空的「产物」段。
 - **运行台**：宽屏常驻右栏（≤1240 收成抽屉，点顶栏「运行台」打开）；列表给出状态、开始时间、阶段简称、
@@ -290,11 +388,11 @@ data_analysis_status
   **退出码 0 不等于阶段完成**，完成与否要下面那排闸门。
 - **KPI 条**：`有效语料 / 总体积 / 阶段完成 / 待裁定 / 闸门未过` 五个数。它们只做「一眼定位」，
   点进去还是以闸门为准——`闸门未过` 跳过还没开工的阶段，所以它不会因为「还没跑」而虚高。
-- **手稿骨架卡**：只在第 7 阶段出现。没有 `manuscript.json` 时只有一个「生成手稿骨架」按钮；
+- **手稿骨架卡**：只在第 8 阶段出现。没有 `manuscript.json` 时只有一个「生成手稿骨架」按钮；
   有了之后显示块数 / 图 / 表 / 还有几段「待补」，并多出「让 AI 写成正文」（把改稿说明投进研究对话）。
   已有文件时按钮改成「重排骨架」——它会冲掉现有正文，所以点它先弹确认条（说清会覆盖什么、
-  原文件备份成 `manuscript.json.bak-…`）；第 7 阶段正在跑时按钮不可点。
-  图块缺 png 时标题会变成「已就绪，但缺 N 张图（第 7 阶段会失败）」。
+  原文件备份成 `manuscript.json.bak-…`）；第 8 阶段正在跑时按钮不可点。
+  图块缺 png 时标题会变成「已就绪，但缺 N 张图（第 8 阶段会失败）」。
 - **人工裁定**：只有标了「人工」的闸门有「现在拍板」按钮；弹窗先摆证据（闸门结论、来源、阶段、
   最近一次运行），再让你写理由并选「确认通过 / 打回重做」。阶段重跑后旧裁定自动失效
   （详情里会写明两次时间），需要对新产物重新确认。未开工阶段不出现拍板按钮。
@@ -328,7 +426,7 @@ v2 把这些变成**数据**：
 3. 迁移生成的条目带 `confidence: "inferred"` + `confirmedByHuman: false`：机器猜的结构可以参与校验，
    但在人确认（`data_analysis_register` action=confirm）之前不许冒充「已核实」。
 
-### 新闸门（十个；`datasets-index` / `models-index` / `models-sweep` / `provenance-claims` 是 error 级，会拦住下一步）
+### 新闸门（二十六条；`datasets-index` / `models-index` / `models-sweep` / `provenance-claims` 是 error 级，会拦住下一步）
 
 | 闸门 | 级别 | 判什么 | 判不了时 |
 |---|---|---|---|
@@ -337,13 +435,33 @@ v2 把这些变成**数据**：
 | `models-sweep` | **error** | 每个结局至少两个族表态、`blocked` 有 why、没有 `unknown` | 没跑普查 → unjudged |
 | `fig-title` | warn | 每张图的题注不是只有「注：」 | 没有可解析的 manuscript.json |
 | `fig-cited` | warn | 正文引用了每一张图（按图块顺序，`图 N`） | 同上 |
-| `tbl-present` | warn | 表块 CSV 读得到、列数 ≤ 12 或用 `presentation.columns` 选过列 | 同上 |
+| `tbl-present` | warn | 表块 CSV 读得到、列数 ≤ 12 或用顶层 `columns` 选过列（旧写法 `presentation.columns` 仍兼容） | 同上 |
 | `manuscript-body` | warn | 正文体量撑得起图集（每图 ≥ 80 字） | 同上 |
 | `provenance-cells` | warn | 证据账覆盖整份数据集、回源率 ≥ 98%、没有 missing | 没跑回源 → unjudged |
 | `provenance-claims` | **error**（有 refuted 时） | 每条结论的 `assert` 为真；claims.jsonl 没有坏行 | 没有 claims.jsonl / 没有 assert |
 | `artifacts-declared` | warn | `project.json` 里 `stages.<id>.outputs` 声明的产物都在 | 一个都没声明 |
+| `registry-present` | **error** | `research_registry.json` 可解析、数据集 id/主键唯一、文件与 provenance 都在 | 没有 registry：**严格契约 fail**（新项目），legacy 项目 unjudged |
+| `verification-final` | **error** | `dataset_verification.json` 为 `stage=final`、`status=verified`、`error_count=0` | 只有 prepare → unjudged（逐格复核还没做） |
+| `verification-fresh` | **error** | `verification_snapshot.json` 的 bindings（原件/数据集/codebook/证据账/适配器）与 final 报告的 review_bindings 逐项 sha256 一致 | 旧报告没有绑定 → unjudged（只能比时间，不算证据） |
+| `verification-cells` | warn | `cell_issues.csv` 没有 error（warning 仍判 unjudged） | 没跑复核 |
+| `source-coverage` | warn | 审计扫到的每份资料都有 included/excluded/unreadable 与理由 | 没有 coverage 文件 |
+| `models-plan` | warn | `model_plan.jsonl` 每个候选有终态；completed 绑回执/样本键/N，其余终态有 assessment，不可估/不支持/失败还要 gaps.searches | 没有 registry → unjudged |
+| `research-gate` | **error** | `research_gate.json` 为 verified 且 0 error | 没跑总闸门 → unjudged |
+| `qa-decisions` | **error** | `decisions.jsonl` 无重复 target、证据 span 对得上、没有 needs_human | 没有台账 |
+| `qa-review` | warn | `output/review/review_pack.md` 已生成，且不早于逐格复核/终检/数字核对/研究总闸门 | 没有 registry → unjudged |
+| `qa-pdf` | warn | docx 在而 `manuscript.pdf` 不在（Word→PDF 没跑成）；PDF 在但终检没查过也判不了 | 还没有 docx |
+| `qa-fresh` | warn | docx / 分析表 / 图表清单 / PDF 在终检之后又改过 → 报告已过期 | 还没跑终检 |
+| `methods-report` | warn | 有 `methods.json` 就有 `output/methods/methods_report.md`，且不早于配置 | 有配置但没跑 methods_pack |
+| `fig-paper` | warn | 有 `paper.json` 就有 `output/figures/paper_figures_manifest.csv`，且不早于配置 | 有配置但没跑 paper_figures |
+| `fig-fresh` | warn | 分析表比图表清单新 → 图可能还是上一版数据画的 | 没有清单 |
+| `stats-fresh` | warn | 分析表比模型系数表新 → 模型还是上一版数据估的 | 还没有模型表 |
+| `manuscript-figures` | warn | 图表清单比 docx 新 → 成稿里嵌的还是旧图 | 没有 docx |
 
 error 级 = 阶段状态会变 `blocked`，`data_analysis_run_stage` 会拒绝往下跑（确需跳过要显式 `force`）。
+
+除三态之外还有第四种结论：`— 不适用`（`na`）。它只出现在「按资料形态本来就不该有这一步」的地方，
+例如纯 CSV/Excel 语料的文本编码阶段。它是有依据的判断，既不算通过、也不算未核；`gateTotals` 单独计数，
+阶段状态才会是 `na`（混有 pass 时算 `done`）。判定依据写在闸门详情里，不是拍脑袋。
 
 逐格回源的边界要说清：它证明的是「这句话的字在原文里按顺序出现过」，不是「这句话在原文里是完整的一句」。
 两页相邻的句子被拼成一条引文时也会判 `noise`（页眉删除后两段贴在一起），台账的 note 会把这种情况写出来。
@@ -357,7 +475,7 @@ error 级 = 阶段状态会变 `blocked`，`data_analysis_run_stage` 会拒绝�
 
 | 脚本 | 补的缺口 |
 |---|---|
-| `sweep_models.py` | 技能只认 logit/ols → 这里只做**可行性诊断**（分布/零值/事件数/过度离散），不估参数 |
+| `sweep_models.py` | 技能只认 logit/ols → 这里只做**诊断与候选**：结局清单来自 codebook / registry / 已登记模型，逐个给类型、N、事件数、零值比例、离散度与该考虑的族；不估参数、不拿样本阈值替人判「估不了」 |
 | `verify_source.py` | 技能不产逐格证据 → 按 `provenance.sourceColumn/quoteColumn` 回源，页眉/页码/标点/跨页差异记 `noise`；读不出文字的源文件记 `unreadable`，短于 6 字的引文记 `short`（都不算「回源成功」） |
 | `figure_check.py` | 清单常缺 `min_fontsize` → 从 PDF 里实测，写 `measure.json`，`readFigures` 自动合并 |
 | `thumb.py` | 产物中心的缩略图（服务端生成，缓存 `output/.thumbs/`） |
@@ -367,6 +485,20 @@ error 级 = 阶段状态会变 `blocked`，`data_analysis_run_stage` 会拒绝�
 没有注册表的老项目照样能跑：与注册表相关的 v2 闸门判 `unjudged` 并给出迁移指引，
 其余闸门与以前完全一致。迁移只有一步：面板契约卡点「采纳现有产物」
 （或 `data_analysis_register` action=adopt），然后逐条 `confirm` 复核列类型、单位、缺失原因、模型族。
+
+**项目契约版本**（`project.json`）：
+
+```json
+{ "schemaVersion": 2, "contract": { "version": 2, "mode": "strict" } }
+```
+
+- 新建项目默认就是这一行（strict）：没有 `research_registry.json` 判 fail，统计前必须有 `stage=final / status=verified / error_count=0` 的全格复核。
+- 老项目是 `schemaVersion: 1`，按 legacy 处理：同样的闸门判 `unjudged`，不拦。
+- 老项目要升级，把上面两行加进 `project.json` 后再跑一次复核；一时半会补不上注册表，可写 `"mode": "legacy"` 显式降级（这是逃生门，不是默认）。
+
+**多数据集**：两套注册表各有分工——skill 的 `research_registry.json` 是逐格复核的真相，
+插件的 `output/datasets/index.json` 是面板与闸门的视图。只有前者时，插件直接桥接成视图（`datasets-index` 详情里会写
+「视图来自 research_registry.json」），不必手工维护两份。需要更细的列类型/缺失原因声明时再写 index.json。
 
 ## 材料库：用户资料留在原地
 
@@ -452,28 +584,28 @@ error 级 = 阶段状态会变 `blocked`，`data_analysis_run_stage` 会拒绝�
   项目里要先写 `config` / `spec` 指定 outcome 与模型，工作台只负责把命令跑起来。
 - **文稿**：`assemble_manuscript.py` 需要项目根的 `manuscript.json`，没有会报 `spec not found`；
   所以文稿阶段不是「点了就出 docx」，缺 spec 时失败是正确行为。工作台给这条路开了口子：
-  `data_analysis_manuscript`（面板第 7 阶段的「手稿骨架」卡也走同一套）——
+  `data_analysis_manuscript`（面板第 8 阶段的「手稿骨架」卡也走同一套）——
   - `action=scaffold` 按 `chart_manifest.csv` 的 section 分组拼骨架：figure 块照抄 png / caption / n，
     模型表转 table 块，正文段落一律留「待补」。**骨架里不出现任何自己编的数字**；已有 `manuscript.json` 时不覆盖，重排要显式 `overwrite`。
-    - 前置条件是第 6 阶段已经跑出图表清单；**没有清单时骨架仍然写得出来，但里面一张图都没有**，
-      返回值里的 `warning` 与卡片上的提示会说明「先跑第 6 阶段，再重排骨架」。
+    - 前置条件是第 7 阶段已经跑出图表清单；**没有清单时骨架仍然写得出来，但里面一张图都没有**，
+      返回值里的 `warning` 与卡片上的提示会说明「先跑第 7 阶段，再重排骨架」。
     - png 路径按**清单所在目录**解析（`output/chart_pack/` 与 `output/figures/` 都对）。
     - 题注里已经写了 `N=…` 的，不再追加 `n` —— 否则 Word 里会变成「（N=320）（N=320）」。
     - `status` 不是 ok、或 png 文件不在的图会被跳过（分开记在 `skippedBadStatus` / `skippedNoPng`，
-      卡片会分别提示「先重跑第 6 阶段」与「把图补齐」）。
+      卡片会分别提示「先重跑第 7 阶段」与「把图补齐」）。
     - 重排前把原文件备份成 `manuscript.json.bak-YYYYMMDD-HHMMSS`；备份失败就不覆盖。
       0 块的空壳（`{}` / `{"style":{}}`）不算「写过的稿子」，可以直接重建。
-  - `action=brief` 给一段改稿说明：figure 的 png / caption 不许改（题注里的 N 是第 8 阶段的核对口径）、
+  - `action=brief` 给一段改稿说明：figure 的 png / caption 不许改（题注里的 N 是第 9 阶段核对的统计口径）、
     每个数字都要追到 `output/models/*.csv` 或 `output/dataset/analysis.csv`、图号从 1 连续、写完自己 parse。
     文件解析不了、结构跑不通（`blocks` 不是数组 / 空、未知 type、table 缺 csv 或 csv 没有数据行）、
     或图块缺 png 时，说明里会直接点出来。
-    - **改完 `manuscript.json` 必须重跑第 7 阶段**（`data_analysis_run_stage(stageId="manuscript")`）
-      生成 `output/manuscript.docx`，再跑第 8 阶段终检。闸门只认这个 docx；改了 JSON 不重跑，
+    - **改完 `manuscript.json` 必须重跑第 8 阶段**（`data_analysis_run_stage(stageId="manuscript")`）
+      生成 `output/manuscript.docx`，再跑第 9 阶段终检。闸门只认这个 docx；改了 JSON 不重跑，
       `manuscript-fresh` 会判「判不了」并把阶段挂回 review，避免交付旧稿。
     - 调换 figure 块的顺序会让图号跟着块序变，正文里的「图N」必须同步改，否则图文错配。
   - `action=status` 只看现状（块数 / 图 / 表 / 还有几段待补；结构不对的块与缺 png 的图块单列）。
   面板里对应「生成手稿骨架 → 让 AI 写成正文」两个按钮，后者会把改稿说明投进研究对话；
-  要重排会先弹确认条（说明会覆盖什么、备份叫什么），第 7 阶段正在跑时按钮不可点。
+  要重排会先弹确认条（说明会覆盖什么、备份叫什么），第 8 阶段正在跑时按钮不可点。
 
 ## 闸门的关键判定（来自源码，不来自文档叙述）
 
@@ -498,33 +630,86 @@ error 级 = 阶段状态会变 `blocked`，`data_analysis_run_stage` 会拒绝�
   阶段之后再跑过一次，旧裁定**自动失效**（退回待裁定并写明两次时间），必须对当前产物重新确认。
 - **取消**：取消是用户动作，运行记录记 `cancelled` 且退出码留空；不要把 Windows 上 taskkill 的 1 当成失败证据。
 - **未开工 ≠ 未过**：还没产物、没运行、也没裁定的阶段是「未开始」，不计入「未过」总数，也不画成 ✗。
-- **手稿与成稿同步**：`manuscript.json` 比 `output/manuscript.docx` 新（超过 1 秒）时，第 7 阶段多一条
+- **手稿与成稿同步**：`manuscript.json` 比 `output/manuscript.docx` 新（超过 1 秒）时，第 8 阶段多一条
   `manuscript-fresh` 判「判不了」——闸门只查 docx 存在，没有这条就会拿旧 docx 报 done，属于静默交付旧稿。
-- **多步阶段**：终检是 `qa_outputs.py → verify_numbers.py` 两步；面板显示两步脚本名，参数在任务卡与运行日志里。
+- **多步阶段**：终检是 `qa_outputs.py → verify_numbers.py → research_gate.py → review_pack.py` 四步（research_gate 在有 dataset_verification.json 时跑，review_pack 在有 registry 时跑）；面板显示全部脚本名，参数在任务卡与运行日志里。
 
-## 模型工具（23 个）
+## 触发门（按对话启用）
+
+**问题**：插件原来把 100 行使用规则和 27 个工具无条件塞进每个会话——用户只要聊到「数据/图表/论文」，
+模型就会自己建项目、跑阶段。触发门要保证：**没被启用时，这套东西在模型眼里基本不存在。**
+
+**规则**（实现：`src/gating.js` 的 `whenArmed` / `admissionFor` + `src/service.js` 的 `isArmed`）：
+工具的注册条件用 `ctx.tools.register(def, { when })`，`when` 由宿主**每个模型步求值一次**；
+返回 false 时该步的工具表里没有这个工具（不是调用才拒绝），模型连它的描述都看不到。
+
+| 状态 | 工具表里有什么 | 系统提示里有什么 |
+| --- | --- | --- |
+| 未启用（默认） | 只有只读的 `data_analysis_status` | 「触发门」一节：按对话启用、以及怎么启用 |
+| 已启用 | 28 个工具全部出现 | 完整流程（已启用后的操作顺序 …） |
+
+**三个入口都是人来触发的**（`src/service.js` 的 `isArmed`）：
+1. 面板里把这条对话**关联到项目**——绑定即启用，解绑即停用，移除项目也会清；
+   同一个项目被新会话接管时，被顶掉的旧会话**绑定和启用一起清**（否则它仍带着工具，还会被绑回来抢）；
+2. 面板的「**让 AI 装好环境**」：它会开一条临时会话，先 `POST /api/session/arm` 再投提示词
+   （装环境要调 `doctor` / `configure`，那条会话必须先启用）；
+3. 子代理：**沿用父对话**的启用状态；不继承的话，已启用的对话派个子代理去干活，子代理会突然没有工具。
+   子代理自己不记绑定，但工具作用域**跟着父对话的项目走**（沿 `parentSession` 找最近一条有绑定的对话），
+   面板停在其他项目时也不会把产物写到别人目录里。
+
+**三条硬约束**：
+- 探路工具（`data_analysis_status`）**不许自动绑定**：绑定=启用，让一次「查一下」把门打开，门就白设了
+  （`src/binding.js` 的 `NO_AUTOBIND_TOOLS`）。
+- **环境类工具**（`doctor` / `configure` / `list_stages`）同样不许自动绑定：否则面板开的装环境会话
+  只要调一次 `doctor` 就把项目抢走，用户真正的研究对话会被顶掉。它们仍受触发门约束，未启用一样看不见。
+- 门禁的默认值必须是**关**：宿主缺 `isArmed`、读不到会话 id、台账读坏，一律按「没启用」处理。
+  `data_analysis_status` 在未启用时会明确回复「这条对话还没启用」以及该去面板点哪里；
+  它显示的 `armed` 与触发门用同一个判定函数，不会出现「status 说已启用、别的工具却被挡着」。
+
+**面板投任务卡也走这道门**：先绑定（=启用）再 `prompt`，不会出现「卡先到、模型却还没有工具」的模型步；
+会话归属被顶掉时（旧快照）会先绑回来再投。
+
+**手工接口**：`POST /api/session/arm`（body `{ sessionId, reason }`）、`POST /api/session/disarm`。
+台账里存 `armings`（最多 200 条；绑定时增、解绑 / 被顶掉 / 移除项目时删）。
+
+**兼容性与残留成本**（审计结论，不是待办）：
+- `when` 依赖宿主支持 `ToolRegistrationOptions.when`（本机 DSH 已验证）。旧宿主会忽略第二个参数，
+  门会**静默变成常开**；升级/回滚宿主时先确认这一点。
+- 使用规则那一节（约 1.1 万字）目前仍对**每个**会话注入，未启用的会话也会付这份 token。
+  要按会话裁剪需要宿主支持按 agent 作用域的 `PromptSection`——这一版刻意没做（对应「档③」）。
+
+## 模型工具（28 个）
 
 `data_analysis_status`（状态与闸门）、`doctor`（环境自检）、`list_stages`、`figures`、`create_project`、`open_project`、
 `run_stage`、`run_log`、`cancel_stage`、`adjudicate`、`configure`、`draft`（起草文本）、`recheck`（复核）、`issue`（写问题）、
 `materials`（材料库：登记/挂载/摘下/修复）、`vision`（识图：计划/跑/核对）、`migrate`（旧副本换联接）、
 `manuscript`（手稿骨架：scaffold / brief / status）、
 `register`（登记数据集/模型/产物/结论）、`artifacts`（产物树与内容）、`sweep`（模型族普查）、
-`verify_source`（逐格回源）、`figure_check`（实测字号与 dpi）。
+`verify_source`（逐格回源）、`figure_check`（实测字号与 dpi）、
+`verify_dataset`（全格复核：prepare / final）、`research_gate`（来源覆盖 / 模型终态 / 回执）、
+`decisions`（判断台账校验）、`review_pack`（生成复核包）、`gates`（技能体检、策略迁移、锁恢复与证据查看）。
 没有「转码」工具：doc/xls/ppt 交给会话或用户去转，工作台只负责分类与记账。
 状态类工具只回摘要与闸门，不回整份产物快照（避免一次读进 60 张图的全部列）。
+**只有 `data_analysis_status` 常驻**；其余 27 个按触发门出现，未启用工作台的对话里看不到（见上一节）。
 
 ## 测试
 
 ```bash
-npm test                          # 下面十套全跑，一条命令（e2e 单独跑，见最后一行）
+npm test                          # 下面十五套全跑，一条命令（e2e 单独跑，见最后一行）
 node tests/materials.test.mjs     # 通道分类、挂载、迁移、识图全流程、来源账、移除项目（全在临时目录里造数据）
 node tests/runner.test.mjs        # 运行器视图与阶段命令：跑着的 run 有 status、可选 --config/--spec、并发阶段守卫、手稿骨架与改稿说明
 node tests/gates.test.mjs         # 闸门三态：pass / fail / unjudged 的边界，用合成项目逐条打
+node tests/skill-contract.test.mjs # 技能契约：阶段里每个 --flag 都必须被脚本 argparse 接受，闸门读的字段必须真由脚本写出
 node tests/registry.test.mjs      # 契约层：注册表 schema、引用解析、assert 求值、adopt 推断、十个新闸门的联动
 node tests/provenance.test.mjs    # 逐格回源：pass / noise / missing / unreadable / short 五态、改一个数字必须判 missing、GBK 语料与坏 PDF
 node tests/artifacts.test.mjs     # 产物中心：路径越界与符号链接、扩展名白名单、CSV 截断、文件树与 viewable 标记
 node tests/recheck.test.mjs       # 复核与补丁：baseHash、越界、目录联接穿透、备份命名、12 项复算口径
+node tests/readcache.test.mjs     # 一次快照内的读盘去重与指纹缓存：只在一个作用域里生效、算完就丢、mtime 变了必失效
 node tests/consistency.test.mjs   # 静态对账：文案键 / CSS 类 / 接口路径 / 工具名 / 快照字段 / README 计数
+node tests/gating.test.mjs        # 触发门：未启用=只有 status；绑定/显式/父对话三入口；解绑、被顶掉即停用；
+                                  #   status 与 doctor/configure/list_stages 不许自动绑定；装环境会话能装但抢不走项目
+node tests/binding.test.mjs       # 对话 ⇄ 项目绑定：建/开项目自动关联、不被面板带走、改绑要确认、子代理沿父对话作用域
+node tests/regression-20261113.test.mjs # 用户报过的问题逐条回归（材料/闸门/面板/绑定）
 node tests/client-smoke.test.mjs  # 不开浏览器，用假 React 把面板渲染成树：环境闸门 / 主界面 / 九个弹窗 / 产物中心（弹层看图看表看 PDF、翻页、TIFF 转码）/ 24 轮 fuzz
 node tests/visual.mjs             # 视觉回归：渲成真 HTML + 真 CSS，用无头 Chrome 量尺寸与对比度
 node tests/e2e-corpus.test.mjs    # 真实语料端到端（有材料包才跑；用 DSA_PROJECT / DSA_SOURCE 指定路径）
@@ -538,12 +723,12 @@ node tests/e2e-corpus.test.mjs    # 真实语料端到端（有材料包才跑�
 
 `visual` 是给**改版**准备的那套：它把面板渲成真 HTML、注入 `client.js` 里那份 CSS（直接从源码求值，
 不复制一份），再用无头 Chrome 在四个断点各渲染一次（1560 宽屏 / 1180 mid / 1000 compact / 820 窄屏）
-外加一档暗色，量东西并截图到 `tests/out/`。
+外加一档暗色与三档首屏骨架（`loading` / `loading-dark` / `loading-narrow`），量东西并截图到 `tests/out/`。
 断言的都是 `node --check` 和冒烟测试抓不到的东西：
 
 - **横向溢出**：任何宽度下 `scrollWidth` 都不许超过视口，逐元素扫 `overflow-x: visible` 的越界元素
 - **项目多了不顶走阶段**：14 个项目时列表必须自己出现滚动条（`scrollHeight > clientHeight`），
-  且左栏项目区不得超过左栏高度的 50%，九个阶段的最底边要留在可视区内
+  且左栏项目区不得超过左栏高度的 50%，十个阶段的最底边要留在可视区内
 - **形状真的落地了**：顶栏 58px、品牌标 30px 圆角、徽章是 pill（`border-radius ≥ 100px`）、
   按钮 32px/8px、卡片有圆角与阴影、日志卡是深色终端底——CSS 写了却没人用的情况会被量出来
 - **对比度**：正文/提示/徽章/标题按计算样式算 WCAG 比值，低于 4.5 直接失败（背景会沿祖先链找，
@@ -555,7 +740,7 @@ node tests/e2e-corpus.test.mjs    # 真实语料端到端（有材料包才跑�
 
 需要本机装了 Chrome；找不到就报错退出，不静默跳过。
 
-## 第 9 阶段：复核与修订（完整闭环）
+## 第 10 阶段：复核与修订（完整闭环）
 
 「让模型再看一遍」不可验证；这里把它拆成四层，缺一层就不算复核：
 
@@ -587,7 +772,7 @@ node tests/e2e-corpus.test.mjs    # 真实语料端到端（有材料包才跑�
    材料（分析宽表表头、审计摘要、图表清单、模型输出、终检报告，每份都有截断上限），调宿主 `llm.stream`，
    模型选择默认**跟随 DSH 当前的默认模型**（`agentDefaultModel.currentSelection()`），也可在设置里指定
    provider/model。模型看不到工具，所以它不会声称跑过脚本；返回的 Markdown 由人核对后再写入
-   `docs/scope.md`、`docs/codebook.md`、`docs/figure-notes.md`、`docs/manuscript-notes.md`、`docs/qa-notes.md`。
+   `docs/scope.md`、`docs/codebook.md`、`docs/figure-notes.md`、`docs/verify-notes.md`、`docs/manuscript-notes.md`、`docs/qa-notes.md`。
 2. **干活（原生会话，A+ 桥）**：面板阶段头的「让 AI 做这一步」会生成一张**阶段任务卡**（项目/目录、前面阶段
    状态与未过项、待裁定项、本阶段命令或人工步骤、五条硬约束、期望产出），投递到项目绑定的 DSH 会话并切到
    原生对话。工作台**不重画聊天**——会话、消息流、附件、工具卡都由宿主承担，它只在原生对话里加四件装饰：
@@ -600,6 +785,26 @@ node tests/e2e-corpus.test.mjs    # 真实语料端到端（有材料包才跑�
    - 12 个 `data_analysis_*` 工具的结果徽章（`tool.call.toolview`）。
    面板侧栏的「研究对话」卡显示会话状态、绑定 id、最近一轮与入口。会话与项目的绑定存在台账
    （`POST /api/project/session`），刷新/重启后仍在；`GET /api/summary` 只回摘要，供原生对话里的徽章轮询。
+
+   **项目 ⇄ 研究对话是一对一、而且是粘的**：
+
+   - 一条会话只属于一个项目，一个项目也只挂一条会话（新绑的顶掉旧的）。反向表落在台账
+     `bindings: { [sessionId]: { projectId, at } }`，`projects[].sessionId` 是对外那一份；
+   - **对话里让 AI 建的项目也会自动关联**：`data_analysis_create_project` / `data_analysis_open_project`
+     跑完就把这条会话绑到新项目上；其余工具则是「这条对话还没绑过 → 绑到当前项目」，已经绑过的绝不抢。
+     子代理（`header.origin === 'subagent'` 或有 `delegationDepth`）不参与绑定，不占项目那条入口；
+   - **后续继续对话不会被面板带走**：工具调用带着会话 id 进来，通过 `AsyncLocalStorage` 把 `active()`
+     作用域钉在这条会话的项目上——左栏刚点开别的项目，对话里的 `status / run / doctor` 仍然作用在原来那个
+     项目，面板也不跟着跳。要换项目，就在对话里明确说「切到 X」（走 `open_project`，属于显式改绑）；
+   - **面板跟着对话走**：会话头部那个「工作台」按钮会把「现在屏幕上是哪条对话」报给宿主
+     （`POST /api/chat/focus`），快照里带 `focus: { sessionId, projectId, ... }`（另有
+     `GET /api/session/project?sessionId=` 可单独查一条会话属于哪个项目）。进面板时若这条对话属于
+     另一个项目，面板自己切过去（每条对话只跟一次；用户已经手动点开过项目、或主动关掉项目之后
+     就不再拽回来——这条「别跟过来」只算当时那条对话的，换到别的对话再回来面板会重新跟上）。顶栏给 `本对话` / `⇄ 对话在「X」` 两态（只在宽屏出现，≤1240 顶栏装不下），
+     左栏把那条会话标成 `当前对话`；
+   - 不带 force 的改绑会被拒绝（`409 SESSION_BOUND_ELSEWHERE` + 原来那个项目），改绑只发生在工具里
+     明确换项目、或用户点了「改绑」的时候。
+
    投卡前会先看这一轮是否在跑（在跑就提示先等或去停止）；同一阶段、同一最近运行、同一组闸门状态不会
    重复投递——产物或闸门变了才允许再投。
 3. **会话里直接调工具**：prompt 小节（`skill:data-analysis`）已把「先 doctor、再 status、被拦不加 force」等
@@ -627,7 +832,7 @@ dsh-data-analysis/
   src/skill.js        技能包解析与指纹（只读、防逃逸）
   src/audit.js        产物只读解析（CSV/JSON、三态徽章、ΔL*）
   src/gates.js        闸门判定、裁定失效、阶段状态
-  src/recheck.js      第 9 阶段 12 项机器复算、问题台账、补丁校验
+  src/recheck.js      第 10 阶段 12 项机器复算、问题台账、补丁校验
   src/preflight.js    环境自检（技能包 / 脚本 / Python / 依赖 / Word→PDF）
   src/runner.js       子进程运行（多步）、日志、取消、重启对账
   src/service.js      面板/工具共用的服务层（含材料库、识图、迁移、交办文案）
@@ -646,7 +851,7 @@ dsh-data-analysis/
   assets/sweep_models.py  模型普查（每个结局给出该考虑的族，只表态不代拟合）
   assets/figure_check.py  图表实测（min_fontsize / dpi / 像素宽）
   assets/thumb.py         缩略图
-  tests/              11 套回归：materials / runner / gates / registry / provenance / artifacts / recheck / consistency / client-smoke / visual / e2e-corpus
+  tests/              11 套 npm test（materials / runner / gates / registry / provenance / artifacts / recheck / consistency / skill-contract / client-smoke / visual）+ 语料回归 e2e-corpus
 ```
 
 ## 两个 Node 的坑（Windows）
@@ -657,6 +862,8 @@ dsh-data-analysis/
 
 ## v0.1 边界
 
+当前门禁协议另见下节；此处描述宿主生产与界面的原始范围。
+
 - 只支持**从空目录新建**项目，不接管已有项目（目录非空会拒绝）。
 - 不内嵌聊天输入框：要对话就走 DSH 原生会话，工作台只投任务卡与装饰（附件、图片、工具卡都用宿主原生能力）。
 - 不做语义判定（图型对不对、双轴、截断基线、图注四要素），这些留给模型看图或人工裁定。
@@ -664,3 +871,19 @@ dsh-data-analysis/
 - 运行记录不删除；裁定只对「人工」闸门生效，机器能判的事实不允许被改成通过。
 
 
+
+## 技能判定协议 1
+
+研究质量判定已迁入技能。目录共 76 个 ID（70 个历史运行时 ID + 6 个新增），61 个由技能检查，15 个属于挂载、流程与真实裁定。skill 模式直接消费技能报告，不运行旧业务判据；legacy、shadow、compare 保留显式兼容路径。新项目消费技能包 policy-template.json 默认 skill，旧项目不自动切换。
+
+在面板中可初始化、重新体检、停止与恢复体检、切换正式技能来源和查看证据；模型使用 `data_analysis_gates`。迁移保留策略 before/after，改变策略后需重新体检。硬要求不能通过删项、推迟检查点、扩大 NA 或 force 绕过。正式准入与交付以 `admission.allowed` 为准；阶段操作完成和生产退出码 0 不能代替它。
+
+生产、独立检查和收尾检查使用同一项目锁。取消等待子进程退出，重启仅恢复已死亡 owner 与 child 的锁。报告校验包括当前代次、请求/结果/报告哈希、完整判据范围、目录/脚本/规则/资源版本、Python 及依赖版本、文件内容和目录成员。外部挂载仅经本机登记的逻辑 material 根访问。体检不产出研究数据，也不会补签复读或人工签收。
+
+技能协议、兼容条件与旧产物重跑范围见技能的 references/15-gate-reports.md。旧模型支持任意引擎执行回执；旧数字回执无输入/输出绑定时需要重跑 verify_numbers。旧生产无内容回执时重跑相应最小阶段，不能事后制作成功凭证。coverage.checked 不覆盖机器未判，人工签收绑定当前 snapshotHash。
+
+验证命令：`npm test`；随后设置 `DSA_SKILL_ROOT` 为实际待测技能目录并运行 `npm run test:gates:integration`。跨语言集成还应对干净解包与安装副本分别运行。插件不内置技能的副本，安装技能后同步其运行依赖（包括 jsonschema 4.x）。
+
+签署同时绑定问题台账、复核报告、文件集合和两项目检查代码；纯内容未变的体检刷新可保留签署，新增脚本/资料或修改台账后需要重检、重签。十二项 coverage 均需说明和非空当前快照。正式路径不会跳过坏台账行，deferred 仍是未解决问题，wontfix 必须附理由。先写复核报告，再把快照放入 coverage 与签署记录，避免把报告自身快照回写进报告。
+
+识图生产分别保存渲染页图、原始文件和识别稿的 SHA256。正式核验比较各自对象，识别稿变化也会使旧核验失效；缺旧绑定的日志需重新识别，不能通过勾选补造历史哈希。原件和宿主管理的派生缓存分别注册逻辑根，移除挂载会清除宿主的旧根授权。生产回执另绑定实际 Python 与依赖版本；旧回执缺环境信息需重跑相应生产阶段。

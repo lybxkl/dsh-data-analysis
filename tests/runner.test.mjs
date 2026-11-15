@@ -311,7 +311,7 @@ section('四、手稿骨架与改稿说明');
   const noManifest = bench.wb.manuscriptScaffold({ overwrite: true });
   check('没有图表清单时骨架里 0 张图', noManifest.ok === true && noManifest.figures === 0, String(noManifest.figures));
   check('没有图表清单时会明确警告', /还没找到图表清单/.test(noManifest.warning || ''), noManifest.warning || '(空)');
-  check('警告里指明先跑第 6 阶段', /第 6 阶段/.test(noManifest.warning || ''), noManifest.warning || '(空)');
+  check('警告里指明先跑第 7 阶段', /第 7 阶段/.test(noManifest.warning || ''), noManifest.warning || '(空)');
   const noFigText = bench.wb.manuscriptScaffold({ overwrite: true });
   check('重排仍然可跑（不把警告当失败）', noFigText.ok === true, noFigText.error || '');
 }

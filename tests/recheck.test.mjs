@@ -115,12 +115,35 @@ check('新文件（目标不存在）允许创建，并标记 created', () => {
 // ── 复算口径：没有可比对象时不能算通过 ──────────────────────────
 const checkById = (root, id) => runChecks(root).find((item) => item.id === id);
 
-check('R2：没有 model_spec / chart_config 时是 unjudged，不是 fail', () => {
+check('R2：没有 model_spec / chart_config 时按 skill 的默认闸门判 pass，并说明依据', () => {
+  // skill 的 analysis_utils.apply_filter：宽表有 in_analysis 且没有 keep_out_of_scope 时
+  // **默认**先按 in_analysis == 1 过滤。所以「没有配置」不等于「排除样本会进统计」；
+  // 真正的 unjudged 是「判不了纳入了多少行」——这里纳入了 1 行，判得了。
   const root = project({
     'output/dataset/analysis.csv': 'id,in_analysis\r\na,1\r\nb,0\r\n',
   });
   const item = checkById(root, 'R2');
+  assert.equal(item.status, 'pass', item.detail);
+  assert.match(item.detail, /纳入 1 \/ 排除 1/);
+});
+
+check('R2：keep_out_of_scope=true（排除样本会进统计）→ unjudged，不能当通过', () => {
+  const root = project({
+    'output/dataset/analysis.csv': 'id,in_analysis\r\na,1\r\nb,0\r\n',
+    'chart_config.json': JSON.stringify({ keep_out_of_scope: true }),
+  });
+  const item = checkById(root, 'R2');
   assert.equal(item.status, 'unjudged', item.detail);
+  assert.match(item.detail, /keep_out_of_scope/);
+});
+
+check('R2：in_analysis 全为 0 → fail（旧实现会说「全部行都是纳入样本」）', () => {
+  const root = project({
+    'output/dataset/analysis.csv': 'id,in_analysis\r\na,0\r\nb,0\r\n',
+  });
+  const item = checkById(root, 'R2');
+  assert.equal(item.status, 'fail', item.detail);
+  assert.match(item.detail, /纳入样本为 0/);
 });
 
 check('R2：model_spec.json 引用了 in_analysis → pass（不只看 chart_config）', () => {
@@ -131,14 +154,13 @@ check('R2：model_spec.json 引用了 in_analysis → pass（不只看 chart_con
   assert.equal(checkById(root, 'R2').status, 'pass');
 });
 
-check('R2：有配置但都没引用 → fail', () => {
+check('R2：配置里把 in_analysis=1 筛掉 → fail', () => {
   const root = project({
     'output/dataset/analysis.csv': 'id,in_analysis\r\na,1\r\nb,0\r\n',
-    'chart_config.json': JSON.stringify({ charts: [] }),
+    'chart_config.json': JSON.stringify({ filter_query: 'in_analysis == 0' }),
   });
   const item = checkById(root, 'R2');
-  assert.equal(item.status, 'fail');
-  assert.match(item.detail, /吃回去|没有引用/);
+  assert.equal(item.status, 'fail', item.detail);
 });
 
 check('R3：没有 in_analysis 时是 unjudged（不能因为「没有超标的」就算过）', () => {

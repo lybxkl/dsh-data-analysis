@@ -13,6 +13,13 @@ function shape(data) {
   if (!data.version) data.version = 1;
   if (!Array.isArray(data.projects)) data.projects = [];
   if (!Array.isArray(data.runs)) data.runs = [];
+  // 会话 → 项目 的反向表。项目和它的研究对话是一对一的，projects[].sessionId 是对外那一份，
+  // 这张表是「这条对话属于哪个项目」的查询入口：工具调用要按会话找回项目，不能靠「最近点开的那个」。
+  if (!data.bindings || typeof data.bindings !== 'object' || Array.isArray(data.bindings)) data.bindings = {};
+  // 「这条对话已启用工作台」的登记（触发门）。绑定项目时自动写一条；解绑 / 移除项目时清掉。
+  // 与 bindings 分开存：绑定是「属于哪个项目」，启用是「这条对话要不要用工作台」，两者不等价
+  // （装环境的临时会话没有项目，但需要 doctor/configure）。
+  if (!data.armings || typeof data.armings !== 'object' || Array.isArray(data.armings)) data.armings = {};
   if (!data.adjudications || typeof data.adjudications !== 'object' || Array.isArray(data.adjudications)) data.adjudications = {};
   if (!data.recheckChains || typeof data.recheckChains !== 'object' || Array.isArray(data.recheckChains)) data.recheckChains = {};
   if (!data.meta || typeof data.meta !== 'object') data.meta = {};

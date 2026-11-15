@@ -47,12 +47,13 @@ export const REQUIRED_MODULES = [
   { id: 'docx', label: 'python-docx', why: '读写成稿 .docx' },
   { id: 'openpyxl', label: 'openpyxl', why: 'Excel 资料与导出' },
   { id: 'PIL', label: 'Pillow (PIL)', why: '图片尺寸 / dpi 核验' },
+  { id: 'jsonschema', label: 'jsonschema', why: '技能判定协议校验' },
 ];
 
 const PROBE_CODE = `
 import json, sys
 info = {"python": sys.version.split()[0], "executable": sys.executable, "modules": {}, "word": False}
-for name in ["pandas", "numpy", "scipy", "statsmodels", "matplotlib", "fitz", "docx", "openpyxl", "PIL"]:
+for name in ["pandas", "numpy", "scipy", "statsmodels", "matplotlib", "fitz", "docx", "openpyxl", "PIL", "jsonschema"]:
     try:
         mod = __import__(name)
         info["modules"][name] = str(getattr(mod, "__version__", "ok"))
