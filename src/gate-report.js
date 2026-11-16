@@ -65,6 +65,7 @@ export function projectResourcePath(root,relative) {
 // A recursive JSON reader rejects duplicate keys before JSON.parse can erase them.
 export function strictJson(text) {
   let i=0;
+  const primitive=/(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/y;
   const ws=()=>{while(/[\x20\t\r\n]/.test(text[i]||'')&&i<text.length)i++;};
   function value(depth=0){
     if(depth>64)throw Error('json-depth');ws();
@@ -78,12 +79,12 @@ export function strictJson(text) {
       for(;;){ws();if(text[i]!=='"')throw Error('json-key');const key=value(depth+1);if(Object.hasOwn(out,key))throw Error('duplicate-json-key');ws();if(text[i++]!==':')throw Error('json-colon');out[key]=value(depth+1);ws();const c=text[i++];if(c==='}')return out;if(c!==',')throw Error('json-object');}
     }
     if(text[i]==='['){i++;ws();const out=[];if(text[i]===']'){i++;return out;}for(;;){out.push(value(depth+1));ws();const c=text[i++];if(c===']')return out;if(c!==',')throw Error('json-array');}}
-    const m=text.slice(i).match(/^(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/);if(!m)throw Error('json-token');i+=m[0].length;const result=JSON.parse(m[0]);if(typeof result==='number'&&!Number.isFinite(result))throw Error('json-nonfinite');return result;
+    primitive.lastIndex=i;const m=primitive.exec(text);if(!m)throw Error('json-token');i=primitive.lastIndex;const result=JSON.parse(m[0]);if(typeof result==='number'&&!Number.isFinite(result))throw Error('json-nonfinite');return result;
   }
   const out=value();ws();if(i!==text.length)throw Error('json-trailing');return out;
 }
 
-function read(file){if(fs.statSync(file).size>8*1024*1024)throw Error('report-too-large');return strictJson(fs.readFileSync(file,'utf8').replace(/^\uFEFF/,''));}
+function read(file){return strictJson(fs.readFileSync(file,'utf8').replace(/^\uFEFF/,''));}
 
 export function readGatePolicy(root){
   try{
@@ -143,7 +144,7 @@ export function validatePolicyCatalog(policy,skillRoot){
 // 运行环境也是报告绑定的一部分；只在本次请求内去重，不跨请求复用旧版本。
 export function currentEnvironment(skillRoot,python='python'){
   return readMemo(`environment:${skillRoot}\u0000${python}`,()=>{
-    const child=spawnSync(python,[safePath(skillRoot,'scripts/gates.py'),'environment'],{encoding:'utf8',timeout:15000,maxBuffer:1024*1024,windowsHide:true});
+    const child=spawnSync(python,[safePath(skillRoot,'scripts/gates.py'),'environment'],{encoding:'utf8',timeout:15000,maxBuffer:1024*1024,windowsHide:true,env:{...process.env,PYTHONUTF8:'1',PYTHONIOENCODING:'utf-8',PYTHONDONTWRITEBYTECODE:'1'}});
     if(child.status!==0)throw Error('environment-unavailable');
     return strictJson(child.stdout);
   });
@@ -176,7 +177,6 @@ export function collectionMembers(root,collection){
     for(const entry of fs.readdirSync(dir,{withFileTypes:true})){
       const name=path.posix.join(rel,entry.name),file=resolve(name),stat=fs.statSync(file);
       if(stat.isDirectory())visit(name);else if(stat.isFile())members.push(name);
-      if(members.length>5000||seen.size>5000)throw Error('collection-budget');
     }
   }
   visit(collection.basePath);return members.sort();

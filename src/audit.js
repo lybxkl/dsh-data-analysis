@@ -9,9 +9,24 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { readMemo } from './read-scope.js';
+import {projectResourcePath} from './gate-report.js';
 export { withReadCache } from './read-scope.js';
 
 import { readResearchLayer } from './research.js';
+
+/** Resolve declared artifact locations without copying or judging their contents. */
+export function artifactPath(root,logical){
+  const mappings=readMemo(`artifact-paths:${root}`,()=>readJson(path.join(root,'research_registry.json'))?.artifact_paths||{});
+  if(typeof mappings!=='object'||Array.isArray(mappings))throw Error('invalid-artifact-paths');
+  let rel=logical;
+  for(const key of Object.keys(mappings).sort((a,b)=>b.length-a.length)){
+    if(logical===key||logical.startsWith(key+'/')){
+      if(typeof mappings[key]!=='string')throw Error('invalid-artifact-path');
+      rel=mappings[key]+logical.slice(key.length);break;
+    }
+  }
+  return {rel,abs:projectResourcePath(root,rel)};
+}
 
 /** 15 cm 版心 → 5.9055 英寸；有效 dpi = px_width / 5.9055。 */
 export const PLOT_INCHES = 15 / 2.54;
@@ -282,6 +297,7 @@ export function readCorpusSummary(projectRoot) {
 const MANIFEST_CANDIDATES = [
   'output/chart_pack/chart_manifest.csv',
   'output/figures/paper_figures_manifest.csv',
+  'output/figures/chart_manifest.csv',
 ];
 
 function pick(row, keys) {
@@ -306,7 +322,8 @@ export function readFigures(projectRoot) {
   // 只说「取最新那份」会让旧清单里的图彻底从检查视图里消失——「没查到」被显示成「没有」。
   // 这里按清单各读一份，再合并成一份交付视图（同一张 png 以较新的清单为准）。
   const candidates = MANIFEST_CANDIDATES
-    .map((rel) => ({ rel, abs: path.join(projectRoot, rel), mtimeMs: statOf(path.join(projectRoot, rel)).mtimeMs || 0 }))
+    .map((logical) => {const target=artifactPath(projectRoot,logical);return {...target,mtimeMs:statOf(target.abs).mtimeMs||0};})
+    .filter((item,index,list)=>list.findIndex(other=>other.abs===item.abs)===index)
     .filter((item) => statOf(item.abs).exists)
     .sort((a, b) => b.mtimeMs - a.mtimeMs);
   if (!candidates.length) return { file: '', files: [], rows: [], manifests: [] };
@@ -471,7 +488,7 @@ export function figureBadges(figure) {
 /* ------------------------------ 模型 ------------------------------ */
 
 export function readModels(projectRoot) {
-  const dirs = ['output/models', 'output/analysis_pack'];
+  const dirs = [...new Set(['output/models', 'output/analysis_pack'].map(logical=>artifactPath(projectRoot,logical).rel))];
   for (const dir of dirs) {
     const abs = path.join(projectRoot, dir);
     let entries = [];
@@ -557,8 +574,8 @@ export function readVerify(projectRoot) {
     }
     return true;
   };
-  for (const rel of candidates) {
-    const abs = path.join(projectRoot, rel);
+  for (const logical of candidates) {
+    const {rel,abs} = artifactPath(projectRoot,logical);
     const csv = readCsv(abs);
     if (!csv || !csv.header.length) continue;
     // run.json 的 version 是工具版本：1.0.1 起 V-05 用 n（实际估计样本），
@@ -620,16 +637,16 @@ export function readVerify(projectRoot) {
 
 export function readQaReports(projectRoot) {
   const dir = path.join(projectRoot, 'output', 'qa');
+  const declared=artifactPath(projectRoot,'output/qa/qa_report.json');
   let entries = [];
   try {
     entries = fs.readdirSync(dir);
   } catch {
-    return [];
+    entries = [];
   }
-  return entries
-    .filter((name) => name.endsWith('.json'))
-    .map((name) => {
-      const abs = path.join(dir, name);
+  const files=[...new Set(entries.filter(name=>name.endsWith('.json')).map(name=>path.join(dir,name)).concat(declared.abs))];
+  return files.map((abs) => {
+      const name=path.basename(abs);
       return { name, json: readJson(abs), mtimeMs: statOf(abs).mtimeMs || 0 };
     })
     .filter((entry) => entry.json)
@@ -650,8 +667,8 @@ export const ANALYSIS_CANDIDATES = ['output/dataset/analysis.csv', 'data/analysi
 export const ANALYSIS_CANONICAL = ANALYSIS_CANDIDATES[0];
 
 export function analysisFile(projectRoot) {
-  for (const rel of ANALYSIS_CANDIDATES) {
-    const abs = path.join(projectRoot, rel);
+  for (const logical of ANALYSIS_CANDIDATES) {
+    const {rel,abs} = artifactPath(projectRoot,logical);
     if (fs.existsSync(abs)) return { rel, abs, exists: true };
   }
   return { rel: ANALYSIS_CANONICAL, abs: path.join(projectRoot, ANALYSIS_CANONICAL), exists: false };

@@ -8,6 +8,7 @@ import {verifyMounts,derivedMountName} from './sources.js';
 import {parseCsv} from './audit.js';
 import {readIssueLedger, readCoverage,RECHECK_ITEMS} from './recheck.js';
 import {readVisionLog} from './vision.js';
+import {currentProductionReceipt} from './gate-production.js';
 import {safePath, applyGateReports, resolveGateResource, projectResourcePath,readGatePolicy,strictJson,collectionMembers,implementationBindings,packageRoot,currentEnvironment,loadStageReport} from './gate-report.js';
 
 function hash(file) {
@@ -205,14 +206,7 @@ export function evaluateHostProject(context) {
     if(!assessed.length){
       const outputs=s.artifacts||[];
       let current=false;
-      try{
-        const receipt=strictJson(fs.readFileSync(safePath(root,`output/gates/production/${s.id}.json`),'utf8'));
-        current=receipt.status==='completed'&&receipt.runId===s.lastRun?.id&&receipt.workflow?.sha256===workflow.sha256&&
-          outputs.length>0&&outputs.every(rel=>receipt.outputs.some(item=>item.path===rel&&hash(safePath(root,rel))===item.sha256))&&
-          receipt.inputs.every(item=>hash(projectResourcePath(root,item.path))===item.sha256)&&
-          receipt.implementation.every(item=>hash(item.path)===item.sha256)&&
-          receipt.collections.every(collection=>JSON.stringify(collectionMembers(root,{...collection,rootId:'project',complete:true,selector:{recursive:true}}))===JSON.stringify(collection.members));
-      }catch{}
+      current=outputs.length>0&&currentProductionReceipt(root,{stage:s.id,runId:s.lastRun?.id,workflow,requiredOutputs:outputs,environment:runtime}).ok;
       s.status=current?'done':s.lastRun?.status==='failed'?'blocked':s.lastRun?'review':'todo';
     }
     if(s.status!=='na'&&!s.lastRun&&!(s.artifacts||[]).some(rel=>exists(root,rel))&&!s.gates.some(g=>g.manual&&g.status==='pass'))s.status='todo';

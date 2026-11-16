@@ -12,7 +12,7 @@ const ID=/^[a-z][a-z0-9-]{0,63}$/;
 const PANELS=new Set(['corpus','analysis','models','figures','numbers','qa','manuscript','manuscriptSpec','recheck']);
 const sha=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
 function relative(value){
-  if(typeof value!=='string'||!value||value.includes('\\')||value.includes(':')||value.includes('\0')||path.posix.normalize(value)!==value||path.isAbsolute(value)||value.split('/').includes('..'))throw Error('工作流含不安全的相对路径');
+  if(typeof value!=='string'||!value||value.endsWith('/')||value.includes('\\')||value.includes(':')||value.includes('\0')||path.posix.normalize(value)!==value||path.isAbsolute(value)||value.split('/').includes('..'))throw Error('工作流含不安全的相对路径');
   return value;
 }
 function read(file){
@@ -93,9 +93,14 @@ export function loadWorkflow(root){
         const definitions=strictJson(read(catalogFile).toString('utf8')).gates;
         const gateIds=new Set(definitions.map(g=>g.id));
         const reports=new Set(definitions.filter(g=>g.owner==='skill').map(g=>g.reportStage));
+        const reportStages=new Set(definitions.map(g=>g.reportStage));
         if(definitions.some(g=>!ids.has(g.displayStage)))throw Error('工作流缺少判据目录要求的显示阶段');
         for(const owner of [...value.stages,...value.actions]){
           for(const key of ['admission','afterRun','legacyAdmission'])if((owner[key]?.gates||[]).some(id=>!gateIds.has(id)))throw Error('工作流条件引用未知判据');
+          for(const key of ['admission','afterRun','legacyAdmission']){
+            const selected=owner[key]?.reportStages;
+            if(selected&&(!selected.length||selected.some(id=>!reportStages.has(id))))throw Error('工作流条件引用空集合或未知报告阶段');
+          }
           if((owner.inspectionStages||[]).some(id=>!reports.has(id)))throw Error('工作流引用未知体检阶段');
         }
       }

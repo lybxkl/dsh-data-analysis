@@ -12,7 +12,7 @@ export function gateCommand({root,skillRoot,python,action,mode,stage,checkpoint,
   if(stage)args.push('--stage',stage);
   if(checkpoint)args.push('--checkpoint',checkpoint);
   return new Promise(resolve=>{
-    const child=spawn(python||'python',args,{cwd:root,windowsHide:true,env:{...process.env,PYTHONUTF8:'1',...(lease?{DSA_GATE_LEASE_TOKEN:lease.token}:{})},stdio:['ignore','pipe','pipe']});
+    const child=spawn(python||'python',args,{cwd:root,windowsHide:true,env:{...process.env,PYTHONUTF8:'1',PYTHONIOENCODING:'utf-8',PYTHONDONTWRITEBYTECODE:'1',...(lease?{DSA_GATE_LEASE_TOKEN:lease.token}:{})},stdio:['ignore','pipe','pipe']});
     let stdout='',stderr='',settled=false,spawnError='',leaseError='',timedOut=false;
     function finish(value){if(settled)return;settled=true;clearTimeout(timer);resolve(value);}
     function stop(){if(process.platform==='win32'&&child.pid)spawn('taskkill',['/pid',String(child.pid),'/t','/f'],{windowsHide:true,stdio:'ignore'});else child.kill('SIGTERM');}

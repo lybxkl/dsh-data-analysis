@@ -16,6 +16,8 @@
  * 绑定即启用，让一次「查一下」把门打开，门就白设了。
  */
 export const PROBE_TOOLS = new Set(['data_analysis_status']);
+/** Explicit startup is available before activation; it is never a read-only probe. */
+export const BOOTSTRAP_TOOLS = new Set(['data_analysis_start']);
 
 /** 子代理链最多往上找几层（正常只有一层；给 fork / 多层委派留余量）。 */
 export const MAX_INHERIT_DEPTH = 8;
@@ -79,6 +81,6 @@ export function whenArmed(workbench) {
  */
 export function admissionFor(armedInStep, toolName, options = {}) {
   if (options.ungated === true) return undefined;
-  if (PROBE_TOOLS.has(String(toolName || ''))) return undefined;
+  if (PROBE_TOOLS.has(String(toolName || '')) || BOOTSTRAP_TOOLS.has(String(toolName || ''))) return undefined;
   return { when: armedInStep };
 }

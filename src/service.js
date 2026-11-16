@@ -1,4 +1,6 @@
+import {startWorkbench} from './bootstrap.js';
 import {workflowFor,defaultWorkflow,workflowArguments,rerunStages,workflowFileExists} from './workflow.js';
+import {currentProductionReceipt} from './gate-production.js';
 /**
  * 工作台服务层：面板、工具、路由共用这一份逻辑。
  *
@@ -9,7 +11,7 @@ import {workflowFor,defaultWorkflow,workflowArguments,rerunStages,workflowFileEx
  */
 
 import fs from 'node:fs';
-import { reportBlockers, gateAdmission, readGatePolicy, resolveGateResource,safePath,strictJson } from './gate-report.js';
+import { reportBlockers, gateAdmission, readGatePolicy, resolveGateResource,safePath,strictJson,loadStageReport } from './gate-report.js';
 import { inspectAfterRun, invalidateGateReports } from './gate-inspection.js';
 import { acquireProjectLease } from './gate-lease.js';
 import { gateCommand } from './gate-control.js';
@@ -202,9 +204,9 @@ export class Workbench {
 
   /* ------------------------------ 技能包 ------------------------------ */
 
-  skill() {
+  skill(rootOverride) {
     const config = this.getConfig();
-    const root = config.skillRoot || '';
+    const root = rootOverride || config.skillRoot || '';
     const resolved = resolveSkillRoot(root);
 
     if (!resolved.ok) {
@@ -635,6 +637,8 @@ export class Workbench {
         bound: current.project,
       };
     }
+    const owner=Object.entries(this.sessionBindings()).find(([sid,pid])=>sid!==key&&pid===targetId);
+    if(owner&&options.force!==true)return {ok:false,code:'PROJECT_BOUND_ELSEWHERE',error:'该项目已关联另一条研究对话；明确接管时需要 force=true',bound:{id:targetId,path:target.path,name:target.name}};
 
     const bindings = {};
     for (const sid of Object.keys(state.bindings || {})) {
@@ -717,8 +721,11 @@ export class Workbench {
     if (existing) {
       return { ok: true, already: true, sessionId: key, projectId: existing.projectId, project: existing.project };
     }
+    if(this.sessionBindings()[key])return {ok:false,code:'BOUND_PROJECT_UNAVAILABLE',error:'关联项目已不在台账中，请明确重新启动或关联项目'};
     const activeNow = this.active();
     if (!activeNow.ok) return { ok: false, error: activeNow.error };
+    const owner=Object.entries(this.sessionBindings()).find(([id,pid])=>id!==key&&pid===activeNow.id);
+    if(owner)return {ok:false,code:'PROJECT_BOUND_ELSEWHERE',error:'面板项目属于另一条研究对话，请调用 data_analysis_start 启动本对话的项目'};
     const result = this.bindSessionTo(key, activeNow.id, { force: false });
     if (!result.ok) return result;
     return { ...result, already: false };
@@ -735,23 +742,25 @@ export class Workbench {
     const key = String(projectId || '').trim();
     if (!key) return run();
     const entry = this.ledgerProject(key);
-    if (!entry) return run();
+    if (!entry) return this.sessionScope.run({ok:false,id:key,error:'运行所属项目已不在台账中，未使用其他项目代替'},run);
     const read = readProject(entry.path);
-    if (!read.ok) return run();
+    if (!read.ok) return this.sessionScope.run({ok:false,id:key,path:entry.path,error:read.error},run);
     const scope = { ok: true, path: path.resolve(entry.path), project: read.project, id: key, sessionId: '' };
     return this.sessionScope.run(scope, run);
   }
 
   /**
    * 在「某条会话自己的项目」里跑一段代码。
-   * 没绑定、或绑定的目录没了，就照老路用全局当前项目——不抛错、也不改台账。
+   * 没绑定时使用全局当前项目；绑定的目录不可用时保留失败作用域，绝不改用其他项目。
    */
   runForSession(sessionId, fn) {
     const run = typeof fn === 'function' ? fn : () => undefined;
-    const bound = this.sessionBinding(String(sessionId || '').trim());
+    const key=String(sessionId||'').trim();
+    const bound = this.sessionBinding(key);
+    if(!bound&&this.sessionBindings()[key])return this.sessionScope.run({ok:false,id:this.sessionBindings()[key],sessionId:key,error:'关联项目已不在台账中，未使用其他项目代替'},run);
     if (!bound) return run();
     const read = readProject(bound.project.path);
-    if (!read.ok) return run();
+    if (!read.ok) return this.sessionScope.run({ok:false,id:bound.projectId,path:bound.project.path,sessionId:bound.sessionId,error:'关联项目不可用：'+read.error},run);
     const scope = {
       ok: true,
       path: path.resolve(bound.project.path),
@@ -847,6 +856,7 @@ export class Workbench {
 
     const artifacts = scanAll(active.path);
     const stages = evaluateProject({
+      skillRoot:this.getConfig().skillRoot,
       pythonPath: this.getConfig().pythonPath,
       projectRoot: active.path,
       project: active.project,
@@ -910,9 +920,11 @@ export class Workbench {
     return { ok: true, path: root, project: read.project, id: projectId(root) };
   }
 
-  createProject(dir, name, scope) {
+  startWorkbench(options){return startWorkbench(this,options);}
+
+  createProject(dir, name, scope, origin) {
     const skill = this.skill();
-    const result = createProject({ dir, name, scope, skill: skill.ok ? skill : null });
+    const result = createProject({ dir, name, scope, skill: skill.ok ? skill : null, origin });
     if (!result.ok) return result;
     this.remember(result.root, result.project);
     this.onChange({ kind: 'project', path: result.root });
@@ -1554,7 +1566,10 @@ export class Workbench {
       workflow:{ok:false,error:String(error.message||error)},error:String(error.message||error),preflight:this.preflightSummary(),
       stages:[],summary:{done:0,blocked:0,review:0,todo:0,running:0},totals:{pass:0,fail:0,unjudged:0,na:0},
       admission:{allowed:false,blockingInstances:[{gateId:'platform.workflow',detail:String(error.message||error)}]},deliveryReady:false,deliveryBlockers:[String(error.message||error)],
-      artifacts:null,registry:null,runs:[],adjudications:{},activeRuns:{},gateChecking:null,materials:null,focus:this.focusSnapshot()};
+      artifacts:null,registry:null,runs:active.ok?this.recentRuns(12,active.id):[],adjudications:{},
+      activeRuns:active.ok?this.runner.activeFor(active.id):{},
+      gateChecking:active.ok&&this.gateChecks.has(active.id)?{stageId:this.gateChecks.get(active.id).stageId,startedAt:this.gateChecks.get(active.id).startedAt}:null,
+      materials:null,focus:this.focusSnapshot()};
   }
 
   buildSnapshot() {
@@ -1610,6 +1625,7 @@ export class Workbench {
       summary,
       totals,
       gateMode: readGatePolicy(active.path)?.mode || 'legacy',
+      gateModeNotice: readGatePolicy(active.path)?.mode === 'skill' ? '' : '当前为兼容或对照模式，可继续研究；该模式的阶段状态不代表完整技能质量验收。交付时同时说明实际检查结果和未评估范围。',
       gateChecking: this.gateChecks.has(active.id) ? {stageId:this.gateChecks.get(active.id).stageId,startedAt:this.gateChecks.get(active.id).startedAt} : null,
       gateRecoveryNeeded: fs.existsSync(path.join(active.path,'output/gates/publication.lock'))&&!this.gateLeases.has(active.id),
       deliveryReady: readGatePolicy(active.path)?.mode === 'skill' && deliveryBlockers.length === 0,
@@ -1633,6 +1649,7 @@ export class Workbench {
     const artifacts = scanAll(active.path);
     const adjudications = this.adjudicationsFor(active.id);
     const stages = evaluateProject({
+      skillRoot:this.getConfig().skillRoot,
       pythonPath: this.getConfig().pythonPath,
       projectRoot: active.path,
       project: active.project,
@@ -2182,9 +2199,13 @@ export class Workbench {
       },100);
     });
     const run=this.recentRuns(200,active.id).find(run=>run.id===started.run.id);
+    const checked=currentProductionReceipt(active.path,{stage:action.stage,runId:started.run.id,workflow:this.workflow(active),requiredOutputs:action.outFile?[action.outFile]:[]});
+    const policy=readGatePolicy(active.path);
+    const inspectionRequired=Boolean(policy&&policy.mode!=='legacy');
+    let error=timedOut?'工作流动作超时，已取消':run?.status!=='ok'?'工作流动作未成功完成':inspectionRequired&&run?.gateCheck?.status!=='completed'?'工作流体检未完成或已取消':!checked.ok?checked.error:'';
     let result=null;
-    if(action.outFile){try{result=strictJson(fs.readFileSync(safePath(active.path,action.outFile),'utf8'));}catch{}}
-    return {ok:!timedOut&&run?.status==='ok'&&run?.gateCheck?.status!=='failed',code:run?.exitCode??null,runId:started.run.id,actionId,result,outFile:action.outFile||'',log:this.runner.logTail(started.run.id,200).join('\n'),...(timedOut?{error:'工作流动作超时，已取消'}:{})};
+    if(!error&&action.outFile){try{result=strictJson(fs.readFileSync(safePath(active.path,action.outFile),'utf8'));}catch{error='本次动作产物不是可读取的 JSON';}}
+    return {ok:!error,code:run?.exitCode??null,runId:started.run.id,actionId,result,outFile:action.outFile||'',productionStatus:run?.status||'unknown',inspectionStatus:run?.gateCheck?.status||'not-required',log:this.runner.logTail(started.run.id,200).join('\n'),...(error?{error}:{})};
   }
 
   recentRuns(limit, forProjectId) {
@@ -2228,7 +2249,7 @@ export class Workbench {
   commandFor(projectRoot, project, stage) {
     const override = project?.stages?.[stage.id] || {};
     const python = this.getConfig().pythonPath || DEFAULT_PYTHON;
-    const skill = this.skill();
+    const skill = this.skill(project?.skill?.root);
 
     const spec = [];
     const stageSteps = Array.isArray(stage.steps) ? stage.steps : null;
@@ -2349,6 +2370,7 @@ export class Workbench {
   blockers(projectRoot, project, stageId, adjudications, execution={}) {
     const artifacts = scanAll(projectRoot);
     const stages = evaluateProject({
+      skillRoot:this.getConfig().skillRoot,
       pythonPath: this.getConfig().pythonPath,
       projectRoot,
       project,
@@ -2360,7 +2382,7 @@ export class Workbench {
     });
     const index = stages.findIndex((item) => item.id === stageId);
     const reasons = [];
-    const definition=workflowFor(project).stages.find(stage=>stage.id===stageId);
+    const definition=workflowFor(project,this.getConfig().skillRoot).stages.find(stage=>stage.id===stageId);
     if(!definition)return ['工作流中没有此阶段'];
     const formal=readGatePolicy(projectRoot)?.mode==='skill';
     for(const relative of execution.requiredFiles||definition.ui?.requiredFiles||[])if(!workflowFileExists(projectRoot,relative))reasons.push('缺少阶段输入：'+relative);
@@ -2420,7 +2442,7 @@ export class Workbench {
     }
     let run, command;
     try {
-      if(lease)syncMaterialRoots(active.path,active.project,listSources(this.store),this.cacheDir());
+      if(lease||operation)syncMaterialRoots(active.path,active.project,listSources(this.store),this.cacheDir());
       command=this.commandFor(active.path,operation?{...active.project,stages:{...active.project.stages,[stageId]:{}}}:active.project,stage);
       if(!command.ok)return {ok:false,error:command.error};
       if(!force||readGatePolicy(active.path)?.mode==='skill'){
@@ -2754,8 +2776,9 @@ export class Workbench {
   async gateControl({action='inspect',stageId,mode}={}) {
     const active=this.active();
     if(!active.ok)return {ok:false,error:active.error};
+    const previousMode=readGatePolicy(active.path)?.mode||'legacy';
     if(Object.keys(this.runner.activeFor(active.id)).length||this.gateLeases.has(active.id))return {ok:false,error:'生产或体检正在运行，不能同时修改策略'};
-    const skill=this.skill();
+    const skill=this.skill(action==='inspect'||action==='recover'?active.project.skill?.root:undefined);
     if(!skill.ok)return {ok:false,error:skill.reason};
     const common={root:active.path,skillRoot:skill.packageDir,python:this.getConfig().pythonPath};
     let result;
@@ -2769,8 +2792,13 @@ export class Workbench {
         const declared=stageId?this.workflow(active).stages.find(stage=>stage.id===stageId):null;
         if(stageId&&!declared)throw Error('工作流中没有此检查阶段');
         const stageIds=declared?declared.inspectionStages:null;
-        const checked=stageIds?.length===0?{status:'completed',results:[]}:await this.inspectGates(active.id,{...common,lease,stageIds});
-        result={ok:checked.status==='completed',...checked};
+        const checked=stageIds?.length===0?{status:'completed',results:[]}:await this.inspectGates(active.id,{...common,lease,stageIds,explicit:true});
+        const inspectionFacts=(checked.results||[]).map(item=>{
+          try{return {stage:item.stage,gates:loadStageReport(active.path,{...active.project,skill:active.project.skill||{root:skill.packageDir}},readGatePolicy(active.path),item.stage)
+            .map(({id,status,detail,reason,validationReason})=>({id,status,detail,reason,validationReason}))};}
+          catch(error){return {stage:item.stage,validationReason:error.message,gates:[]};}
+        });
+        result={ok:checked.status==='completed',...checked,inspectionFacts};
       }catch(error){result={ok:false,error:error.message};}
       finally{if(lease){const error=this.releaseGateLease(active.id,lease);if(error)result={ok:false,error,status:'failed'};}}
     } else {
@@ -2800,7 +2828,8 @@ export class Workbench {
     }
 
     this.onChange({kind:'gate-control',action,result});
-    return {...result,state:this.snapshot()};
+    const state=this.snapshot();
+    return {...result,...(action==='migrate'&&result.ok?{modeTransition:{from:previousMode,to:state.gateMode},notice:state.gateModeNotice||'已切换到技能质量验收；需以当前输入重新体检。'}:{}),state};
   }
 
   gateEvidence({stageId,gateId}={}) {
@@ -2823,7 +2852,9 @@ export class Workbench {
     const results=[];
     for(const project of this.store.get().projects||[]){
       if(!project.path||!fs.existsSync(path.join(project.path,'output/gates/publication.lock')))continue;
-      const result=await gateCommand({root:project.path,skillRoot:skill.packageDir,python:this.getConfig().pythonPath,action:'recover'});
+      const read=readProject(project.path);
+      const pinned=this.skill(read.ok?read.project.skill?.root:undefined);
+      const result=await gateCommand({root:project.path,skillRoot:pinned.packageDir,python:this.getConfig().pythonPath,action:'recover'});
       results.push({projectId:project.id,...result});
     }
     if(results.length){this.onChange({kind:'gate-recovery',results});}
@@ -3049,7 +3080,7 @@ export class Workbench {
       const lease = this.gateLeases.get(run?.projectId);
       try {
         if (active.ok && readGatePolicy(active.path)) {
-          const gateCheck = run.status==='cancelled'?{status:'cancelled',results:[]}:await this.inspectGates(active.id,{root: active.path, skillRoot: this.skill().packageDir, python: this.getConfig().pythonPath, run, lease});
+          const gateCheck = run.status==='cancelled'?{status:'cancelled',results:[]}:await this.inspectGates(active.id,{root: active.path, skillRoot: this.skill(active.project.skill?.root).packageDir, python: this.getConfig().pythonPath, run, lease});
           const state = this.store.get();
           this.store.set({runs: (state.runs || []).map(r => r.id === run.id ? {...r, gateCheck} : r)});
           this.onChange({kind: 'gate-check', runId: run.id, gateCheck});
@@ -3169,6 +3200,8 @@ export class Workbench {
   updateConfig(patch = {}) {
     const current = this.getConfig();
     const next = normalizeConfig({ ...current, ...patch });
+    const changingRuntime=['dataDir','pythonPath'].some(key=>Object.hasOwn(patch,key)&&next[key]!==current[key]);
+    if(changingRuntime&&((this.store.get().runs||[]).some(run=>run.status==='running')||this.gateChecks.size||this.gateLeases.size))return {ok:false,error:'生产或体检期间不能切换 Python 或台账目录，请先完成或停止任务'};
     this.store.set({ config: next });
     this.invalidateSkill();
 

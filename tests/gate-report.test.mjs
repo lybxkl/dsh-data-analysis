@@ -5,6 +5,7 @@ import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {strictJson,safePath,readGatePolicy,loadStageReport,applyGateReports,reportBlockers} from '../src/gate-report.js';
+import crypto from 'node:crypto';
 
 const skill=process.env.DSA_SKILL_ROOT;
 if(!skill)throw Error('Set DSA_SKILL_ROOT to the actual skill package for cross-runtime tests');
@@ -20,6 +21,18 @@ try {
   write('output/dataset/analysis.csv','id,in_analysis\na,1\nb,0\n');
   cli('evaluate','--stage','dataset');
   let p=readGatePolicy(root);const project={skill:{root:skill}};
+  assert.equal(loadStageReport(root,project,p,'dataset').find(g=>g.id==='dataset-in-analysis').status,'pass');
+  // A valid evidence object can exceed the former reader limit without losing bindings.
+  const hash=relative=>crypto.createHash('sha256').update(fs.readFileSync(path.join(root,relative))).digest('hex');
+  const stateFile='output/gates/state/dataset.json';
+  const state=JSON.parse(fs.readFileSync(path.join(root,stateFile),'utf8'));
+  const result=JSON.parse(fs.readFileSync(path.join(root,state.resultPath),'utf8'));
+  const largeReport=JSON.parse(fs.readFileSync(path.join(root,result.reportPath),'utf8'));
+  largeReport.gates[0].evidence[0].actual={completeEvidence:'x'.repeat(9*1024*1024)};
+  const reportBytes=JSON.stringify(largeReport);
+  write(result.reportPath,reportBytes);write('output/gates/dataset.json',reportBytes);
+  result.reportSha256=hash(result.reportPath);write(state.resultPath,JSON.stringify(result));
+  state.resultSha256=hash(state.resultPath);write(stateFile,JSON.stringify(state));
   assert.equal(loadStageReport(root,project,p,'dataset').find(g=>g.id==='dataset-in-analysis').status,'pass');
   const file=path.join(root,'output/dataset/analysis.csv'),stamp=fs.statSync(file);
   fs.writeFileSync(file,'id,in_analysis\na,0\nb,0\n');fs.utimesSync(file,stamp.atime,stamp.mtime);

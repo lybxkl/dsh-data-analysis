@@ -9,7 +9,7 @@ import fs from 'node:fs';
 
 import { defineTool } from '@deepseek-ai/dsh-tools';
 
-import { sessionIdOf, wrapExecute } from './binding.js';
+import { sessionIdOf, sessionIsDelegated, wrapExecute } from './binding.js';
 import { admissionFor, isArmedSession, whenArmed } from './gating.js';
 
 const STATUS_LABEL = {
@@ -60,6 +60,22 @@ function okText(line) {
   return [{ type: 'text', text: line }];
 }
 
+// DSH uses render() for the model-visible tool result, not just its UI preview.
+// Protocol tools must retain the declaration, evidence and execution outcome here.
+function protocolOutput(_args,value){
+  return okText(JSON.stringify(value??{ok:false,error:'工具未返回结果'}));
+}
+
+function gateOutput(args,value){
+  if(args?.action==='evidence'||!value?.state)return protocolOutput(args,value);
+  const {state,...result}=value;
+  return protocolOutput(args,{...result,state:{project:state.active,gateMode:state.gateMode,
+    notice:state.gateModeNotice,deliveryReady:state.deliveryReady,deliveryBlockers:state.deliveryBlockers,
+    stages:(state.stages||[]).map(stage=>({id:stage.id,status:stage.status,
+      gates:(stage.gates||[]).map(({id,status,detail,reason,validationReason,source})=>({id,status,detail,reason,validationReason,source}))})),
+    evidenceTool:'data_analysis_gates(action="evidence",stageId,gateId)'}});
+}
+
 function stageLine(stage) {
   // 未开工的阶段：闸门还没被评价，报 ✓/✗ 计数会误导（那些 ✗ 只是「产物还没生成」）
   if (stage.status === 'todo') return `${stage.index}. ${stage.name} · 未开始`;
@@ -92,7 +108,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
   const disposers = [];
 
   /**
-   * 触发门（档②）：除探路工具外，其余工具一律带 `when` 准入。
+   * 触发门：只读探测与显式启动常驻，其余工具带 `when` 准入。
    * `when` 由宿主在每个模型步求值一次；返回 false 时该步的工具表里没有这个工具，
    * 模型连它的名字和描述都看不到——比「调用时才拒绝」彻底。
    */
@@ -102,8 +118,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
     try {
       const original = definition.execute;
       definition.execute = async (args, exec) => jsonSafe(await wrapExecute({ name: definition.name, workbench, original })(args, exec));
-      // 探路工具（只读的 status）始终在场：它是「这条对话还没启用」时唯一的入口。
-      // options.ungated 留给将来需要常驻的只读工具，默认仍按 PROBE_TOOLS 判定。
+      // status 与 start 是未启用时的两个入口；显式启动不混入只读探测名单。
       const admission = admissionFor(armedInStep, definition.name, options);
       const dispose = admission ? ctx.tools.register(definition, admission) : ctx.tools.register(definition);
       if (typeof dispose === 'function') disposers.push(dispose);
@@ -124,9 +139,9 @@ export function registerTools(ctx, workbench, helpers = {}) {
   register(defineTool({
     name: 'data_analysis_status',
     description:
-      '查看实证研究工作台当前状态：skill 是否就位、当前项目 10 个阶段各自的闸门判定（✓通过 / ✗未过 / ?判不了）、'
+      '查看实证研究工作台当前状态：skill 是否就位、当前技能声明的阶段及其闸门判定（✓通过 / ✗未过 / ?判不了）、'
       + '最近运行记录、图表清单摘要。只读：不会建项目、不会绑定对话、不会启用工作台。'
-      + '这是未启用工作台的对话里唯一可见的工具，用来回答「现在什么状态 / 为什么被拦住」。',
+      + '这是未启用时仍可见的只读工具；明确开工可用 data_analysis_start，用来回答「现在什么状态 / 为什么被拦住」。',
     parameters: {
       verbose: { type: 'boolean', description: '是否逐条列出闸门明细（默认只列阶段汇总）' },
     },
@@ -148,18 +163,20 @@ export function registerTools(ctx, workbench, helpers = {}) {
         lines.push(`项目：未打开${snap.error ? `（${snap.error}）` : ''}`);
         if (snap.projects.length) lines.push(`已知项目：${snap.projects.map((p) => p.path).join('、')}`);
         if (!armed) {
-          lines.push('这条对话还没启用工作台：除本工具外，其余 data_analysis_* 工具都不会出现。');
-          lines.push('→ 要开工：让用户在工作台面板里打开或新建项目，并把这条对话关联上（面板里有这个操作），然后继续。');
+          lines.push('这条对话尚未启用工作台：目前可调用只读 status 和启动入口 data_analysis_start，阶段工具将在启动后开放。');
+          lines.push('→ 用户已明确要求开工或显式调用研究技能时，先向用户说明正在启动，再调用 data_analysis_start；它会建立项目和当前对话的关联，无需先到面板操作。失败时立即说明原因，不要静默绕过工作台跑脚本。');
         }
-        return { ok: true, text: lines.join('\n'), armed, skill: compactSkill, preflight: snap.preflight, active: null, projects: snap.projects.map((p) => p.path), summary: snap.summary, stages: [] };
+        return { ok: true, text: lines.join('\n'), armed, startup:{tool:'data_analysis_start',available:true,required:!armed}, skill: compactSkill, preflight: snap.preflight, active: null, projects: snap.projects.map((p) => p.path), summary: snap.summary, stages: [] };
       }
       lines.push(armed
         ? `项目：${snap.active.name}（${snap.active.path}）`
         : `项目（面板当前项目，不属于这条对话）：${snap.active.name}（${snap.active.path}）`);
       if (!armed) {
-        lines.push('注意：这条对话还没启用工作台（未关联项目）：除本工具外的 data_analysis_* 工具都不会出现；先让用户在工作台面板里关联这条对话，别自己建项目。');
+        lines.push('注意：这条对话未关联项目。面板当前项目不自动属于本对话；明确开工请调用 data_analysis_start，按本对话工作目录创建或打开项目。');
       }
       if (snap.active.skillDrift) lines.push('注意：项目的 SKILL.md 指纹与当前 skill 不一致，旧产物可能来自旧版本。');
+      if (snap.gateModeNotice) lines.push(`质量状态：${snap.gateModeNotice}`);
+      if (typeof snap.deliveryReady==='boolean') lines.push(`完整研究验收：${snap.deliveryReady?'当前通过':'尚未确认通过'}${snap.deliveryBlockers?.length?`（${snap.deliveryBlockers.length} 项待处理）`:''}`);
       const matLine = materialsLine(snap.materials);
       if (matLine) lines.push(matLine);
       for (const stage of snap.stages) {
@@ -174,13 +191,14 @@ export function registerTools(ctx, workbench, helpers = {}) {
         const figs = snap.artifacts.figures;
         const deliverable = Array.isArray(figs.deliverable) ? figs.deliverable.length : figs.rows.length;
         const extra = figs.rows.length - deliverable;
-        lines.push(`图表：${deliverable} 张可交付${extra ? `（另有 ${extra} 行 status≠ok）` : ''}（清单 ${figs.file}）`);
+        lines.push(`图表清单：${deliverable} 行 status=ok${extra ? `（另有 ${extra} 行 status≠ok）` : ''}；是否完成交付验收以当前门禁为准（${figs.file}）`);
       }
       // 只回摘要与闸门，不回整份产物快照：模型不需要 60 张图的每一列
       return {
         ok: true,
         text: lines.join('\n'),
         armed,
+        startup:{tool:'data_analysis_start',available:true,required:!armed},
         skill: compactSkill,
         preflight: snap.preflight,
         active: { id: snap.active.id, name: snap.active.name, path: snap.active.path, skillDrift: Boolean(snap.active.skillDrift) },
@@ -203,6 +221,18 @@ export function registerTools(ctx, workbench, helpers = {}) {
           })),
         })),
       };
+    },
+  }));
+
+  register(defineTool({
+    name:'data_analysis_start',
+    description:'在当前对话明确请求实证研究、明确要求启动工作台或显式调用研究技能后，创建/打开工作台项目并关联本对话。未启用时也可调用。先向用户说明正在启动；成功后阶段工具在下一模型步出现。只读问状态时不要调用。已有成果目录不会被当作空项目覆盖，默认在工作目录旁建立独立研究项目。',
+    parameters:{workspaceDir:{type:'string',description:'原工作区绝对目录；默认读取当前对话 cwd，可包含已有论文和产物'},projectDir:{type:'string',description:'可选：明确指定已有项目或新的空目录；非空且无 project.json 的目录拒绝覆盖'},name:{type:'string',description:'可选项目名称'},switchProject:{type:'boolean',description:'仅用户明确要求将本对话切换到另一个项目时使用'}},
+    output:{schema:{type:'json'},render:(_args,value)=>okText(value?.text||value?.error||'工作台启动结果')},
+    async execute(args={},exec){
+      if(sessionIsDelegated(exec))return {ok:false,error:'请由主对话启动并关联工作台，子代理不创建或抢占研究对话'};
+      const result=workbench.startWorkbench({...args,sessionId:sessionIdOf(exec)});
+      return result.ok?result:{...result,text:'工作台未启动：'+result.error+'\n请立即向用户说明此原因；不要把手工执行脚本冒充工作台流程。'};
     },
   }));
 
@@ -240,7 +270,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
 
   register(defineTool({
     name: 'data_analysis_list_stages',
-    description: '列出工作台的 10 个阶段、每个阶段的用途、绑定的 skill 脚本与预期产物；用于向用户解释流程。',
+    description: '列出当前技能声明的阶段、每个阶段的用途、绑定的 skill 脚本与预期产物；用于向用户解释流程。',
     parameters: {},
     output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '已列出阶段') },
     async execute() {
@@ -599,13 +629,11 @@ export function registerTools(ctx, workbench, helpers = {}) {
   register(defineTool({
     name: 'data_analysis_draft',
     description:
-      '让工作台用「DSH 当前默认模型」（或面板设置里指定的模型）为一个阶段起草文本：scope=研究范围、'
-      + 'codebook=变量字典、figures=图表题注与解读、verify=逐格复核说明、manuscript=文稿小节、qa=质检问题说明。'
+      '让工作台用「DSH 当前默认模型」（或面板设置里指定的模型）为当前技能声明的任务起草文本；任务 ID、输入和保存位置见 data_analysis_workflow 返回的 draftTasks。'
       + '工作台只读项目产物拼上下文，模型没有工具、不会运行脚本；返回可编辑的 Markdown。'
-      + 'save=true 时同时写入该任务固定的 docs/ 落点（scope.md / codebook.md / figure-notes.md / '
-      + 'verify-notes.md / manuscript-notes.md / qa-notes.md）。',
+      + 'save=true 时写入该任务声明的项目文件；不会跨项目保存。',
     parameters: {
-      task: { type: 'string', required: true, description: '起草任务：scope | codebook | figures | verify | manuscript | qa' },
+      task: { type: 'string', required: true, description: '当前技能 draftTasks 中的任务 ID' },
       instruction: { type: 'string', description: '补充要求（口吻、篇幅、重点变量、要讨论的图号等）' },
       save: { type: 'boolean', description: '是否直接写入项目 docs/ 下的固定文件（默认 false，只返回文本）' },
     },
@@ -617,7 +645,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
       let saved = null;
       // 参数偶发是字符串（"false" 是真值）：写盘与否必须按真布尔判，否则会静默写文件
       const shouldSave = isTrue(args.save);
-      if (shouldSave) saved = assistant.save({ taskId: result.task, text: result.text });
+      if (shouldSave) saved = assistant.save({ taskId: result.task, text: result.text,projectId:result.projectId });
       // 写盘失败不能报成功：模型会据此告诉用户「已经写进 docs/ 了」
       if (shouldSave && !saved?.ok) {
         return {
@@ -1322,7 +1350,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
       gateId: {type:'string',description:'查看证据时的稳定判据标识'},
       mode: {type:'string',enum:['legacy','shadow','compare','skill'],description:'仅显式初始化或迁移时使用'},
     },
-    output: {schema:{type:'json'},render:(_args,value)=>okText(value?.ok?'体检操作已完成；质量结论见当前门禁状态':value?.error||'体检未完成')},
+    output: {schema:{type:'json'},render:gateOutput},
     async execute(args) {
       return args.action==='evidence'
         ? workbench.gateEvidence(args)
@@ -1356,6 +1384,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
         return { ok: false, text: `skillRoot 不存在：${root}。请给出 SPSS-Style-Charting-Skill 的仓库根或 empirical-research-pipeline 包目录` };
       }
       const result = await workbench.updateConfig(patch);
+      if(!result.ok)return {...result,text:'配置未修改：'+result.error};
       const snap = workbench.snapshot();
       return {
         ok: true,
@@ -1372,7 +1401,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
     name:'data_analysis_workflow',
     description:'读取当前技能声明的完整工作流，或执行其中登记的动作。阶段、依赖、命令和动作以本次返回的契约为准。',
     parameters:{action:{type:'string',enum:['describe','run-action']},actionId:{type:'string',description:'run-action 时填写 describe 返回的动作 ID'}},
-    output:{schema:{type:'json'},render:(_args,value)=>okText(value?.error||'已读取或执行技能工作流')},
+    output:{schema:{type:'json'},render:protocolOutput},
     async execute(args){return args.action==='run-action'?workbench.runWorkflowAction(String(args.actionId||'')):{ok:true,workflow:workbench.workflow()};},
   }));
 

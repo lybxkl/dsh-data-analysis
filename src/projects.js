@@ -1,7 +1,7 @@
 /**
  * 项目骨架：只做「从零新建」。
  *
- * 目录是固定的：data / docs / output / scripts / runs + project.json。
+ * 目录由技能工作流声明，project.json 由宿主管理。
  * 建之前先做空目录校验 —— 已经有东西的目录一律拒绝，避免把别人的项目改坏。
  */
 
@@ -25,8 +25,7 @@ export function defaultProjectFile({ name, root, skill }) {
   const workflow=workflowFor({},skill?.packageDir);
   const stages = {};
   for (const stage of workflow.stages) {
-    // 只登记「项目自己的状态与覆盖」；script/args 不复制——默认值以代码里的阶段表为准，
-    // 复制一份会让「代码升级了但项目里还是旧参数」这种漂移悄悄发生。
+    // 只登记项目状态与显式覆盖，默认 script/args 每次从技能声明读取。
     stages[stage.id] = {
       status: 'todo',
       note: '',
@@ -75,7 +74,7 @@ export function emptyDirCheck(dir) {
  * 建骨架。返回 { ok, root, created, project } 或 { ok:false, error }。
  * 注意：这里只写空目录与 project.json，绝不写任何研究内容。
  */
-export function createProject({ dir, name, scope, skill }) {
+export function createProject({ dir, name, scope, skill, origin }) {
   const raw = String(dir || '').trim();
   if (!raw) return { ok: false, error: '请给出项目目录（建议在空文件夹里新建）' };
   const root = path.resolve(raw);
@@ -113,6 +112,7 @@ export function createProject({ dir, name, scope, skill }) {
       created.push(`${sub}/`);
     }
     const project = defaultProjectFile({ name: label, root, skill });
+    if(origin)project.origin=origin;
     if(gatePolicy)project.gatePolicy={schema:'dsa.gate-policy-required/1',required:true};
     if (scope && typeof scope === 'object') {
       for (const key of Object.keys(project.scope)) {
@@ -137,7 +137,9 @@ export function readProject(root) {
   const file = path.join(path.resolve(root), PROJECT_FILE);
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (!parsed || typeof parsed !== 'object') throw new Error('project.json 不是对象');
+    if (!parsed || typeof parsed !== 'object'||Array.isArray(parsed)) throw new Error('project.json 不是项目对象');
+    if(typeof parsed.name!=='string'||!parsed.name.trim())throw new Error('project.json 缺少有效项目名称');
+    if(parsed.stages!==undefined&&(!parsed.stages||typeof parsed.stages!=='object'||Array.isArray(parsed.stages)))throw new Error('project.json 的 stages 不是对象');
     return { ok: true, project: parsed, file };
   } catch (error) {
     if (error?.code === 'ENOENT') return { ok: false, error: `没有找到 ${PROJECT_FILE}` };

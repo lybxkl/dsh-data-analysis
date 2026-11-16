@@ -1988,6 +1988,21 @@ scenario('动态工作流：损坏契约显示恢复入口，不渲染虚构阶�
   check(!text.includes('资料审计')&&!text.includes('范围与口径'),'不生成默认十阶段作为回退');
 });
 
+await(async function(){
+  const original=globalThis.fetch,posted=[];
+  const invalid=Object.assign({},SNAP,{stages:[],workflow:{ok:false,error:'契约已损坏'},error:'契约已损坏',activeRuns:{'unknown-stage':{id:'running-fixture'}},gateChecking:{stageId:'audit'}});
+  try{
+    globalThis.__DSA__={snap:invalid,pre:invalid.preflight,loading:false,dialog:null,width:'narrow',theme:'dark',selected:''};
+    globalThis.fetch=async(url,init={})=>{if(init.method==='POST')posted.push({url:String(url),body:JSON.parse(init.body)});return {ok:true,status:200,json:async()=>({ok:true,state:invalid})};};
+    PANEL=loadPanel().panel;const view=mountPanel({});
+    check(view.click('停止运行'),'损坏契约仍能停止实际生产进程');await flush();await flush();view.render();
+    check(posted.some(call=>call.url.endsWith('/stage/cancel')&&call.body.stageId==='unknown-stage'),'停止操作保留实际运行的阶段身份');
+    check(view.click('停止体检'),'损坏契约仍能停止体检');await flush();await flush();
+    check(posted.some(call=>call.url.endsWith('/stage/cancel')&&call.body.stageId==='audit'),'体检停止入口调用共享服务');
+  }catch(error){check(false,'损坏契约的运行恢复',String(error.stack||error));}
+  finally{globalThis.fetch=original;}
+})();
+
 process.stdout.write('\n');
 if (failedCount) {  process.stdout.write('✗ ' + failedCount + ' 项失败\n');
   process.exit(1);

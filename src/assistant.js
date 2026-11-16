@@ -14,9 +14,7 @@ import {defaultWorkflow,workflowFor} from './workflow.js';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { isInside } from './skill.js';
-import { analysisFile, readFigures } from './audit.js';
-import { recheckSummary } from './recheck.js';
+import {safePath,projectResourcePath} from './gate-report.js';
 
 /** Compatibility view; task content is owned by the skill. */
 export const DRAFT_TASKS=new Proxy([], {get(_target,key){const tasks=defaultWorkflow().draftTasks;const value=Reflect.get(tasks,key);return typeof value==='function'?value.bind(tasks):value;}});
@@ -39,8 +37,7 @@ function clip(text, limit) {
 
 function readText(root, rel, limit) {
   try {
-    const abs = path.resolve(root, rel);
-    if (!isInside(root, abs)) return { ok: false, note: `${rel} 不在项目内` };
+    const abs = projectResourcePath(root,rel);
     const stat = fs.statSync(abs);
     if (!stat.isFile()) return { ok: false, note: `${rel} 不是文件` };
     if (stat.size > 4 * 1024 * 1024) return { ok: false, note: `${rel} 过大（${stat.size} 字节），跳过` };
@@ -50,132 +47,18 @@ function readText(root, rel, limit) {
   }
 }
 
-function listFiles(dir, root, depth = 0) {
-  const out = [];
-  let entries = [];
-  try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return out;
-  }
-  for (const entry of entries.slice(0, 60)) {
-    if (entry.name.startsWith('.')) continue;
-    const abs = path.join(dir, entry.name);
-    const rel = path.relative(root, abs).split(path.sep).join('/');
-    if (entry.isDirectory()) {
-      if (depth < 2) out.push(...listFiles(abs, root, depth + 1));
-    } else {
-      let size = 0;
-      try {
-        size = fs.statSync(abs).size;
-      } catch {
-        size = 0;
-      }
-      out.push({ rel, size });
-    }
-  }
-  return out;
-}
-
-/** 受控上下文：只挑这一步真正需要的产物，每份都有上限。 */
+/** Project metadata plus exactly the inputs declared by this skill task. */
 export function buildContext(projectRoot, project, task) {
-  const parts = [];
-  const missing = [];
-  const push = (title, body) => {
-    if (!body) return;
-    parts.push(`### ${title}\n${body}`);
-  };
-  const take = (title, rel, limit) => {
-    const read = readText(projectRoot, rel, limit);
-    if (read.ok && read.text.trim()) push(title, read.text);
-    else missing.push(rel);
-  };
-
-  for(const file of task.contextFiles||[])take(file,file,4000);
-
-  const scopeNote = typeof project?.scope === 'string'
-    ? project.scope
-    : project?.scope && typeof project.scope.note === 'string'
-      ? project.scope.note
-      : '';
-  push('项目', [
-    `名称：${project?.name || path.basename(projectRoot)}`,
-    `目录：${projectRoot}`,
-    scopeNote ? `范围备注：${scopeNote}` : '',
-    project?.createdAt ? `建立时间：${project.createdAt}` : '',
-  ].filter(Boolean).join('\n'));
-
-  const files = listFiles(path.join(projectRoot, 'data'), projectRoot).slice(0, 40);
-  push('data/ 文件清单', files.length ? files.map((f) => `${f.rel}（${f.size} 字节）`).join('\n') : '空');
-
-  const analysisTarget = analysisFile(projectRoot);
-  const header = readText(projectRoot, analysisTarget.rel, 1200);
-  if (header.ok) push('analysis.csv 开头', header.text);
-  else missing.push(analysisTarget.rel);
-
-  take('研究范围 docs/scope.md', 'docs/scope.md', 4000);
-
-  if (task.id === 'figures' || task.id === 'manuscript') {
-    // 清单可能是 chart_pack，也可能是 paper_figures：以 readFigures 实际选中的那份为准，
-    // 否则多面板项目起草时看不到图。
-    const figSet = readFigures(projectRoot);
-    if (figSet.file) take('图表清单', figSet.file, 3500);
-    else missing.push('output/chart_pack/chart_manifest.csv');
-    const figDir = figSet.file ? path.posix.dirname(String(figSet.file).replace(/\\/g, '/')) : 'output/chart_pack/figures';
-    const figs = listFiles(path.join(projectRoot, ...figDir.split('/')), projectRoot)
-      .filter((f) => /\.(png|pdf|tiff?)$/i.test(f.rel))
-      .slice(0, 40);
-    if (figs.length) push('图文件', figs.map((f) => `${f.rel}（${f.size} 字节）`).join('\n'));
-    else missing.push(figDir);
+  const parts=[`### 项目\n名称：${project?.name||path.basename(projectRoot)}\n目录：${projectRoot}`];
+  const missing=[];
+  const note=typeof project?.scope==='string'?project.scope:project?.scope?.note;
+  if(note)parts.push(`### 范围备注\n${note}`);
+  for(const file of task.contextFiles||[]){
+    const read=readText(projectRoot,file,4000);
+    if(read.ok&&read.text.trim())parts.push(`### ${file}\n${read.text}`);
+    else missing.push(file);
   }
-  if (task.id === 'manuscript' || task.id === 'qa') {
-    // auto_stats 的实际产物是 fit.csv / coef_all.csv（旧会话可能是分模型文件）：
-    // 先拿合并表，再补常见分表，缺哪个就记哪个。
-    take('模型拟合 fit.csv', 'output/models/fit.csv', 3000);
-    take('模型系数 coef_all.csv', 'output/models/coef_all.csv', 5000);
-    for (const name of ['fit_ols.csv', 'fit_logit.csv', 'coef_ols.csv', 'coef_logit.csv']) {
-      take(`模型输出 ${name}`, `output/models/${name}`, 2500);
-    }
-    take('变量描述 descriptives.csv', 'output/models/descriptives.csv', 2000);
-  }
-  if (task.id === 'verify') {
-    // 复核说明必须贴着证据账写：登记表、报告、逐格问题、覆盖、模型计划、判断台账。
-    take('研究登记表 research_registry.json', 'research_registry.json', 6000);
-    take('复核报告 dataset_verification.json', 'output/data_verification/dataset_verification.json', 4000);
-    take('逐格问题 cell_issues.csv', 'output/data_verification/cell_issues.csv', 5000);
-    take('来源覆盖 source_coverage.jsonl', 'output/source_coverage.jsonl', 5000);
-    take('模型计划 model_plan.jsonl', 'output/model_plan.jsonl', 4000);
-    take('判断台账 decisions.jsonl', 'decisions.jsonl', 4000);
-  }
-  if (task.id === 'qa') {
-    take('终检报告', 'output/qa/qa_report.json', 5000);
-    take('数字溯源 number_issues.csv', 'output/verify/number_issues.csv', 2500);
-  }
-  if (task.id === 'recheck') {
-    const state = recheckSummary(projectRoot, { project, runs: [] });
-    push('机器复算（12 项）', state.checks
-      .map((item) => `${item.id} [${item.status}] ${item.label}：${item.detail}${item.evidence ? `\n  证据：${String(item.evidence).split('\n').slice(0, 6).join(' | ')}` : ''}`)
-      .join('\n'));
-    if (state.issues.length) {
-      push('已有问题清单', state.issues.slice(0, 40)
-        .map((issue) => `${issue.id} [${issue.severity}/${issue.status}] ${issue.where}：${issue.claim}`)
-        .join('\n'));
-    }
-    take('图表清单 chart_manifest.csv', 'output/chart_pack/chart_manifest.csv', 3000);
-    take('变量描述 descriptives.csv', 'output/models/descriptives.csv', 2000);
-    take('终检报告', 'output/qa/qa_report.json', 3000);
-    take('数字溯源 number_issues.csv', 'output/verify/number_issues.csv', 3000);
-    const scripts = listFiles(path.join(projectRoot, 'scripts'), projectRoot).slice(0, 20);
-    push('项目脚本', scripts.length ? scripts.map((item) => item.rel).join('\n') : '（项目没有自己的脚本）');
-  }
-  if (task.id === 'codebook') {
-    take('编码清单 coding_sheet.csv', 'output/coding/coding_sheet.csv', 2500);
-  }
-  take('审计摘要', 'output/audit/corpus_summary.json', 2000);
-
-  let context = parts.join('\n\n');
-  if (context.length > CONTEXT_BUDGET) context = `${context.slice(0, CONTEXT_BUDGET)}\n…（上下文已截断）`;
-  return { context, missing: [...new Set(missing)] };
+  return {context:clip(parts.join('\n\n'),CONTEXT_BUDGET),missing:[...new Set(missing)]};
 }
 
 function normalizeRoute(config, defaultSelection) {
@@ -403,7 +286,7 @@ export class Assistant {
     };
   }
 
-  async draft({ taskId, instruction = '', signal } = {}) {
+  async draft({ taskId, instruction = '', signal,projectId } = {}) {
     const gate = this.available();
     if (!gate.ok) return { ok: false, error: gate.reason };
     const task = this.tasks().find(task=>task.id===String(taskId||''));
@@ -414,6 +297,7 @@ export class Assistant {
 
     const active = this.resolveProject();
     if (!active.ok) return { ok: false, error: active.error };
+    if(projectId&&active.id!==projectId)return {ok:false,error:'项目已切换，请重新打开当前项目的起草窗口'};
 
     const { context, missing } = buildContext(active.path, active.project, task);
     const wants = [
@@ -485,6 +369,7 @@ export class Assistant {
     return {
       ok: true,
       task: task.id,
+      projectId:active.id,
       label: task.label,
       file: task.file,
       text: clip(trimmed, MAX_TEXT),
@@ -505,17 +390,16 @@ export class Assistant {
   }
 
   /** 只允许写回该任务固定的 docs/ 落点；不覆盖非本插件生成的文件除非用户明确点了写入。 */
-  save({ taskId, text } = {}) {
+  save({ taskId, text, projectId } = {}) {
     const task = this.tasks().find(task=>task.id===String(taskId||''));
     if (!task) return { ok: false, error: `未知任务：${taskId}` };
     const body = String(text || '');
     if (!body.trim()) return { ok: false, error: '没有内容可写' };
     const active = this.resolveProject();
     if (!active.ok) return { ok: false, error: active.error };
-
-    const abs = path.resolve(active.path, task.file);
-    if (!isInside(active.path, abs)) return { ok: false, error: '落点不在项目内，拒绝写入' };
+    if(projectId&&active.id!==projectId)return {ok:false,error:'项目已切换，请返回起草时的项目后再写入'};
     try {
+      const abs=safePath(active.path,task.file);
       fs.mkdirSync(path.dirname(abs), { recursive: true });
       const header = `<!-- 由实证研究工作台起草（${new Date().toISOString().slice(0, 19).replace('T', ' ')}），请人工核对后使用 -->\n\n`;
       const tmp = `${abs}.tmp-${process.pid}`;

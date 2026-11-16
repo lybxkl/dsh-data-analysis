@@ -258,7 +258,7 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
         const result = workbench.bindSessionTo(sessionId, projectId, { force: body?.force === true });
         if (!result.ok) {
           return {
-            status: result.code === 'SESSION_BOUND_ELSEWHERE' ? 409 : 400,
+            status: ['SESSION_BOUND_ELSEWHERE','PROJECT_BOUND_ELSEWHERE'].includes(result.code) ? 409 : 400,
             payload: { ok: false, code: result.code || '', error: result.error, bound: result.bound || null },
           };
         }
@@ -440,6 +440,7 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
       handler: async (body) => {
         const patch = body?.patch || body || {};
         const result = await workbench.updateConfig(patch);
+        if(!result.ok)return {status:409,payload:{ok:false,error:result.error}};
         return { ok: true, config: result.config, state: workbench.snapshot() };
       },
     },
@@ -473,7 +474,7 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
       method: 'POST',
       handler: async (body) => {
         if (!assistant) return { ok: false, error: '模型服务不可用' };
-        const result = await assistant.draft({ taskId: body.taskId, instruction: body.instruction });
+        const result = await assistant.draft({ taskId: body.taskId, instruction: body.instruction,projectId:body.projectId });
         return result;
       },
     },
@@ -482,7 +483,7 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
       method: 'POST',
       handler: async (body) => {
         if (!assistant) return { ok: false, error: '模型服务不可用' };
-        const result = assistant.save({ taskId: body.taskId, text: body.text });
+        const result = assistant.save({ taskId: body.taskId, text: body.text,projectId:body.projectId });
         if (result.ok) result.state = workbench.snapshot();
         return result;
       },

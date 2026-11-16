@@ -3283,7 +3283,7 @@
               h('div', { className: 'dsa-stage-meta' }, matMeta)
             )
           ),
-          h('div', { className: 'dsa-rail-h' }, '阶段 1–' + stages.length),
+          h('div', { className: 'dsa-rail-h' }, stages.length?'阶段 1–'+stages.length:'阶段暂不可用'),
           stages.map(function (stage) {
             var dotClass = stateDot(stage.status);
             return h(
@@ -3316,6 +3316,9 @@
               h('h2',null,'技能工作流暂不可用'),
               h('div',{className:'dsa-error',role:'alert'},snap.error||(snap.workflow&&snap.workflow.error)||'当前技能没有声明可用阶段，请检查工作流契约。'),
               h('p',{className:'dsa-hint'},'检查技能目录、契约版本和依赖关系后刷新；项目资料与已有产物会保留。'),
+              Object.keys(snap.activeRuns||{}).length?h('div',{className:'dsa-section'},
+                h('h3',null,'仍在运行'),Object.keys(snap.activeRuns).map(function(stageId){return h('div',{className:'dsa-row',key:stageId},h('span',null,stageId),h(Btn,{disabled:busy,onClick:function(){action('/stage/cancel',{stageId:stageId});}},'停止运行'));})):null,
+              snap.gateChecking?h('div',{className:'dsa-row'},h('span',null,'技能体检仍在运行'),h(Btn,{disabled:busy,onClick:function(){action('/stage/cancel',{stageId:snap.gateChecking.stageId||''});}},'停止体检')):null,
               h('div',{className:'dsa-row'},h(Btn,{onClick:function(){load();}},'重新读取'),h(Btn,{onClick:function(){setDialog({kind:'settings'});}},'检查设置')))),
             dialog?renderDialog(dialog):null);
         }
@@ -3352,7 +3355,7 @@
         );
         gateList = h('div',null,
           h('div',{className:'dsa-inline',style:{gap:'8px',flexWrap:'wrap',marginBottom:'8px'}},
-            h('span',{className:'dsa-hint'},'判定来源：'+({legacy:'旧版核验',shadow:'影子验证',compare:'并列验证',skill:'技能体检'}[snap.gateMode||'legacy'])),
+            h('span',{className:'dsa-hint',title:snap.gateModeNotice||''},'判定来源：'+({legacy:'兼容核验 · 完整质量验收未确认',shadow:'影子验证',compare:'并列验证',skill:'技能体检'}[snap.gateMode||'legacy'])),
             h(Btn,{variant:'ghost',disabled:busy||Boolean(gateChecking)||Boolean(snap.gateRecoveryNeeded),onClick:function(){action('/gates/control',{action:snap.gateMode&&snap.gateMode!=='legacy'?'inspect':'init'});}},gateChecking?'体检中…':busy?'处理中…':snap.gateMode&&snap.gateMode!=='legacy'?'重新体检':'配置技能体检'),
             gateChecking?h(Btn,{variant:'ghost',onClick:function(){action('/stage/cancel',{stageId:gateChecking.stageId||current.id});}},'停止体检'):null,
             snap.gateRecoveryNeeded?h(Btn,{variant:'ghost',disabled:busy,onClick:function(){action('/gates/control',{action:'recover'});}},'恢复中断体检'):null,
@@ -4304,15 +4307,20 @@
             });
           }
           if (d.kind === 'draft') {
+            var memoProject=snap&&snap.active?snap.active.id:'';
             return h(DraftDialog, {
-              memo: draftMemo,
+              key:memoProject,
+              projectId:memoProject,
+              memo: draftMemo[memoProject]||{},
               tasks:snap&&snap.workflow?snap.workflow.draftTasks||[]:[],
               initialTask: d.task || '',
               onMemo: function (taskId, text, meta) {
                 setDraftMemo(function (prev) {
                   var next = {};
                   for (var k in (prev || {})) next[k] = prev[k];
-                  next[taskId] = { text: text, meta: meta };
+                  var group=Object.assign({},next[memoProject]||{});
+                  group[taskId] = { text: text, meta: meta };
+                  next[memoProject]=group;
                   return next;
                 });
               },
@@ -4647,7 +4655,7 @@
           setBusy(true);
           setErr('');
           setSaved('');
-          request('POST', '/assistant/draft', { taskId: current.id, instruction: instruction.trim() })
+          request('POST', '/assistant/draft', { taskId: current.id, instruction: instruction.trim(),projectId:props.projectId })
             .then(function (json) {
               if (json && json.ok) {
                 setOut(json.text || '');
@@ -4677,7 +4685,7 @@
         function writeOut() {
           setBusy(true);
           setErr('');
-          request('POST', '/assistant/save', { taskId: current.id, text: out })
+          request('POST', '/assistant/save', { taskId: current.id, text: out,projectId:meta&&meta.projectId||props.projectId })
             .then(function (json) {
               if (json && json.ok) {
                 setSaved(t('draftSaved') + '：' + json.file);

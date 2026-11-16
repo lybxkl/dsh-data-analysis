@@ -156,7 +156,8 @@ export function contractMode(project) {
   return Number(project?.schemaVersion) >= 2 ? 'strict' : 'legacy';
 }
 
-export function evaluateProject({ projectRoot, project, artifacts, adjudications = {}, activeRuns = {}, runs = [], sources = [], pythonPath }) {
+export function evaluateProject({ projectRoot, project, artifacts, adjudications = {}, activeRuns = {}, runs = [], sources = [], pythonPath,skillRoot }) {
+  if(!project?.skill?.root&&skillRoot)project={...project,skill:{...project?.skill,root:skillRoot}};
   if (readGatePolicy(projectRoot)?.mode === 'skill') {
     return evaluateHostProject({projectRoot, project, artifacts, adjudications, activeRuns, runs, sources,pythonPath});
   }

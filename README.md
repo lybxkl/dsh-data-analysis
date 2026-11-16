@@ -645,10 +645,11 @@ error 级 = 阶段状态会变 `blocked`，`data_analysis_run_stage` 会拒绝�
 
 | 状态 | 工具表里有什么 | 系统提示里有什么 |
 | --- | --- | --- |
-| 未启用（默认） | 只有只读的 `data_analysis_status` | 「触发门」一节：按对话启用、以及怎么启用 |
-| 已启用 | 29 个工具全部出现 | 完整流程（已启用后的操作顺序 …） |
+| 未启用（默认） | 只读的 `data_analysis_status` 和显式启动的 `data_analysis_start` | 简短的启用规则与技能工作流入口 |
+| 已启用 | 30 个工具全部出现 | 读取技能声明后按当前流程执行 |
 
-**三个入口都是人来触发的**（`src/service.js` 的 `isArmed`）：
+**启用入口**（`src/service.js` 的 `isArmed`）：
+0. 用户明确开工或显式调用研究技能后，AI 先给可见进度说明，再调用 `data_analysis_start`。未关联时也能调用，创建/打开项目后关联当前对话，下一模型步开放阶段工具。默认以当前对话工作目录选择项目；已有论文和产物的目录保留，旁边创建独立研究项目。重复调用复用本对话项目，不直接采用面板里另一个项目。`status` 保持只读。
 1. 面板里把这条对话**关联到项目**——绑定即启用，解绑即停用，移除项目也会清；
    同一个项目被新会话接管时，被顶掉的旧会话**绑定和启用一起清**（否则它仍带着工具，还会被绑回来抢）；
 2. 面板的「**让 AI 装好环境**」：它会开一条临时会话，先 `POST /api/session/arm` 再投提示词
@@ -663,7 +664,7 @@ error 级 = 阶段状态会变 `blocked`，`data_analysis_run_stage` 会拒绝�
 - **环境类工具**（`doctor` / `configure` / `list_stages`）同样不许自动绑定：否则面板开的装环境会话
   只要调一次 `doctor` 就把项目抢走，用户真正的研究对话会被顶掉。它们仍受触发门约束，未启用一样看不见。
 - 门禁的默认值必须是**关**：宿主缺 `isArmed`、读不到会话 id、台账读坏，一律按「没启用」处理。
-  `data_analysis_status` 在未启用时会明确回复「这条对话还没启用」以及该去面板点哪里；
+  `data_analysis_status` 在未启用时明确给出 `data_analysis_start` 入口；启动失败须立即说明原因，不能静默绕过工作台执行；
   它显示的 `armed` 与触发门用同一个判定函数，不会出现「status 说已启用、别的工具却被挡着」。
 
 **面板投任务卡也走这道门**：先绑定（=启用）再 `prompt`，不会出现「卡先到、模型却还没有工具」的模型步；
@@ -675,10 +676,9 @@ error 级 = 阶段状态会变 `blocked`，`data_analysis_run_stage` 会拒绝�
 **兼容性与残留成本**（审计结论，不是待办）：
 - `when` 依赖宿主支持 `ToolRegistrationOptions.when`（本机 DSH 已验证）。旧宿主会忽略第二个参数，
   门会**静默变成常开**；升级/回滚宿主时先确认这一点。
-- 使用规则那一节（约 1.1 万字）目前仍对**每个**会话注入，未启用的会话也会付这份 token。
-  要按会话裁剪需要宿主支持按 agent 作用域的 `PromptSection`——这一版刻意没做（对应「档③」）。
+- 宿主只注入简短的启用和协议规则；具体研究流程、阶段与动作从技能声明读取。技能更新不要求插件同步维护一份流程。
 
-## 模型工具（29 个）
+## 模型工具（30 个）
 
 `data_analysis_status`（状态与闸门）、`doctor`（环境自检）、`list_stages`、`figures`、`create_project`、`open_project`、
 `run_stage`、`run_log`、`cancel_stage`、`adjudicate`、`configure`、`draft`（起草文本）、`recheck`（复核）、`issue`（写问题）、
@@ -687,10 +687,10 @@ error 级 = 阶段状态会变 `blocked`，`data_analysis_run_stage` 会拒绝�
 `register`（登记数据集/模型/产物/结论）、`artifacts`（产物树与内容）、`sweep`（模型族普查）、
 `verify_source`（逐格回源）、`figure_check`（实测字号与 dpi）、
 `verify_dataset`（全格复核：prepare / final）、`research_gate`（来源覆盖 / 模型终态 / 回执）、
-`data_analysis_workflow`（读取技能工作流与执行已声明动作）、`decisions`（判断台账校验）、`review_pack`（生成复核包）、`gates`（技能体检、策略迁移、锁恢复与证据查看）。
+`data_analysis_start`（未关联时的显式启动与项目绑定）、`data_analysis_workflow`（读取技能工作流与执行已声明动作）、`decisions`（判断台账校验）、`review_pack`（生成复核包）、`gates`（技能体检、策略迁移、锁恢复与证据查看）。
 没有「转码」工具：doc/xls/ppt 交给会话或用户去转，工作台只负责分类与记账。
 状态类工具只回摘要与闸门，不回整份产物快照（避免一次读进 60 张图的全部列）。
-**只有 `data_analysis_status` 常驻**；其余 28 个按触发门出现，未启用工作台的对话里看不到（见上一节）。
+**`data_analysis_status`（只读）与 `data_analysis_start`（显式启动）在未关联时可用**；其余 28 个在启动并关联后出现（见上一节）。
 
 ## 测试
 
@@ -706,8 +706,10 @@ node tests/artifacts.test.mjs     # 产物中心：路径越界与符号链接�
 node tests/recheck.test.mjs       # 复核与补丁：baseHash、越界、目录联接穿透、备份命名、12 项复算口径
 node tests/readcache.test.mjs     # 一次快照内的读盘去重与指纹缓存：只在一个作用域里生效、算完就丢、mtime 变了必失效
 node tests/consistency.test.mjs   # 静态对账：文案键 / CSS 类 / 接口路径 / 工具名 / 快照字段 / README 计数
-node tests/gating.test.mjs        # 触发门：未启用=只有 status；绑定/显式/父对话三入口；解绑、被顶掉即停用；
+node tests/gating.test.mjs        # 触发门：未启用=status + start；阶段工具仍按对话启用；解绑、被顶掉即停用；
                                   #   status 与 doctor/configure/list_stages 不许自动绑定；装环境会话能装但抢不走项目
+node tests/bootstrap.test.mjs     # 显式启动：非空工作区保护、重复调用、错误恢复、对话隔离和丢失项目禁止回退
+node tests/tool-output.test.mjs   # 宿主 render 后模型仍能读取完整工作流、动作结果与判据证据
 node tests/binding.test.mjs       # 对话 ⇄ 项目绑定：建/开项目自动关联、不被面板带走、改绑要确认、子代理沿父对话作用域
 node tests/regression-20261113.test.mjs # 用户报过的问题逐条回归（材料/闸门/面板/绑定）
 node tests/client-smoke.test.mjs  # 不开浏览器，用假 React 把面板渲染成树：环境闸门 / 主界面 / 九个弹窗 / 产物中心（弹层看图看表看 PDF、翻页、TIFF 转码）/ 24 轮 fuzz

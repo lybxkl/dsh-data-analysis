@@ -4,7 +4,7 @@
  * 覆盖三件事：
  *   1) 判定：没登记就是关；绑定项目 / 显式启用 / 父对话已启用才算开；
  *      解绑、移除项目要跟着关；子代理沿用它父对话的启用状态。
- *   2) 注册准入：29 个工具里只有 data_analysis_status 常驻，其余 28 个都带 `when`，
+ *   2) 注册准入：status 与 start 常驻，其余工具都带 `when`，
  *      且 `when` 对未启用的会话返回 false（该步工具表里根本没有这个工具）。
  *   3) 探路工具不许顺手绑定：否则模型调一次 status 就把门打开，门等于没设。
  *
@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { Workbench } from '../src/service.js';
 import { Runner } from '../src/runner.js';
 import { NO_AUTOBIND_TOOLS, PROJECT_AGNOSTIC_TOOLS, wrapExecute } from '../src/binding.js';
-import { PROBE_TOOLS, admissionFor, isArmedSession, sessionIdFromActivation, whenArmed } from '../src/gating.js';
+import { BOOTSTRAP_TOOLS, PROBE_TOOLS, admissionFor, isArmedSession, sessionIdFromActivation, whenArmed } from '../src/gating.js';
 import { PROMPT } from '../src/prompt.js';
 import { projectId } from '../src/projects.js';
 
@@ -180,8 +180,8 @@ check('登记表有上限，不会无界增长', () => {
   assert.ok(Object.keys(env.ledger.armings).length <= 200, `实际 ${Object.keys(env.ledger.armings).length} 条`);
 });
 
-section('注册准入：只有 status 常驻');
-check('所有注册工具中只有 data_analysis_status 不带 when', () => {
+section('注册准入：只读探测和显式启动常驻');
+check('只有 status 和 start 不带 when，阶段工具仍受准入约束', () => {
   const src = read('src/tools.js');
   const names = [...src.matchAll(/name:\s*'(data_analysis_[a-z_]+)'/g)].map((m) => m[1]);
   assert.equal(new Set(names).size,names.length,'注册工具不能重名');
@@ -189,10 +189,13 @@ check('所有注册工具中只有 data_analysis_status 不带 when', () => {
   const env = makeWorkbench();
   const armed = whenArmed(env.wb);
   const ungated = names.filter((name) => admissionFor(armed, name) === undefined);
-  assert.deepEqual(ungated, ['data_analysis_status']);
+  assert.deepEqual(ungated, ['data_analysis_status','data_analysis_start']);
+  assert.ok(BOOTSTRAP_TOOLS.has('data_analysis_start'));
+  assert.ok(NO_AUTOBIND_TOOLS.has('data_analysis_start'));
+  assert.ok(!PROBE_TOOLS.has('data_analysis_start'),'启动不能伪装成只读探测');
   for (const name of names) {
     const admission = admissionFor(armed, name);
-    if (name === 'data_analysis_status') continue;
+    if (PROBE_TOOLS.has(name)||BOOTSTRAP_TOOLS.has(name)) continue;
     assert.equal(typeof admission.when, 'function', `${name} 应该带 when`);
   }
 });

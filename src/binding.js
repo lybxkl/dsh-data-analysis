@@ -12,7 +12,7 @@
  * 宿主接线在 tools.js，测试直接驱动本文件。
  */
 
-import { PROBE_TOOLS } from './gating.js';
+import { PROBE_TOOLS, BOOTSTRAP_TOOLS } from './gating.js';
 
 /**
  * 这条工具调用发生在哪条 DSH 会话里。
@@ -94,7 +94,7 @@ export const PROJECT_AGNOSTIC_TOOLS = new Set([
  * 环境类工具同理：面板开的装环境会话只要调一次 doctor 就把项目抢走，用户的研究对话会被顶掉。
  * 已经绑过（或已启用）的会话照旧在它自己的项目作用域里跑，只是不再新建绑定。
  */
-export const NO_AUTOBIND_TOOLS = new Set([...PROBE_TOOLS, ...PROJECT_AGNOSTIC_TOOLS]);
+export const NO_AUTOBIND_TOOLS = new Set([...PROBE_TOOLS, ...BOOTSTRAP_TOOLS, ...PROJECT_AGNOSTIC_TOOLS]);
 
 /**
  * 包一层工具实现：拿到会话 id，绑定，然后在该会话的项目作用域里跑。
@@ -107,11 +107,15 @@ export function wrapExecute({ name, workbench, original }) {
   return async function executeWithSession(args, exec) {
     const sessionId = sessionIdOf(exec);
     if (!sessionId) return original(args, exec);
+    if(BOOTSTRAP_TOOLS.has(name))return original(args,exec);
     // 子代理不记绑定：它不该占用项目那唯一一条「研究对话」。
     // 但它替父对话干活，作用域要跟着父对话的项目走——否则面板停在 B，子代理会把 A 的产物写到 B 上。
     if (sessionIsDelegated(exec)) {
+      if(PROJECT_SELECTING_TOOLS.has(name))return {ok:false,error:'请由主研究对话创建或切换项目，子代理不改变项目归属',text:'操作未执行：请由主研究对话创建或切换项目'};
       const scope = typeof workbench.delegatedScopeSession === 'function' ? workbench.delegatedScopeSession(sessionId) : '';
-      return scope ? workbench.runForSession(scope, () => original(args, exec)) : original(args, exec);
+      if(scope)return workbench.runForSession(scope, () => original(args, exec));
+      if(NO_AUTOBIND_TOOLS.has(name))return original(args,exec);
+      return {ok:false,error:'父研究对话尚未关联有效项目，未使用面板中的其他项目代替',text:'操作未执行：父研究对话尚未关联有效项目'};
     }
 
     if (PROJECT_SELECTING_TOOLS.has(name)) {
@@ -130,6 +134,7 @@ export function wrapExecute({ name, workbench, original }) {
     }
 
     const ensured = workbench.ensureSessionBinding(sessionId);
+    if(!ensured?.ok)return {...ensured,ok:false,text:'工作台操作未执行：'+(ensured?.error||'当前对话未关联有效项目')};
     const value = await workbench.runForSession(sessionId, () => original(args, exec));
     return ensured && ensured.already ? value : withChatLink(value, ensured);
   };

@@ -48,7 +48,7 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node tests/materials.test.mjs && node tests/runner.test.mjs && node tests/gates.test.mjs && node tests/registry.test.mjs && node tests/provenance.test.mjs && node tests/artifacts.test.mjs && node tests/recheck.test.mjs && node tests/readcache.test.mjs && node tests/consistency.test.mjs && node tests/skill-contract.test.mjs && node tests/binding.test.mjs && node tests/gating.test.mjs && node tests/regression-20261113.test.mjs && node tests/client-smoke.test.mjs && node tests/visual.mjs",
+    "test": "node tests/materials.test.mjs && node tests/runner.test.mjs && node tests/gates.test.mjs && node tests/registry.test.mjs && node tests/provenance.test.mjs && node tests/artifacts.test.mjs && node tests/artifact-paths.test.mjs && node tests/recheck.test.mjs && node tests/readcache.test.mjs && node tests/consistency.test.mjs && node tests/skill-contract.test.mjs && node tests/binding.test.mjs && node tests/gating.test.mjs && node tests/bootstrap.test.mjs && node tests/tool-output.test.mjs && node tests/regression-20261113.test.mjs && node tests/client-smoke.test.mjs && node tests/visual.mjs",
     "test:readcache": "node tests/readcache.test.mjs",
     "test:gates:integration": "node tests/gate-report.test.mjs && node tests/gate-workflow.test.mjs && node tests/gate-audit.test.mjs && node tests/workflow-contract.test.mjs",
     "test:visual": "node tests/visual.mjs",
@@ -62,7 +62,8 @@
     "test:skill-contract": "node tests/skill-contract.test.mjs",
     "test:binding": "node tests/binding.test.mjs",
     "test:regression": "node tests/regression-20261113.test.mjs",
-    "test:workflow": "node tests/workflow-contract.test.mjs"
+    "test:workflow": "node tests/workflow-contract.test.mjs",
+    "test:bootstrap": "node tests/bootstrap.test.mjs"
   },
   "keywords": [
     "dsh",

@@ -25,9 +25,9 @@ export function invalidateGateReports(root){
   }
 }
 
-export async function inspectAfterRun({root,skillRoot,python,run,lease=null,stageIds=null,signal=null}){
+export async function inspectAfterRun({root,skillRoot,python,run,lease=null,stageIds=null,signal=null,explicit=false}){
   const policy=readGatePolicy(root);
-  if(!policy||policy.mode==='legacy')return {status:'disabled'};
+  if(!policy||(policy.mode==='legacy'&&!explicit))return {status:'disabled'};
   if(policy.invalid)return {status:'failed',reason:'invalid-policy'};
   try{validatePolicyCatalog(policy,skillRoot);}catch{return {status:'failed',reason:'invalid-policy'};}
   const script=path.join(skillRoot,'scripts/gates.py');
@@ -41,7 +41,7 @@ export async function inspectAfterRun({root,skillRoot,python,run,lease=null,stag
     if(signal?.aborted)break;
     const exit=await new Promise(resolve=>{
       let settled=false, timedOut=false, cancelled=false, spawnError='',leaseError='';
-      const child=spawn(python||'python',[script,'evaluate','--root',root,'--stage',stage,'--checkpoint',stage==='qa'||stage==='recheck'?'delivery-ready':'data-ready',...(run?.id?['--run-id',run.id]:[])],{cwd:root,windowsHide:true,env:{...process.env,...(lease?{DSA_GATE_LEASE_TOKEN:lease.token}:{})},stdio:['ignore','ignore','pipe']});
+      const child=spawn(python||'python',[script,'evaluate','--root',root,'--stage',stage,'--checkpoint',stage==='qa'||stage==='recheck'?'delivery-ready':'data-ready',...(run?.id?['--run-id',run.id]:[])],{cwd:root,windowsHide:true,env:{...process.env,PYTHONUTF8:'1',PYTHONIOENCODING:'utf-8',PYTHONDONTWRITEBYTECODE:'1',...(lease?{DSA_GATE_LEASE_TOKEN:lease.token}:{})},stdio:['ignore','ignore','pipe']});
       let error='';child.stderr.on('data',b=>{error=(error+b.toString()).slice(-2000);});
       function stop(){
         if(process.platform==='win32'&&child.pid)spawn('taskkill',['/pid',String(child.pid),'/t','/f'],{windowsHide:true,stdio:'ignore'});

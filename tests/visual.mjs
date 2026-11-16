@@ -955,6 +955,8 @@ const PROBE = `(() => {
 // 断点以 client.js 的 widthOf() 为准：<=860 narrow / <=1100 compact / <=1240 mid / else wide。
 // 这里每一档都要真的测到：mid（1101–1240）之前从没被渲染过，等于漏了一整个断点。
 const VARIANTS = [
+  { key: 'dynamic-workflow', width: 820, height: 900, widthClass: 'narrow', theme: 'dark', projects: 2, selected:'brand-new', dynamic:true },
+  { key: 'invalid-workflow', width: 1000, height: 900, widthClass: 'compact', theme: 'light', projects: 2, invalidWorkflow:true },
   { key: 'gates-compare', width: 1560, height: 1000, widthClass: 'wide', theme: 'light', projects: 3, gateMode:'compare' },
   { key: 'gates-checking', width: 820, height: 900, widthClass: 'narrow', theme: 'dark', projects: 3, gateMode:'skill', gateChecking:true },
   { key: 'gates-recovery', width: 1180, height: 900, widthClass: 'mid', theme: 'light', projects: 3, gateMode:'skill', gateRecoveryNeeded:true },
@@ -988,6 +990,13 @@ async function main() {
   await withChrome(async ({ port }) => {
     for (const variant of VARIANTS) {
       const snap = variant.skeleton ? null : snapshot(variant.projects);
+      if(variant.dynamic){
+        const added=stage('brand-new',10,'技能新增阶段与通用产物','todo',[]);
+        added.ui={panels:[]};added.outputFiles=[{path:'output/new-stage/new-result-with-long-filename.json',exists:true},{path:'output/new-stage/pending-result.json',exists:false}];
+        snap.stages.push(added);snap.summary.todo++;
+        snap.workflow={actions:[{id:'new-action',stage:'brand-new',label:'生成技能声明的新结果'}],draftTasks:[]};
+      }
+      if(variant.invalidWorkflow){snap.stages=[];snap.workflow={ok:false,error:'技能工作流不可用：阶段依赖不存在，请检查技能声明'};snap.error=snap.workflow.error;snap.activeRuns={'unknown-stage':{id:'running-fixture'}};snap.gateChecking={stageId:'audit'};}
       if (variant.gateMode) {
         snap.gateMode=variant.gateMode;
         snap.gateChecking=variant.gateChecking?{stageId:'audit',startedAt:'2026-11-15T09:00:00Z'}:null;
@@ -1045,6 +1054,12 @@ async function main() {
           const width=await page.eval('document.documentElement.scrollWidth');
           if(width>variant.width)throw new Error('expanded gate evidence overflows viewport');
         }
+        if(variant.dynamic){
+          const content=await page.eval(`(() => {let first;for(const d of document.querySelectorAll('details'))if(/阶段动作|本阶段产物/.test(d.querySelector('summary')?.textContent||'')){d.open=true;first ||= d;}first?.scrollIntoView({block:'center'});return document.body.textContent;})()`);
+          if(!content.includes('生成技能声明的新结果')||!content.includes('pending-result.json · 待生成'))throw Error('dynamic workflow actions or outputs missing');
+          if(await page.eval('document.documentElement.scrollWidth')>variant.width)throw Error('dynamic outputs overflow viewport');
+        }
+        if(variant.invalidWorkflow){const content=await page.eval('document.body.textContent');if(!content.includes('阶段依赖不存在')||!content.includes('重新读取')||!content.includes('停止运行')||!content.includes('停止体检')||content.includes('阶段 1–0'))throw Error('invalid workflow recovery missing');}
         await page.screenshot(path.join(OUT, 'panel-' + variant.key + '.png'));
         results.push({ variant, probe });
       } finally {
@@ -1105,6 +1120,8 @@ async function main() {
     const tag = variant.key + '(' + variant.width + 'px)';
     check(probe.docWidth <= probe.viewWidth + 2, tag + ' 有横向溢出：' + probe.docWidth + ' > ' + probe.viewWidth);
     check(probe.overflow.length === 0, tag + ' 有元素横向溢出：' + JSON.stringify(probe.overflow.slice(0, 3)));
+    // The permanent materials-library entry shares dsa-stage styling; it is not a workflow stage.
+    if(variant.invalidWorkflow){check(probe.stageCount===1&&probe.kpiCount===0,tag+' fabricated fallback stages');continue;}
     if (variant.skeleton) {
       // 首屏骨架只占位：要有骨架、不能出现空态卡、不能已经长出真数据
       check(probe.skeleton, tag + ' 没渲染出首屏骨架');

@@ -297,11 +297,11 @@ section('子代理替父对话干活：读写落在父对话的项目里');
     assert.equal(env.wb.delegatedScopeSession('child-2'), 'sess-parent');
     assert.equal(env.wb.delegatedScopeSession('nobody'), '');
   });
-  await checkAsync('父对话没绑项目：子代理照旧用全局当前项目（不抛错、不猜）', async () => {
+  await checkAsync('父对话没绑项目：子代理拒绝使用面板里的其他项目', async () => {
     headers.set('child-3', { header: { parentSession: 'sess-loose', origin: 'subagent', delegationDepth: 1 } });
     const read = toolOf(env.wb, 'data_analysis_run_log', () => ({ ok: true, text: `active=${env.wb.active().project.name}` }));
     const out = await read({}, { agent: { session: { id: 'child-3', header: headers.get('child-3').header } } });
-    assert.match(out.text, /active=项目Q/);
+    assert.equal(out.ok,false);assert.match(out.error,/父研究对话/);
   });
 }
 

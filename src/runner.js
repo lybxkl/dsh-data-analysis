@@ -123,8 +123,8 @@ export class Runner {
 
     const id = runId();
     let environment=null;
-    if(projectLease){try{const skill=resolveSkillRoot(config.skillRoot);if(skill.ok)environment=currentEnvironment(skill.packageDir,python);}catch{}}
-    const gateProduction = projectLease ? productionReceipt(projectRoot, stageId, id, list,{environment,workflow}) : null;
+    if(projectLease||actionId){try{const skill=workflow?.root?{ok:true,packageDir:workflow.root}:resolveSkillRoot(config.skillRoot);if(skill.ok)environment=currentEnvironment(skill.packageDir,python);}catch{}}
+    const gateProduction = projectLease||actionId ? productionReceipt(projectRoot, stageId, id, list,{environment,workflow}) : null;
     const logDir = path.join(projectRoot, 'runs');
     fs.mkdirSync(logDir, { recursive: true });
     const logFile = path.join(logDir, `${id}.log`);
@@ -214,7 +214,7 @@ export class Runner {
     try {
       child = spawn(live.python, argv, {
         cwd: live.projectRoot,
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1',PYTHONDONTWRITEBYTECODE:'1' },
         windowsHide: true,
       });
     } catch (error) {

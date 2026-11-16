@@ -267,6 +267,7 @@ section('五、识图：计划、数页、留痕、派生稿、人工核对');
     await bench.wb.mountSource({ sourceId: added.source.id, entries: ['扫描件'] });
 
     const started = bench.wb.runStage('audit', { force: true });
+    if(!started.ok)throw new Error('资料审计未启动：'+started.error);
     const ran = await waitRun(bench.ledger, started?.run?.id);
     check('审计跑完', ran?.status === 'ok', ran?.status || '没有运行记录');
 

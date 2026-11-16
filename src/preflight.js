@@ -78,7 +78,7 @@ export function probePython(pythonPath, { timeoutMs = 25000 } = {}) {
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(command, ['-c', PROBE_CODE], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      child = spawn(command, ['-c', PROBE_CODE], { windowsHide: true,env:{...process.env,PYTHONUTF8:'1',PYTHONIOENCODING:'utf-8',PYTHONDONTWRITEBYTECODE:'1'}, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (error) {
       resolve({ ok: false, error: error?.message || String(error) });
       return;
