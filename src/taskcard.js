@@ -7,6 +7,8 @@
  *  - 卡片不替模型做研究判断：它给现状、命令、约束、期望产物，不给结论。
  */
 
+import { datasetPlan } from './cursor.js';
+
 const SHORT_STATUS = {
   done: '已完成',
   blocked: '被拦住',
@@ -115,6 +117,9 @@ export function buildTaskCard({ project, projectRoot, stage, stages, commands = 
       });
     }
     lines.push(`${commands.length + 1}. 读产物与报告；闸门不过就按报告修输入/参数后重跑，不要手改结果文件让闸门变绿。`);
+  } else if (stage.id === 'dataset' && projectRoot) {
+    lines.push(`1. ${datasetPlan(projectRoot).next}`);
+    lines.push('2. 完成后查看 data_analysis_status。');
   } else {
     const brief = stage.manualInstructions;
     if (brief) brief.forEach((item, i) => lines.push(`${i + 1}. ${item}`));

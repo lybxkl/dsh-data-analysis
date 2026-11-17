@@ -178,8 +178,14 @@ with open(out, "wb") as fh:
 print("pdf", out)
 `;
 
+const REGISTERED_TABLE = {
+  'output/dataset/analysis.csv': 'id,in_analysis\r\na,1\r\n',
+  'research_registry.json': JSON.stringify({ datasets: [{ id: 'cases', path: 'output/dataset/analysis.csv', key: 'id' }] }),
+};
+
 function manuscriptBench() {
   const root = makeProject({
+    ...REGISTERED_TABLE,
     'scripts/assemble_manuscript.py': ASSEMBLE_SCRIPT,
     'scripts/export_pdf_hires.py': PDF_SCRIPT,
     'manuscript.json': JSON.stringify({ blocks: [{ type: 'para', text: '正文' }] }),
@@ -224,6 +230,7 @@ await (async () => {
 await (async () => {
   // 没有 figure_map 也没人会生成它：该步在执行到那里时才被跳过，并写进运行记录。
   const root = makeProject({
+    ...REGISTERED_TABLE,
     'scripts/assemble_manuscript.py': 'print("no map")\n',
     'scripts/export_pdf_hires.py': PDF_SCRIPT,
     'docs/decisions/figure-selection.md': '正文图：图1\n',
@@ -424,6 +431,22 @@ check('stats/figures 没 analysis.csv 时用登记的第一份数据集当主表
   assert.equal(argv[at + 1], 'output/datasets/person.csv', argv.join(' '));
 });
 
+check('注册表 path 优先于另一张 analysis.csv', () => {
+  const seed = multiDatasetSeed();
+  seed['research_registry.json'] = JSON.stringify({
+    datasets: [{ id: 'court_level', path: 'output/datasets/court.csv', key: ['court_id'] }],
+  });
+  seed['output/dataset/analysis.csv'] = 'id,in_analysis\r\na,1\r\n';
+  const root = makeProject(seed);
+  const { wb } = benchFor(root);
+  wb.openProject(root);
+  const command = wb.commandFor(root, wb.active().project, wb.stageById('stats'));
+  assert.equal(command.ok, true, command.error);
+  const argv = command.steps[0].argv;
+  const at = argv.indexOf('--data');
+  assert.equal(argv[at + 1], 'output/datasets/court.csv', argv.join(' '));
+});
+
 /* ═════════════ 九、research_registry.json 桥接 ═════════════ */
 
 section('九、skill 的 research_registry.json 直接当数据集视图用');
@@ -607,7 +630,7 @@ check('重跑链停在人工步骤时是 waiting，而不是「跑完了」', ()
   assert.ok(chain, '应当有重跑链');
   assert.equal(chain.status, 'waiting', JSON.stringify(chain));
   assert.equal(chain.waitingFor, 'dataset');
-  assert.match(String(chain.error || ''), /人工步骤/);
+  assert.match(String(chain.error || ''), /research_registry\.json/);
 });
 
 check('前置闸门没过时续跑先停在 waiting，force 才跳过', () => {

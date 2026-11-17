@@ -46,6 +46,8 @@ import { buildTaskCard } from './taskcard.js';
 import {
   adoptCommand,
   buildCursor,
+  archiveTierBlock,
+  datasetPlan,
   entryBlock,
   noteAssumption,
   readAcceptance,
@@ -114,7 +116,7 @@ const CARD_MOUNT_NOTE = {
 
 /** 手稿骨架里的占位段落：明确说「数字要有出处」，也不含任何数字本身。 */
 const MANUSCRIPT_PLACEHOLDER =
-  '待补：这一节的论证、数据口径与主要发现。写进去的每个数字都要能在 output/models/ 或 output/dataset/analysis.csv 里找到原值。';
+  '待补：这一节的论证、数据口径与主要发现。写进去的每个数字都要能在 output/models/ 或 research_registry.json 登记的分析表里找到原值。';
 
 /** 中文小序号，够手稿的分节用；超了就直接用阿拉伯数字，不硬凑。 */
 const CN_NUM = [
@@ -2181,6 +2183,10 @@ export class Workbench {
   }
 
   runVerifySource({ mode = 'build', datasetId = '' } = {}) {
+    const active = this.active();
+    if (!active.ok) return { ok: false, error: active.error };
+    const blocked = archiveTierBlock(active.path, '逐格回源');
+    if (blocked) return { ok: false, error: blocked };
     const args = ['--mode', mode === 'verify' ? 'verify' : 'build'];
     if (datasetId) args.push('--dataset', String(datasetId));
     return this.runAdapter('verify_source', { args, timeoutMs: 1800000 });
@@ -2206,6 +2212,10 @@ export class Workbench {
     if(!active.ok)return {ok:false,error:active.error};
     const action=this.workflow(active).actions.find(action=>action.id===actionId);
     if(!action)return {ok:false,error:'当前技能没有声明此工作流动作'};
+    if(action.tool==='dataset-verification'||action.tool==='research-gate'){
+      const blocked=archiveTierBlock(active.path,action.label||action.tool);
+      if(blocked)return {ok:false,error:blocked};
+    }
     const started=this.runStage(action.stage,{actionId});
     if(!started.ok)return started;
     const deadline=Date.now()+1800000;let timedOut=false;
@@ -2433,6 +2443,13 @@ export class Workbench {
     if(available)for(const id of rule.gates||[]){
       const gate=stages.flatMap(stage=>stage.gates).find(g=>g.id===id);
       if(!gate||(!['pass','na'].includes(gate.status)&&!disputes.has(gate.id)))reasons.push(gate?.detail||`尚未满足判据 ${id}`);
+    }
+    if(['verify','stats','figures','manuscript','qa'].includes(stageId)){
+      const plan=datasetPlan(projectRoot);
+      if(!plan.ready)reasons.unshift(plan.next);
+      else if(reasons.some((reason)=>/依赖阶段 数据集|registry-present|dataset-csv|dataset-key|dataset-path|dataset-flag|dataset-in-analysis|datasets-index/.test(reason))){
+        reasons.unshift(`分析表已经登记为 ${plan.label}。调用 data_analysis_gates(action="inspect")，按体检结果修改，通过前不要开始这一阶段。`);
+      }
     }
     return reasons;
   }
@@ -2787,7 +2804,7 @@ export class Workbench {
       '',
       '怎么做：',
       '1. 读 manuscript.json。figure 块的 png / caption 不要改；N 已经写在题注里（或 n 字段里），不要重复加，也不要把题注里的 N 删掉——它是质检阶段核对的统计口径。补 note 可以。',
-      '2. 把每个「待补」的 para 换成真正的段落（问题、数据、方法、发现、局限）。每个数字都要能在 output/models/*.csv 或 output/dataset/analysis.csv 里找到原值；找不到就补一张表，不要在正文里估一个数出来。',
+      '2. 把每个「待补」的 para 换成真正的段落（问题、数据、方法、发现、局限）。每个数字都要能在 output/models/*.csv 或 research_registry.json 登记的分析表里找到原值；找不到就补一张表，不要在正文里估一个数出来。',
       '3. 正文至少引用每个图号一次（图1、图2…），图号从 1 连续；要加表就写 {"type":"table","csv":"output/models/coef_m1_probation.csv","caption":"…","columns":[{"col":"term","label":"变量"},{"col":"beta","label":"系数","fmt":".3f"}]}，数字由脚本从 CSV 取，不要抄进正文。',
       '   表的列选择写在 table 块的顶层 columns（不是 presentation.columns）：只选要发表的列，别把整张原始输出贴进论文。',
       '   注意：正文里的「图N」按块序自动编号——你调换 figure 块的顺序，图号就跟着变，正文引用必须同步改，否则图与正文会错配。',
@@ -3137,10 +3154,12 @@ export class Workbench {
     // 也不要「静悄悄跳过」——这两种都会让链看起来跑完了。
     if (!this.stageRunnable(stageId)) {
       const stage = this.stageById(stageId);
+      const active = this.active();
+      const plan = stageId === 'dataset' && active.ok ? datasetPlan(active.path) : null;
       this.patchChain({
         status: 'waiting',
         waitingFor: stageId,
-        error: `${stage ? stage.name : stageId} 没有可执行脚本（人工步骤）：先按面板提示完成，再用 action=chain resume 继续`,
+        error: plan ? plan.next : `${stage ? stage.name : stageId} 没有可执行脚本（人工步骤）：先按面板提示完成，再用 action=chain resume 继续`,
       });
       return;
     }

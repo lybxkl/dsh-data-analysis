@@ -398,7 +398,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
       + '注意：退出码 0 不等于阶段完成，完成与否看闸门与产物。',
     parameters: {
       stageId: { type: 'string', required: true, description: '当前技能工作流中的阶段 ID；先读取 data_analysis_status 或 data_analysis_workflow' },
-      force: { type: 'boolean', description: '跳过前置闸门检查（只在确认要跳过时用）' },
+      force: { type: 'boolean', description: '只跳过非技能模式的前置闸门。不能跳过任务卡的进入条件，技能模式下也不能跳过准入' },
     },
     output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '已启动运行') },
     async execute(args) {
@@ -503,7 +503,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
       advance: { type: 'boolean', description: 'apply 后是否自动重跑下游阶段（默认 true）' },
       resume: { type: 'boolean', description: 'chain：true 续跑停在 waiting 的链' },
       cancel: { type: 'boolean', description: 'chain：true 取消当前链' },
-      force: { type: 'boolean', description: 'chain：续跑时跳过前置闸门（只在看过 blockers 后显式使用）' },
+      force: { type: 'boolean', description: 'chain：续跑时跳过非技能模式的前置闸门。不能进入高于当前验收档的阶段' },
     },
     output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '复核完成') },
     execute(args) {
@@ -1090,11 +1090,8 @@ export function registerTools(ctx, workbench, helpers = {}) {
   register(defineTool({
     name: 'data_analysis_verify_source',
     description:
-      '逐格回源：把数据集里每一行指定的引文列（默认 raw_item）回查到源文件，记录「页 + 字符区间 + 原句」，'
-      + '写 output/datasets/<id>/extract.jsonl 与 extract.meta.json，并生成 output/verify/cell_checks.csv。'
-      + 'mode=build 生成台账；mode=verify 只复核（引文还在不在）。'
-      + '页眉页脚造成的差异记为 noise（不算造假），真的找不到记为 missing——missing 会让闸门 provenance-cells 变红。'
-      + '源文件按数据集注册的 provenance.sourceRoot + sourceColumn 定位（目录联接也能读）。',
+      '仅归档档。逐格回源：把数据集里每一行指定的引文列回查到源文件。'
+      + 'explore 与 submission 不要调用；可投稿档的抽样复核写在 docs/decisions/coding-sample.md，不靠本工具通过统计或交付。',
     parameters: {
       mode: { type: 'string', description: 'build（默认）| verify' },
       datasetId: { type: 'string', description: '只跑某一份数据集；留空=全部' },
@@ -1120,10 +1117,9 @@ export function registerTools(ctx, workbench, helpers = {}) {
   register(defineTool({
     name: 'data_analysis_verify_dataset',
     description:
-      '全格复核（skill 的 verify_dataset.py）：action=prepare 生成数据集快照与逐格待核模板（review_template_<hash>.jsonl），'
-      + 'action=final 校验复核回执、来源复读、哈希与版本指纹。只有 stage=final、status=verified、error_count=0 的快照'
-      + '才能让数据进入正式计算——prepare 只是「模板已生成」，不是通过。'
-      + 'final 之前必须真的逐格回读原件并填写回执；禁止抽样代替全检、禁止批量盖章。',
+      '仅归档档的全格复核。explore 与 submission 不要调用，调用也会被拒绝。'
+      + '可投稿档不把 verify_dataset final 当作统计或交付的前提。'
+      + '归档档里 action=prepare 只生成待核模板，action=final 才校验实际逐格回读。',
     parameters: {
       action: { type: 'string', description: 'prepare（默认）| final' },
     },
@@ -1150,8 +1146,8 @@ export function registerTools(ctx, workbench, helpers = {}) {
   register(defineTool({
     name: 'data_analysis_research_gate',
     description:
-      '研究总闸门（skill 的 research_gate.py）：统一检查来源覆盖、数据集终态、模型补数回查、运行回执、复核版本与样本键，'
-      + '写 output/research_gate.json。有 error 时返回非零。它检查的是「已登记的覆盖」，不等于穷尽了所有变量与模型。',
+      '仅归档档的研究总闸门。explore 与 submission 不要调用，调用也会被拒绝。'
+      + '可投稿档的交付不依赖 research_gate.py。归档档用它检查已登记的来源覆盖、数据集终态和运行回执。',
     parameters: {},
     output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '闸门已执行') },
     async execute() {
@@ -1483,14 +1479,13 @@ export function registerTools(ctx, workbench, helpers = {}) {
 
   register(defineTool({
     name: 'data_analysis_set_tier',
-    description: '设置验收档 explore、submission 或 archive。降低档位必须 confirmDowngrade=true，表示用户已经确认。',
+    description: '提高验收档到 submission 或 archive。不能降低验收档；用户要降低时，请用户自己修改 .workbench/acceptance.json。不要传任何确认参数代替用户。',
     parameters: {
       tier: { type: 'string', required: true },
-      confirmDowngrade: { type: 'boolean' },
     },
     output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || value?.error || '验收档已更新') },
     async execute(args) {
-      const result = workbench.setTier(String(args.tier || ''), args.confirmDowngrade === true);
+      const result = workbench.setTier(String(args.tier || ''), false);
       return { ...result, text: result.ok ? `验收档：${result.acceptance.tier}` : result.error };
     },
   }));

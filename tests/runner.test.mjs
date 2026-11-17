@@ -65,6 +65,13 @@ function makeBench({ withConfig = true } = {}) {
   fs.mkdirSync(path.join(proj, 'data'), { recursive: true });
   fs.writeFileSync(path.join(proj, 'scripts', 'auto_chart_pack.py'), CHART_SCRIPT, 'utf8');
   fs.writeFileSync(path.join(proj, 'scripts', 'assemble_manuscript.py'), MANUSCRIPT_SCRIPT, 'utf8');
+  fs.mkdirSync(path.join(proj, 'output', 'dataset'), { recursive: true });
+  fs.writeFileSync(path.join(proj, 'output', 'dataset', 'analysis.csv'), 'id,in_analysis\r\na,1\r\n', 'utf8');
+  fs.writeFileSync(
+    path.join(proj, 'research_registry.json'),
+    JSON.stringify({ datasets: [{ id: 'cases', path: 'output/dataset/analysis.csv', key: 'id' }] }),
+    'utf8',
+  );
   if (withConfig) {
     fs.writeFileSync(path.join(proj, 'chart_config.json'), JSON.stringify({ outcome: 'probation' }), 'utf8');
     fs.writeFileSync(path.join(proj, 'model_spec.json'), JSON.stringify({ models: [] }), 'utf8');
