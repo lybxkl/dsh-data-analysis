@@ -142,20 +142,23 @@ pip3 install -r SPSS-Style-Charting-Skill/requirements.txt
 「让 AI 装好环境」（开临时会话自动装）、「手动配置」（设置弹窗自己填路径）、「重新检查」。被拦期间面板每 12 秒强制复查一次。
 改过 `skillRoot` / `pythonPath` 会立即作废旧结论并重查；平时结果缓存 5 分钟，设置里可点「重新检查」。
 
-## 10 个阶段
+## 阶段以技能包 workflow.json 为准
+
+当前声明有 11 个阶段。全格复核和复核修订的 `minTier` 是 archive；可投稿档会跳过它们。交付阶段不跑本地脚本，只交接给格式匠。
 
 | # | 阶段 | 脚本 | 关键产物 |
 | --- | --- | --- | --- |
 | 1 | 范围与口径 | 人工 | `docs/scope.md` |
 | 2 | 资料审计 | `audit_corpus.py` → `dedupe_corpus.py`（只出计划） | `sample_flow.csv`、`corpus_summary.json`、`dedupe_plan.csv` |
-| 3 | 编码与抽取 | `make_coding_sheet.py` → `check_decisions.py`（有台账时） | `output/coding/coding_sheet.csv`、`sample_flow.csv`、`skipped_documents.csv` |
-| 4 | 数据集 | 人工 | `output/dataset/analysis.csv` |
-| 5 | 全格复核 | `verify_dataset.py`（prepare） | `output/data_verification/dataset_verification.json`、`review_template_*.jsonl` |
+| 3 | 编码与抽取 | 先 `draft/` 试跑，锁定后 `make_coding_sheet.py` 或采纳的脚本 | `output/coding/coding_sheet.csv`、`sample_flow.csv`、`skipped_documents.csv` |
+| 4 | 数据集 | 人工，依赖已锁定的编码 | `output/dataset/analysis.csv` |
+| 5 | 全格复核（archive） | `verify_dataset.py`（prepare） | `output/data_verification/dataset_verification.json`、`review_template_*.jsonl` |
 | 6 | 统计分析 | `auto_stats.py` → `methods_pack.py`（可选） | `output/models/coef_*.csv`、`fit.csv` |
 | 7 | 出版级图表 | `auto_chart_pack.py` → `paper_figures.py`（可选） | `output/chart_pack/chart_manifest.csv`、`output/figures/paper_figures_manifest.csv` |
 | 8 | 文稿组装 | `assemble_manuscript.py` → `export_pdf_hires.py` | `manuscript.json`（输入）→ `output/manuscript.docx` + `manuscript.pdf` |
 | 9 | 终检 | `qa_outputs.py` → `verify_numbers.py` → `research_gate.py` → `review_pack.py` | `output/qa/qa_report.json`、`output/verify/number_issues.csv`、`output/research_gate.json`、`output/review/review_pack.md` |
-| 10 | 复核与修订 | 机器复算 + 模型审计（无脚本） | `output/recheck/issues.jsonl`、`coverage.json`、`report.md` |
+| 10 | 复核与修订（archive） | 机器复算 + 模型审计（无脚本） | `output/recheck/issues.jsonl`、`coverage.json`、`report.md` |
+| 11 | 交付到格式匠 | `formatjiang_receive_manuscript` | `output/handoff.json` |
 
 登记表是数据：项目里的 `project.json` 可以覆盖每阶段的 `script` / `args` / `steps`，现场写的新脚本放 `scripts/` 并登记即可。
 
@@ -168,6 +171,7 @@ pip3 install -r SPSS-Style-Charting-Skill/requirements.txt
 | 技能脚本 | 工作台位置 |
 | --- | --- |
 | `audit_corpus` / `dedupe_corpus` | 第 2 阶段（两步；去重只出计划，不移动原件） |
+| `suggest_profiles` | 编码阶段动作：列出剖面覆盖的字段，不限定研究领域 |
 | `make_coding_sheet` / `check_decisions` | 第 3 阶段（两步；后者只在有 `decisions.jsonl` 时跑） |
 | `verify_dataset` | 第 5 阶段（prepare）+ 工具 `data_analysis_verify_dataset`（final） |
 | `auto_stats` / `methods_pack` | 第 6 阶段（两步；后者需要 `methods.json`） |

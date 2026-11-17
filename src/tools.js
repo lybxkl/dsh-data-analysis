@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 
 import { sessionIdOf, sessionIsDelegated, wrapExecute } from './binding.js';
+import { ensureAcceptance } from './cursor.js';
 import { admissionFor, isArmedSession, whenArmed } from './gating.js';
 
 const STATUS_LABEL = {
@@ -176,7 +177,10 @@ export function registerTools(ctx, workbench, helpers = {}) {
       }
       if (snap.active.skillDrift) lines.push('注意：项目的 SKILL.md 指纹与当前 skill 不一致，旧产物可能来自旧版本。');
       if (snap.gateModeNotice) lines.push(`质量状态：${snap.gateModeNotice}`);
-      if (typeof snap.deliveryReady==='boolean') lines.push(`完整研究验收：${snap.deliveryReady?'当前通过':'尚未确认通过'}${snap.deliveryBlockers?.length?`（${snap.deliveryBlockers.length} 项待处理）`:''}`);
+      if (typeof snap.deliveryReady==='boolean') {
+        const tierLabel = snap.acceptanceTier === 'submission' ? '可投稿验收' : snap.acceptanceTier === 'explore' ? '探索验收' : '完整研究验收';
+        lines.push(`${tierLabel}：${snap.deliveryReady?'当前通过':'尚未确认通过'}${snap.deliveryBlockers?.length?`（${snap.deliveryBlockers.length} 项待处理）`:''}`);
+      }
       const matLine = materialsLine(snap.materials);
       if (matLine) lines.push(matLine);
       for (const stage of snap.stages) {
@@ -193,10 +197,11 @@ export function registerTools(ctx, workbench, helpers = {}) {
         const extra = figs.rows.length - deliverable;
         lines.push(`图表清单：${deliverable} 行 status=ok${extra ? `（另有 ${extra} 行 status≠ok）` : ''}；是否完成交付验收以当前门禁为准（${figs.file}）`);
       }
-      // 只回摘要与闸门，不回整份产物快照：模型不需要 60 张图的每一列
+      const card = armed ? workbench.cursorCard() : null;
       return {
         ok: true,
-        text: lines.join('\n'),
+        text: [card?.text, lines.join('\n')].filter(Boolean).join('\n\n'),
+        cursor: card?.cursor || null,
         armed,
         startup:{tool:'data_analysis_start',available:true,required:!armed},
         skill: compactSkill,
@@ -227,12 +232,19 @@ export function registerTools(ctx, workbench, helpers = {}) {
   register(defineTool({
     name:'data_analysis_start',
     description:'在当前对话明确请求实证研究、明确要求启动工作台或显式调用研究技能后，创建/打开工作台项目并关联本对话。未启用时也可调用。先向用户说明正在启动；成功后阶段工具在下一模型步出现。只读问状态时不要调用。已有成果目录不会被当作空项目覆盖，默认在工作目录旁建立独立研究项目。',
-    parameters:{workspaceDir:{type:'string',description:'原工作区绝对目录；默认读取当前对话 cwd，可包含已有论文和产物'},projectDir:{type:'string',description:'可选：明确指定已有项目或新的空目录；非空且无 project.json 的目录拒绝覆盖'},name:{type:'string',description:'可选项目名称'},switchProject:{type:'boolean',description:'仅用户明确要求将本对话切换到另一个项目时使用'}},
+    parameters:{workspaceDir:{type:'string',description:'原工作区绝对目录；默认读取当前对话 cwd，可包含已有论文和产物'},projectDir:{type:'string',description:'可选：明确指定已有项目或新的空目录；非空且无 project.json 的目录拒绝覆盖'},name:{type:'string',description:'可选项目名称'},switchProject:{type:'boolean',description:'仅用户明确要求将本对话切换到另一个项目时使用'},tier:{type:'string',description:'explore | submission | archive。论文或期刊套版用 submission。降低已有档位会被拒绝'}},
     output:{schema:{type:'json'},render:(_args,value)=>okText(value?.text||value?.error||'工作台启动结果')},
     async execute(args={},exec){
       if(sessionIsDelegated(exec))return {ok:false,error:'请由主对话启动并关联工作台，子代理不创建或抢占研究对话'};
       const result=workbench.startWorkbench({...args,sessionId:sessionIdOf(exec)});
-      return result.ok?result:{...result,text:'工作台未启动：'+result.error+'\n请立即向用户说明此原因；不要把手工执行脚本冒充工作台流程。'};
+      if(!result.ok)return {...result,text:'工作台未启动：'+result.error+'\n请立即向用户说明此原因；不要把手工执行脚本冒充工作台流程。'};
+      let tierNote='';
+      if(result.project?.path && (result.created || args.tier)){
+        const acceptance=ensureAcceptance(result.project.path, args.tier);
+        if(!acceptance.ok)tierNote=`验收档未改：${acceptance.error}`;
+      }
+      const card=workbench.cursorCard();
+      return {...result, text:[result.text, tierNote, card?.text].filter(Boolean).join('\n\n'), cursor:card?.cursor||null};
     },
   }));
 
@@ -406,11 +418,18 @@ export function registerTools(ctx, workbench, helpers = {}) {
     description: '读取一次运行的日志尾部与状态（运行中 / ok / failed / cancelled，退出码与信号）。',
     parameters: {
       runId: { type: 'string', required: true, description: '运行 id（run-xxx）' },
-      limit: { type: 'number', description: '读最后多少行，默认 120' },
+      waitSeconds: { type: 'number', description: '运行中时最多等待这么多秒，上限 120。到点仍在跑就返回当前日志' },
     },
     output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || '已读取日志') },
     async execute(args) {
-      const result = workbench.runLog(String(args.runId || '').trim(), Math.min(400, Math.max(10, Number(args.limit) || 120)));
+      const limit = Math.min(400, Math.max(10, Number(args.limit) || 120));
+      const waitMs = Math.min(120, Math.max(0, Number(args.waitSeconds) || 0)) * 1000;
+      const started = Date.now();
+      let result = workbench.runLog(String(args.runId || '').trim(), limit);
+      while (result.run?.status === 'running' && Date.now() - started < waitMs) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        result = workbench.runLog(String(args.runId || '').trim(), limit);
+      }
       if (!result.ok) return { ok: false, error: '找不到这次运行' };
       const run = result.run;
       const head = `${run.stageId} · ${run.status} · 退出码 ${run.exitCode ?? '—'}${run.signal ? ` · signal ${run.signal}` : ''}`;
@@ -698,13 +717,24 @@ export function registerTools(ctx, workbench, helpers = {}) {
     return text === 'true' || text === '1' || text === 'yes';
   }
 
+  function parseList(value) {
+    if (Array.isArray(value)) return value.map((item) => String(item));
+    const text = String(value || '').trim();
+    if (!text) return [];
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) return parsed.map((item) => String(item));
+    } catch { /* 不是 JSON 时按空白拆 */ }
+    return text.split(/\s+/).filter(Boolean);
+  }
+
   function materialsText(sources, mounts = [], derived = []) {
     const lines = [];
     if (!sources.length) lines.push('材料库：空 —— 先用 action=add 登记一个材料目录（path=绝对路径）');
     else {
       lines.push(`材料库：${sources.length} 个目录（全局一份，多个项目可以共用）`);
       sources.forEach((item, index) => {
-        lines.push(`${index + 1}. ${item.label}${item.exists ? '' : '（目录不在了！）'} — ${item.path}`);
+        lines.push(`${index + 1}. ${item.label} · sourceId=${item.id || '无'}${item.exists ? '' : '（目录不在了！）'} — ${item.path}`);
         if (item.receipt) lines.push(`   ${item.receipt}`);
         if (item.usedBy?.length) lines.push(`   已挂到：${item.usedBy.map((row) => `${row.project} → data/${row.as}`).join('、')}`);
         else lines.push('   还没有项目挂载它');
@@ -785,7 +815,7 @@ export function registerTools(ctx, workbench, helpers = {}) {
       }
       if (action === 'add') {
         const result = workbench.addSource({ label: args?.label, path: args?.path });
-        if (!result.ok) return { ok: false, error: result.error, text: `登记失败：${result.error}` };
+        if (!result.ok) return { ok: false, error: result.error, text: `登记失败：${result.error}${result.source?.id ? `。已有 sourceId=${result.source.id}` : ''}`, source: result.source };
         return {
           ok: true,
           text: [`已登记「${result.source.label}」— ${result.source.path}`, result.receipt || '', '这一步只登记，没有复制任何文件；要让它进项目就再 action=mount'].filter(Boolean).join('\n'),
@@ -1398,11 +1428,95 @@ export function registerTools(ctx, workbench, helpers = {}) {
   }));
 
   register(defineTool({
+    name: 'data_analysis_adopt_command',
+    description: '把项目里的草稿或脚本锁定为某个阶段的命令，并由工作台执行、留下回执。未采纳的脚本不被闸门采信。',
+    parameters: {
+      stageId: { type: 'string', required: true },
+      script: { type: 'string', required: true, description: '项目内相对路径，位于 draft/ 或 scripts/' },
+      args: { type: 'string', description: 'JSON 字符串数组，例如 ["--root","data"]' },
+      artifacts: { type: 'string', description: 'JSON 字符串数组，声明产出的项目相对路径' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || value?.error || '采纳结果') },
+    async execute(args) {
+      const result = workbench.adoptStageCommand({
+        stageId: String(args.stageId || ''),
+        script: String(args.script || ''),
+        args: parseList(args.args),
+        artifacts: parseList(args.artifacts),
+      });
+      return { ...result, text: result.text || result.error || '已处理采纳' };
+    },
+  }));
+
+  register(defineTool({
+    name: 'data_analysis_dispute_gate',
+    description: '登记校验器与原文不符的争议。争议不把判据改成通过，只把它移出下一步。',
+    parameters: {
+      stageId: { type: 'string', required: true },
+      gateId: { type: 'string', required: true },
+      evidence: { type: 'string', required: true, description: '对账证据，例如被误切的原文或另一套测量' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || value?.error || '争议已记录') },
+    async execute(args) {
+      const result = workbench.disputeGate({ stageId: args.stageId, gateId: args.gateId, evidence: args.evidence });
+      return { ...result, text: result.ok ? `已登记争议 ${args.gateId}。它不再作为下一步，也不算通过。` : result.error };
+    },
+  }));
+
+  register(defineTool({
+    name: 'data_analysis_record_handoff',
+    description: '记下格式匠交接返回的 file_id、paper_id、version_id。终稿状态读这份记录。',
+    parameters: {
+      file_id: { type: 'string', required: true },
+      paper_id: { type: 'string', required: true },
+      version_id: { type: 'string', required: true },
+      previous: { type: 'string', description: '这次绑定覆盖的旧论文编号，没有则留空' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || value?.error || '交接已记录') },
+    async execute(args) {
+      const result = workbench.saveHandoff({
+        fileId: args.file_id, paperId: args.paper_id, versionId: args.version_id, previous: args.previous,
+      });
+      return { ...result, text: result.ok ? `已记录交接 file_id=${result.handoff.file_id} paper_id=${result.handoff.paper_id} version_id=${result.handoff.version_id}` : result.error };
+    },
+  }));
+
+  register(defineTool({
+    name: 'data_analysis_set_tier',
+    description: '设置验收档 explore、submission 或 archive。降低档位必须 confirmDowngrade=true，表示用户已经确认。',
+    parameters: {
+      tier: { type: 'string', required: true },
+      confirmDowngrade: { type: 'boolean' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || value?.error || '验收档已更新') },
+    async execute(args) {
+      const result = workbench.setTier(String(args.tier || ''), args.confirmDowngrade === true);
+      return { ...result, text: result.ok ? `验收档：${result.acceptance.tier}` : result.error };
+    },
+  }));
+
+  register(defineTool({
+    name: 'data_analysis_note_assumption',
+    description: '把未经用户确认就继续的决定写入假设账。终稿必须原样列出，不能写成已经确认。',
+    parameters: { text: { type: 'string', required: true } },
+    output: { schema: { type: 'json' }, render: (args, value) => okText(value?.text || value?.error || '已记入假设账') },
+    async execute(args) {
+      const result = workbench.saveAssumption(args.text);
+      return { ...result, text: result.ok ? '已记入假设账。终稿要原样列出。' : result.error };
+    },
+  }));
+
+  register(defineTool({
     name:'data_analysis_workflow',
-    description:'读取当前技能声明的完整工作流，或执行其中登记的动作。阶段、依赖、命令和动作以本次返回的契约为准。',
-    parameters:{action:{type:'string',enum:['describe','run-action']},actionId:{type:'string',description:'run-action 时填写 describe 返回的动作 ID'}},
+    description:'默认返回当前任务卡。full=true 才返回完整工作流。run-action 执行已登记动作。',
+    parameters:{action:{type:'string',enum:['describe','run-action']},full:{type:'boolean',description:'describe 时返回完整契约'},actionId:{type:'string',description:'run-action 时填写动作 ID'}},
     output:{schema:{type:'json'},render:protocolOutput},
-    async execute(args){return args.action==='run-action'?workbench.runWorkflowAction(String(args.actionId||'')):{ok:true,workflow:workbench.workflow()};},
+    async execute(args){
+      if(args.action==='run-action')return workbench.runWorkflowAction(String(args.actionId||''));
+      if(args.full===true)return {ok:true,workflow:workbench.workflow()};
+      const card=typeof workbench.cursorCard==='function'?workbench.cursorCard():{ok:false,text:'当前没有任务卡',cursor:null};
+      return {ok:true,text:card.text,cursor:card.cursor||null};
+    },
   }));
 
   return disposers;

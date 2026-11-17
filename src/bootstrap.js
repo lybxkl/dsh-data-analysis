@@ -53,7 +53,7 @@ export function startWorkbench(workbench,{sessionId,workspaceDir='',projectDir='
       const read=readProject(bound.project.path);
       if(!read.ok)return {ok:false,code:'BOUND_PROJECT_UNAVAILABLE',error:read.error};
       const workflow=workflowFor(read.project,workbench.getConfig().skillRoot);
-      return {ok:true,already:true,created:false,armed:true,project:bound.project,workflow:{id:workflow.id,version:workflow.version,sha256:workflow.sha256},text:`本对话已关联工作台：${bound.project.name}\n项目：${bound.project.path}\n直接读取 data_analysis_workflow，再继续当前阶段。`};
+      return {ok:true,already:true,created:false,armed:true,project:bound.project,workflow:{id:workflow.id,version:workflow.version,sha256:workflow.sha256},text:`本对话已关联工作台：${bound.project.name}\n项目：${bound.project.path}\n直接读取 data_analysis_status 的任务卡，再做它写的下一步。`};
     }
     if(bound&&switchProject!==true)return {ok:false,code:'SESSION_BOUND_ELSEWHERE',error:`本对话已关联 ${bound.project.path}；仅在用户明确要求切换项目时使用 switchProject=true`};
     if(!bound&&workbench.sessionBindings()[id]&&switchProject!==true)return {ok:false,code:'BOUND_PROJECT_UNAVAILABLE',error:'关联项目已不在台账中；明确重建关联时使用 switchProject=true'};
@@ -86,6 +86,6 @@ export function startWorkbench(workbench,{sessionId,workspaceDir='',projectDir='
     if(!linked.ok)return {...linked,created,projectDir:target};
     const project=linked.project;
     return {ok:true,already:false,created,armed:true,project,workflow:{id:workflow.id,version:workflow.version,sha256:workflow.sha256},
-      text:`工作台已${created?'创建':'打开'}并关联本对话。\n项目：${project.path}\n工作流：${workflow.id} ${workflow.version}\n下一步：读取 data_analysis_workflow，使用 data_analysis_materials 登记并挂载用户指定的资料目录，再按当前阶段推进。初始化已完成，研究阶段尚未执行。`};
+      text:`工作台已${created?'创建':'打开'}并关联本对话。\n项目：${project.path}\n工作流：${workflow.id} ${workflow.version}\n下一步：读取 data_analysis_status 的任务卡，用 data_analysis_materials 登记并挂载资料。初始化已完成，研究阶段尚未执行。`};
   }catch(error){return {ok:false,code:'START_FAILED',error:String(error.message||error)};}
 }

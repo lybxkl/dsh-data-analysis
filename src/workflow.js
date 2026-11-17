@@ -52,6 +52,10 @@ export function loadWorkflow(root){
         for(const panel of stage.ui?.panels||[])if(!PANELS.has(panel))throw Error(`不支持的工作流面板：${panel}`);
         for(const file of [...(stage.artifacts||[]),...(stage.ui?.requiredFiles||[]),...(stage.ui?.artifactPrefixes||[]).map(file=>file.replace(/\/$/,''))])relative(file);
         if(stage.ui?.legacySkipWhenMissing)relative(stage.ui.legacySkipWhenMissing);
+        if(stage.resumeFile)relative(stage.resumeFile);
+        if(stage.minTier&&!['explore','submission','archive'].includes(stage.minTier))throw Error(`阶段 ${stage.id} 的验收档无效`);
+        if(stage.loop){relative(stage.loop.draftDir);relative(stage.loop.freezeFile);relative(stage.loop.sampleReport);}
+        if(stage.hostCall){relative(stage.hostCall.input);if(!stage.hostCall.tool||!Array.isArray(stage.hostCall.returns)||!stage.hostCall.returns.length)throw Error(`阶段 ${stage.id} 的交付调用不完整`);}
       }
       const actions=new Set(),tools=new Set();
       for(const action of value.actions){
@@ -104,6 +108,7 @@ export function loadWorkflow(root){
           if((owner.inspectionStages||[]).some(id=>!reports.has(id)))throw Error('工作流引用未知体检阶段');
         }
       }
+      if(value.acceptanceTiers&&!['explore','submission','archive'].includes(value.acceptanceTiers.default))throw Error('默认验收档无效');
       const stages=value.stages.map((stage,index)=>({...stage,index:index+1,script:stage.script||stage.steps?.[0]?.script||null,workflowHash:sha(bytes),taskConstraints:value.taskConstraints}));
       return {...value,stages,root,sha256:sha(bytes),schemaSha256:sha(schemaBytes),ok:true};
     }catch(error){throw Error(`技能工作流不可用：${error.message}`);}

@@ -43,6 +43,19 @@ import {
 } from './registry.js';
 import { runPreflight } from './preflight.js';
 import { buildTaskCard } from './taskcard.js';
+import {
+  adoptCommand,
+  buildCursor,
+  entryBlock,
+  noteAssumption,
+  readAcceptance,
+  recordDispute,
+  recordHandoff,
+  openDisputeIds,
+  setAcceptance,
+  tierRank,
+  writeCursorFile,
+} from './cursor.js';
 import { applyPatch, buildEvidence, fileHash, readIssues,readIssueLedger, readCoverage, recheckSummary, writeIssues } from './recheck.js';
 import {
   addSource as registerSource,
@@ -1178,8 +1191,11 @@ export class Workbench {
     const state = this.materialsOf();
     if (!state.ok) return state;
     const { active } = state;
-    const source = findSource(this.store, sourceId);
-    if (!source) return { ok: false, error: '找不到这个材料源，先把目录登记进材料库' };
+    const source = findSource(this.store, sourceId) || listSources(this.store).find((item) => item.label === sourceId);
+    if (!source) {
+      const known = listSources(this.store).slice(0, 5).map((item) => `${item.label}=${item.id}`).join('；');
+      return { ok: false, error: `找不到这个材料源。已登记：${known || '无'}` };
+    }
     if (!fs.existsSync(source.path)) return { ok: false, error: `材料目录不在了：${source.path}` };
     if (isInsidePath(active.path, source.path)) {
       return { ok: false, error: '这个目录在项目目录里面：项目自己的 data/ 本来就能读，不需要再挂一次' };
@@ -1630,6 +1646,7 @@ export class Workbench {
       gateRecoveryNeeded: fs.existsSync(path.join(active.path,'output/gates/publication.lock'))&&!this.gateLeases.has(active.id),
       deliveryReady: readGatePolicy(active.path)?.mode === 'skill' && deliveryBlockers.length === 0,
       deliveryBlockers,
+      acceptanceTier: readAcceptance(active.path).tier,
       admission: gateAdmission(stages,active.path,'delivery-ready'),
       artifacts: this.publicArtifacts(artifacts),
       runs: this.recentRuns(12, active.id),
@@ -2385,16 +2402,28 @@ export class Workbench {
     const definition=workflowFor(project,this.getConfig().skillRoot).stages.find(stage=>stage.id===stageId);
     if(!definition)return ['工作流中没有此阶段'];
     const formal=readGatePolicy(projectRoot)?.mode==='skill';
+    const tier=readAcceptance(projectRoot).tier;
+    const workflowStages=workflowFor(project,this.getConfig().skillRoot).stages;
+    const disputes=openDisputeIds(projectRoot);
+    const aboveTier=(id)=>{
+      if(!tier)return false;
+      const stage=workflowStages.find(item=>item.id===id);
+      return Boolean(stage?.minTier) && tierRank(stage.minTier)>tierRank(tier);
+    };
+    const disputedOnly=(stage)=>Boolean(stage)&&(stage.gates||[]).filter((gate)=>gate.status==='fail'&&gate.level==='error'&&!disputes.has(gate.id)).length===0;
     for(const relative of execution.requiredFiles||definition.ui?.requiredFiles||[])if(!workflowFileExists(projectRoot,relative))reasons.push('缺少阶段输入：'+relative);
     const rule=execution.admission||(formal?definition.admission:definition.legacyAdmission||{});
     if(formal){
       for(const id of execution.dependsOn||definition.dependsOn){
+        if(aboveTier(id))continue;
         const dependency=stages.find(stage=>stage.id===id);
+        if(dependency&&dependency.status==='blocked'&&disputedOnly(dependency))continue;
         if(!dependency||!['done','na'].includes(dependency.status))reasons.push(`依赖阶段 ${dependency?.name||id} 尚未完成`);
       }
     }else{
       for(const previous of stages.slice(0,index)){
-        if(previous.status==='blocked')reasons.push(`${previous.name}：存在未通过的硬要求`);
+        if(aboveTier(previous.id))continue;
+        if(previous.status==='blocked'&&!disputedOnly(previous))reasons.push(`${previous.name}：存在未通过的硬要求`);
         for(const gate of previous.gates.filter(g=>g.manual&&g.status==='unjudged'))reasons.push(`${previous.name}：${gate.label} 待人工裁定`);
       }
     }
@@ -2403,7 +2432,7 @@ export class Workbench {
     if(!available&&rule.requiredInStrict&&contractMode(project)==='strict')reasons.push('缺少工作流要求的输入：'+rule.whenFile);
     if(available)for(const id of rule.gates||[]){
       const gate=stages.flatMap(stage=>stage.gates).find(g=>g.id===id);
-      if(!gate||!['pass','na'].includes(gate.status))reasons.push(gate?.detail||`尚未满足判据 ${id}`);
+      if(!gate||(!['pass','na'].includes(gate.status)&&!disputes.has(gate.id)))reasons.push(gate?.detail||`尚未满足判据 ${id}`);
     }
     return reasons;
   }
@@ -2413,6 +2442,10 @@ export class Workbench {
     if (!stage) return { ok: false, error: `未知阶段：${stageId}` };
     const active = this.active();
     if (!active.ok) return { ok: false, error: active.error };
+    if (!actionId) {
+      const blocked = entryBlock(active.path, stage, readAcceptance(active.path).tier);
+      if (blocked) return { ok: false, error: blocked };
+    }
 
 
     const workflow=this.workflow(active);
@@ -2479,6 +2512,93 @@ export class Workbench {
     const lines = this.runner.logTail(runId, limit);
     const run = this.runner.getRun(runId);
     return { ok: Boolean(run), run, lines };
+  }
+
+  /** 生产锁占用时只回上次报告，不和写入抢同一把锁。 */
+  staleInspection(active, stageId) {
+    const dir = path.join(active.path, 'output', 'gates');
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { entries = []; }
+    const names = entries.filter((entry) => entry.isFile() && entry.name.endsWith('.json') && !entry.name.endsWith('.error.json')).map((entry) => entry.name);
+    const selected = stageId ? names.filter((name) => name === `${stageId}.json`) : names;
+    let asOf = '';
+    const stages = [];
+    for (const name of selected.slice(0, 12)) {
+      const file = path.join(dir, name);
+      let stat;
+      try { stat = fs.statSync(file); } catch { continue; }
+      const stamp = stat.mtime.toISOString();
+      if (!asOf || stamp > asOf) asOf = stamp;
+      let gates = [];
+      try {
+        const report = JSON.parse(fs.readFileSync(file, 'utf8'));
+        gates = (report.gates || []).slice(0, 8).map((gate) => ({ id: gate.id, status: gate.status, detail: gate.detail }));
+      } catch { /* 上次报告读不出就只留时间 */ }
+      stages.push({ stage: name.replace(/\.json$/, ''), asOf: stamp, gates });
+    }
+    return {
+      ok: true,
+      stale: true,
+      asOf: asOf || '无',
+      text: `生产或体检仍在运行。以下是 ${asOf || '尚无'} 的只读报告，不是新的体检。`,
+      stages,
+    };
+  }
+
+  cursorCard() {
+    const active = this.active();
+    if (!active.ok) return { ok: false, text: '尚未打开项目。明确开工后调用 data_analysis_start。', cursor: { tier: '', stageId: '', next: 'data_analysis_start' } };
+    let workflow;
+    try { workflow = this.workflow(active); } catch (error) { return { ok: false, text: String(error.message || error), cursor: { tier: readAcceptance(active.path).tier, stageId: '', next: '' } }; }
+    const card = buildCursor({ root: active.path, workflow, stages: this.snapshot().stages });
+    try { writeCursorFile(active.path, card); } catch { /* 卡片文本仍然返回，落盘失败不挡住这一步 */ }
+    return card;
+  }
+
+  adoptStageCommand({ stageId, script, args = [], artifacts = [] }) {
+    const active = this.active();
+    if (!active.ok) return active;
+    const stage = this.stageById(stageId);
+    if (!stage) return { ok: false, error: `未知阶段：${stageId}` };
+    const adopted = adoptCommand(active.path, { stage, script, args, artifacts });
+    if (!adopted.ok) return adopted;
+    const project = {
+      ...active.project,
+      stages: {
+        ...(active.project.stages || {}),
+        [stageId]: { steps: [{ script: adopted.script, args: adopted.args, produces: adopted.produces }] },
+      },
+      updatedAt: new Date().toISOString(),
+    };
+    writeProject(active.path, project);
+    active.project.stages = project.stages;
+    active.project.updatedAt = project.updatedAt;
+    const run = this.runStage(stageId);
+    return { ok: run.ok, error: run.error, adopted, run: run.run, text: run.ok ? `已锁定 ${adopted.script} 并启动 ${stageId}` : run.error };
+  }
+
+  disputeGate(input) {
+    const active = this.active();
+    if (!active.ok) return active;
+    return recordDispute(active.path, input);
+  }
+
+  saveHandoff(input) {
+    const active = this.active();
+    if (!active.ok) return active;
+    return recordHandoff(active.path, input);
+  }
+
+  saveAssumption(text) {
+    const active = this.active();
+    if (!active.ok) return active;
+    return noteAssumption(active.path, text);
+  }
+
+  setTier(tier, confirmDowngrade = false) {
+    const active = this.active();
+    if (!active.ok) return active;
+    return setAcceptance(active.path, tier, { confirmDowngrade });
   }
 
   /* ----------------------------- 手稿骨架 ----------------------------- */
@@ -2777,7 +2897,13 @@ export class Workbench {
     const active=this.active();
     if(!active.ok)return {ok:false,error:active.error};
     const previousMode=readGatePolicy(active.path)?.mode||'legacy';
-    if(Object.keys(this.runner.activeFor(active.id)).length||this.gateLeases.has(active.id))return {ok:false,error:'生产或体检正在运行，不能同时修改策略'};
+    const busy=Object.keys(this.runner.activeFor(active.id)).length||this.gateLeases.has(active.id);
+    if(busy&&action==='inspect')return this.staleInspection(active, stageId);
+    if(busy){
+      let lock={};
+      try{lock=JSON.parse(fs.readFileSync(path.join(active.path,'output/gates/publication.lock'),'utf8'));}catch{}
+      return {ok:false,error:`生产或体检正在运行，不能同时修改策略。pid=${lock.pid||'未知'}，开始于 ${lock.createdAt||'未知'}`};
+    }
     const skill=this.skill(action==='inspect'||action==='recover'?active.project.skill?.root:undefined);
     if(!skill.ok)return {ok:false,error:skill.reason};
     const common={root:active.path,skillRoot:skill.packageDir,python:this.getConfig().pythonPath};
@@ -3080,7 +3206,11 @@ export class Workbench {
       const lease = this.gateLeases.get(run?.projectId);
       try {
         if (active.ok && readGatePolicy(active.path)) {
-          const gateCheck = run.status==='cancelled'?{status:'cancelled',results:[]}:await this.inspectGates(active.id,{root: active.path, skillRoot: this.skill(active.project.skill?.root).packageDir, python: this.getConfig().pythonPath, run, lease});
+          const definition = this.stageById(run.stageId);
+          const stageIds = definition?.inspectionStages || [];
+          const gateCheck = run.status==='cancelled' || !stageIds.length
+            ? {status:'completed', results:[]}
+            : await this.inspectGates(active.id,{root: active.path, skillRoot: this.skill(active.project.skill?.root).packageDir, python: this.getConfig().pythonPath, run, lease, stageIds});
           const state = this.store.get();
           this.store.set({runs: (state.runs || []).map(r => r.id === run.id ? {...r, gateCheck} : r)});
           this.onChange({kind: 'gate-check', runId: run.id, gateCheck});

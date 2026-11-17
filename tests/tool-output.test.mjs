@@ -30,9 +30,12 @@ try{
     const blocks=definition.output.render(args,result);
     assert.equal(blocks.length,1);assert.equal(blocks[0].type,'text');return JSON.parse(blocks[0].text);
   };
-  const described=await visible('data_analysis_workflow',{action:'describe'});
+  const described=await visible('data_analysis_workflow',{action:'describe',full:true});
   assert.deepEqual(described.workflow,workflow,'the complete declaration must survive the host render step');
   assert.equal(described.workflow.stages.at(-1).steps[0].args[1],'新参数');
+  const card=await visible('data_analysis_workflow',{action:'describe'});
+  assert.equal(card.text,'当前没有任务卡');
+  assert.equal(card.workflow,undefined);
   assert.deepEqual(await visible('data_analysis_workflow',{action:'run-action',actionId:'unseen-action'}),action,'a zero production exit must not hide failed quality');
   assert.deepEqual(await visible('data_analysis_gates',{action:'evidence'}),evidence,'the model must see the exact evidence and currentness binding');
   wb.gateControl=()=>({ok:true,status:'completed',state:{gateMode:'legacy',gateModeNotice:'Compatibility is not quality approval',deliveryReady:false,

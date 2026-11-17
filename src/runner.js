@@ -208,13 +208,14 @@ export class Runner {
     live.executed = (live.executed || 0) + 1;
     live.decoder = new StringDecoder('utf8');
     live.decoderErr = new StringDecoder('utf8');
+    this.appendLog(live, `第 ${index + 1}/${(live.steps || []).length || '?'} 步\n`);
     this.appendLog(live, `${index ? '\n' : ''}$ ${[live.python, ...argv].join(' ')}\n`);
 
     let child;
     try {
       child = spawn(live.python, argv, {
         cwd: live.projectRoot,
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1',PYTHONDONTWRITEBYTECODE:'1' },
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', PYTHONDONTWRITEBYTECODE:'1', PYTHONUNBUFFERED: '1' },
         windowsHide: true,
       });
     } catch (error) {

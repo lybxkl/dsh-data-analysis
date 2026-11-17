@@ -190,6 +190,8 @@ section('三、并发阶段守卫');
   check('先起 figures', first.ok === true, first.error || '');
 
   await sleep(250);
+  fs.mkdirSync(path.join(bench.proj, 'docs', 'decisions'), { recursive: true });
+  fs.writeFileSync(path.join(bench.proj, 'docs', 'decisions', 'figure-selection.md'), '正文图：图1\n');
   const second = bench.wb.runStage('manuscript', { force: false });
   const reason = (second.blockers || []).join('；') || second.error || '';
   check('manuscript 被拒', second.ok === false, reason);

@@ -197,6 +197,28 @@ export function evaluateHostProject(context) {
   addHostFacts(fact('recheck-machine',state,'复用当前技能事实及真实代码复核',{checks:machine}));
   addHostFacts(fact('recheck-coverage',complete&&state==='pass'?'pass':'unjudged','覆盖记录不能覆盖机器事实，也不能继承旧快照'));
   assignHostFacts();
+  const tierRank = { explore: 1, submission: 2, archive: 3 };
+  let projectTier = '';
+  try {
+    projectTier = JSON.parse(fs.readFileSync(path.join(root, '.workbench', 'acceptance.json'), 'utf8')).tier || '';
+  } catch { /* 未写验收档时不豁免任何判据 */ }
+  let tierByGate = new Map();
+  try {
+    const catalog = strictJson(fs.readFileSync(safePath(workflow.root, 'contracts/gates/catalog.json'), 'utf8'));
+    tierByGate = new Map(catalog.gates.map((gate) => [gate.id, gate.minTier || 'explore']));
+  } catch { /* 目录读不到时保持原判定 */ }
+  if (tierRank[projectTier]) {
+    for (const stage of stages) {
+      for (const gate of stage.gates) {
+        const minimum = tierByGate.get(gate.id);
+        if (minimum && tierRank[minimum] > tierRank[projectTier]) {
+          gate.status = 'na';
+          gate.detail = `当前验收档 ${projectTier} 不适用（此判据属于 ${minimum}）`;
+          gate.applicability = gate.applicability || { rule: `minTier:${minimum}` };
+        }
+      }
+    }
+  }
   for(const s of stages){
     if(activeRuns[s.id])continue;
     const assessed=s.gates.filter(g=>g.level!=='info');

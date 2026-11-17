@@ -320,7 +320,8 @@ check('store.js：armings 有默认结构（老台账升级不炸）', () => {
 });
 check('prompt.js：讲清触发门，且不再把「聊到数据」当启用', () => {
   assert.match(PROMPT, /按对话启用/);
-  assert.match(PROMPT, /已启用后先读取.*data_analysis_workflow/);
+  assert.match(PROMPT, /已启用后调用 data_analysis_status，以它返回的任务卡为唯一规程/);
+  assert.match(PROMPT, /data_analysis_workflow/);
   assert.ok(!PROMPT.includes('### 标准动作'), '旧标题会把它读成常驻指令');
   assert.ok(!PROMPT.includes('用户提到数据/资料/编码/统计/图表/论文'), '旧的触发句必须删掉');
   assert.match(PROMPT, /不会自动授权开工/);

@@ -19,6 +19,7 @@ import { analysisFile, assessPalette, readCsv, statOf } from './audit.js';
 import { workflowFor } from './workflow.js';
 import { verifyAuditRows } from './fingerprint.js';
 import { recheckSummary } from './recheck.js';
+import { resolveSkillRoot } from './skill.js';
 import { evaluateAssert, projectPath } from './registry.js';
 import { analyseInAnalysis, readSampleSettings } from './sample.js';
 import { verifyMounts } from './sources.js';
@@ -26,6 +27,46 @@ import { readVisionLog } from './vision.js';
 
 function gate(id, label, level, status, detail, extra = {}) {
   return { id, label, level, status, detail, ...extra };
+}
+
+const TIER_RANK = { explore: 1, submission: 2, archive: 3 };
+
+function acceptanceTier(root) {
+  try {
+    const value = JSON.parse(fs.readFileSync(path.join(root, '.workbench', 'acceptance.json'), 'utf8'));
+    return TIER_RANK[value?.tier] ? value.tier : '';
+  } catch {
+    return '';
+  }
+}
+
+function gateTierMap(skillRoot) {
+  const resolved = resolveSkillRoot(skillRoot || '');
+  const dir = resolved.ok ? resolved.packageDir : '';
+  if (!dir) return new Map();
+  try {
+    const catalog = JSON.parse(fs.readFileSync(path.join(dir, 'contracts', 'gates', 'catalog.json'), 'utf8'));
+    const map = new Map();
+    for (const item of catalog.gates || []) map.set(item.id, item.minTier || 'explore');
+    return map;
+  } catch {
+    return new Map();
+  }
+}
+
+/** 低于项目验收档的判据改为不适用，避免可选归档项把阶段停在待看。 */
+function applyAcceptanceTier(root, skillRoot, gates) {
+  const tier = acceptanceTier(root);
+  if (!tier) return gates;
+  const mins = gateTierMap(skillRoot);
+  if (!mins.size) return gates;
+  for (const item of gates) {
+    const minimum = mins.get(item.id);
+    if (!minimum || TIER_RANK[minimum] <= TIER_RANK[tier]) continue;
+    item.status = 'na';
+    item.detail = `当前验收档 ${tier} 不适用（此判据属于 ${minimum}）`;
+  }
+  return gates;
 }
 
 /** 目标路径是否落在 base 里面（含 base 本身）。 */
@@ -2015,6 +2056,8 @@ export function evaluateProject({ projectRoot, project, artifacts, adjudications
         }
       }
     }
+
+    applyAcceptanceTier(projectRoot, skillRoot, gates);
 
     // 运行态：有 active run 的 stage 直接标 running
     const active = activeRuns[def.id];

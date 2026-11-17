@@ -183,6 +183,7 @@ function manuscriptBench() {
     'scripts/assemble_manuscript.py': ASSEMBLE_SCRIPT,
     'scripts/export_pdf_hires.py': PDF_SCRIPT,
     'manuscript.json': JSON.stringify({ blocks: [{ type: 'para', text: '正文' }] }),
+    'docs/decisions/figure-selection.md': '正文图：图1\n',
     'project.json': JSON.stringify({ name: '组稿回归', schemaVersion: 2, contract: { version: 2, mode: 'strict' } }),
   });
   return { root, ...benchFor(root) };
@@ -225,6 +226,7 @@ await (async () => {
   const root = makeProject({
     'scripts/assemble_manuscript.py': 'print("no map")\n',
     'scripts/export_pdf_hires.py': PDF_SCRIPT,
+    'docs/decisions/figure-selection.md': '正文图：图1\n',
     'project.json': JSON.stringify({ name: '无图映射', schemaVersion: 2 }),
   });
   const { wb, ledger } = benchFor(root);

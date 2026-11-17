@@ -70,7 +70,7 @@ const ALLOWED = new Set(['pass', 'fail', 'unjudged', 'na']);
 check('空项目能判，且不抛异常', () => {
   const root = makeProject();
   const { stages, all } = judge(root);
-  assert.equal(stages.length, 10);
+  assert.equal(stages.length, 11);
   for (const g of all) assert.ok(ALLOWED.has(g.status), `闸门 ${g.id} 状态异常：${g.status}`);
   for (const stage of stages) assert.ok(['todo', 'review', 'blocked', 'done', 'running'].includes(stage.status), `阶段 ${stage.id} 状态异常`);
 });
@@ -101,7 +101,7 @@ check('没干过活的阶段是 todo，且 gateTotals 跳过 todo', () => {
   assert.ok(totals.fail >= 1, 'todo 阶段的 fail 一个都不该进总数，非 todo 的必须如实计入');
   const counts = summarizeStages(stages);
   const sum = Object.values(counts).reduce((n, v) => n + v, 0);
-  assert.equal(sum, 10, '十个阶段都要被归类');
+  assert.equal(sum, 11, '每个阶段都要被归类');
 });
 
 // ── 2. 审计是否新鲜 ────────────────────────────────────────────────
@@ -424,7 +424,7 @@ check('manuscript.json 里有 null 块时，复核不把整个面板打挂', () 
     'manuscript.json': JSON.stringify({ blocks: [null, { type: 'figure', png: 'figures/x.png' }] }),
   });
   const { stages, all } = judge(root);
-  assert.equal(stages.length, 10);
+  assert.equal(stages.length, 11);
   for (const g of all) assert.ok(ALLOWED.has(g.status), `闸门 ${g.id} 状态异常：${g.status}`);
   assert.ok(stages.find((stage) => stage.id === 'recheck'), '复核阶段仍在');
 });

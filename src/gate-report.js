@@ -273,6 +273,24 @@ export function reportBlockers(stages,root,checkpoint,options){
   return gateAdmission(stages,root,checkpoint,options).blockingInstances.map(instance=>instance.detail);
 }
 
+function acceptanceTier(root){
+  try{
+    const value=JSON.parse(fs.readFileSync(path.join(root,'.workbench','acceptance.json'),'utf8'));
+    return ['explore','submission','archive'].includes(value?.tier)?value.tier:'';
+  }catch{return '';}
+}
+
+function catalogMinTiers(root){
+  try{
+    const project=read(safePath(root,'project.json'));
+    const dir=project.skill?.root;
+    if(!dir)return null;
+    const skill=fs.existsSync(path.join(dir,'SKILL.md'))?dir:path.join(dir,'empirical-research-pipeline');
+    const catalog=read(path.join(skill,'contracts','gates','catalog.json'));
+    return new Map((catalog.gates||[]).map(gate=>[gate.id,gate.minTier||'explore']));
+  }catch{return null;}
+}
+
 export function gateAdmission(stages,root,checkpoint,{reportStages=null}={}){
   const result={allowed:true,checkpoint,blockingInstances:[],pendingInstances:[],repairStages:[],validatedGeneration:[]};
   function invalid(detail){result.allowed=false;result.blockingInstances.push({gateId:'platform.policy',detail});return result;}
@@ -280,7 +298,11 @@ export function gateAdmission(stages,root,checkpoint,{reportStages=null}={}){
   if(policy.invalid)return invalid('门禁策略无效');
   if(stages.some(s=>s.gates.some(g=>g.id==='platform.policy')))return invalid('策略与当前判据目录不兼容，请显式迁移');
   const target=CHECKPOINTS.indexOf(checkpoint);if(target<0)return invalid('未知检查点');
+  const tier=acceptanceTier(root);
+  const minTiers=tier?catalogMinTiers(root):null;
+  const rank={explore:1,submission:2,archive:3};
   for(const r of policy.requirements.filter(r=>r.required!==false&&CHECKPOINTS.indexOf(r.blockingAt)<=target&&(!reportStages||reportStages.includes(r.reportStage)))){
+    if(minTiers&&rank[minTiers.get(r.gateId)||'explore']>rank[tier])continue;
     const g=stages.find(s=>s.id===r.displayStage)?.gates.find(g=>g.id===r.gateId);
     if(g?.reportId)result.validatedGeneration.push({stage:r.reportStage,generation:g.generation,reportId:g.reportId});
     if(g?.status==='pass'||(r.allowNa&&g?.status==='na'&&g.applicability))continue;
