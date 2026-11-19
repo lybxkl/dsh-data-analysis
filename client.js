@@ -1,4 +1,21 @@
-/** * 实证研究工作台 · Client 半片（单文件、零构建） * * 视觉目标（ui-spec.md）： *  - 纸白底、藏青强调、无渐变无阴影；数字等宽；顶栏 44px、左阶段栏 296px、右运行台 352px。 *  - 三态贯穿：✓ 通过 / ✗ 未过 / ? 判不了。「判不了」用灰点 + 「未核」，绝不画成绿色。 * * 数据契约（与 Host 半片 src/routes.js 严格一致）： *  GET  /data-analysis/api/state *  POST /data-analysis/api/project/create | open | close *  POST /data-analysis/api/stage/run | stage/cancel *  GET  /data-analysis/api/run/log?id= *  POST /data-analysis/api/adjudicate | config */(function () {  var MODULE_ID = '@local/dsh-data-analysis';  var API = '/data-analysis/api';  window.__ModuleLoader__.load({
+/**
+ * 实证研究查看器 · Client 半片（单文件、零构建）。
+ *
+ * 只做两件事：看目录进度、看文件。没有阶段、没有闸门、没有运行按钮。
+ * 数据契约（与 Host src/routes.js 一致）：
+ *   GET  /data-analysis/api/state?workspaceId=
+ *   GET  /data-analysis/api/artifacts/tree?workspaceId=
+ *   GET  /data-analysis/api/artifacts/file?path=&workspaceId=
+ *   GET  /data-analysis/api/artifacts/raw?path=&workspaceId=
+ *   POST /data-analysis/api/workspace | workspace/forget | config
+ *   GET  /data-analysis/api/session/project?sessionId=
+ */
+(function () {
+  var MODULE_ID = '@local/dsh-data-analysis';
+  var API = '/data-analysis/api';
+  var POLL_MS = 4000;
+
+  window.__ModuleLoader__.load({
     id: MODULE_ID,
     factory: function factory(require) {
       var React = require('react');
@@ -8,272 +25,98 @@
       var useMemo = React.useMemo;
       var useRef = React.useRef;
       var useCallback = React.useCallback;
+
       /* ------------------------------------------------------------------ *
        * 文案
        * ------------------------------------------------------------------ */
       var ZH = {
-        title: '实证研究工作台',
-        subtitle: '按阶段跑技能、看证据、在交付前拦住不合格项',
+        title: '实证研究查看器',
         refresh: '刷新',
-        refreshing: '读取中…',
-        open: '打开项目',
-        create: '新建项目',
+        bind: '绑定目录',
+        bindConfirm: '绑定',
         settings: '设置',
         close: '关闭',
         cancel: '取消',
-        confirm: '确定',
         save: '保存',
         saving: '保存中…',
         retry: '重试',
-        emptyTitle: '从一个资料目录开始',
-        emptyHint: '工作台不写论文，它负责跑技能包、把每一步的产物和闸门摆出来。新建项目后把 PDF / Word / Excel 放进 data/，从第 1 步往下走。',
-        dirLabel: '项目目录',
-        dirPh: '如 F:\\研究\\2026-数字政府',
-        pick: '选择…',
+        remove: '移除',
+        workspaces: '工作区',
+        noWorkspaceTitle: '还没有绑定工作区',
+        noWorkspaceHint: '绑定一个研究产物目录，插件只读展示。',
+        bindTitle: '绑定工作区',
+        bindDir: '目录',
+        bindDirPh: '如 F:\\研究\\2026-数字政府',
+        bindName: '名称',
+        bindNamePh: '默认取目录名+日期',
+        bindHint: '已有或新目录均可，插件不写入该目录。',
+        pick: '选择',
         picking: '选择中…',
         pickTitle: '在弹出的系统窗口里选一个文件夹',
-        pickUnsupported: '这个环境没有提供文件夹选择器（例如远程浏览器或精简安装），请手动粘贴路径。',
-        nameLabel: '项目名（可空）',
-        namePh: '默认取目录名',
-        createHint: '目录必须是空的；会创建 data / docs / output / scripts / runs 与 project.json。',
-        openHint: '目录里要有 project.json（工作台建过的项目）。',
-        stageEmpty: '选择左侧一个阶段查看闸门与产物',
-        run: '运行本阶段',
-        rerun: '重跑',
-        running: '运行中…',
-        cancelRun: '取消运行',
-        noScript: '本阶段没有登记脚本：由人/模型完成，工作台只做验收',
-        command: '命令',
-        gates: '闸门',
-        gatesTodoNote: '该阶段还没开始。下面是开工后要逐条过的闸门，此时的 ✗ 只表示产物还没生成，不是判定结果。',
-        artifacts: '产物',
-        logs: '运行台',
-        noRuns: '还没有运行记录',
-        logEmpty: '选择一条运行查看日志',
-        gatePass: '通过',
-        gateFail: '未过',
-        gateUnjudged: '未核',
-        manual: '人工',
-        adjudicate: '裁定',
-        adjudicateTitle: '人工裁定',
-        adjudicateHint: '机器能判的事实不允许改写；这里只记录「人看过之后」的结论。',
-        note: '理由（写进台账）',
-        pass: '通过',
-        fail: '不通过',
-        clear: '撤销裁定',
-        skillOk: '技能包就位',
-        skillMissing: '技能包未就位',
-        skillRoot: '技能包目录',
-        pythonPath: 'Python 命令',
-        skillDrift: '项目记录的 SKILL.md 指纹与当前技能包不一致，旧产物可能来自旧版本',
-        blocked: '被拦住',
-        review: '待裁定',
-        done: '已完成',
-        todo: '未开始',
-        na: '不适用',
-        runningState: '运行中',
-        stageRunOk: '最近一次运行成功',
-        stageRunFail: '最近一次运行失败',
-        stageRunCancelled: '最近一次运行已取消',
-        figures: '图表清单',
-        flow: '样本流程',
-        models: '模型',
-        verify: '数字溯源',
-        noFigures: '还没有图表清单',
-        noFlow: '还没有 sample_flow',
-        noModels: '还没有模型产物',
-        noVerify: '还没有数字溯源报告',
-        dpi: 'dpi',
-        font: '字号',
-        palette: '配色',
-        file: '文件',
-        nLabel: 'N',
-        notMeasured: '未测',
-        notDeclared: '未声明',
-        missing: '缺失',
-        unitFigures: '张图',
-        project: '项目',
-        skill: '技能包',
-        totalGates: '闸门',
-        drawer: '运行台',
-        closeDrawer: '收起',
-        health: '状态',
-        created: '已创建',
+        pickUnsupported: '当前环境没有文件夹选择器，请手动粘贴路径。',
+        settingsTitle: '设置',
+        dataDirLabel: '台账目录（dataDir）',
+        dataDirHint: '留空使用默认位置，切换后读取另一份工作区台账。',
+        forgetTitle: '移除工作区登记',
+        forgetHint: '只从台账移除，不删除磁盘目录。',
+        forgetConfirm: '移除登记',
+        progress: '产物目录',
+        noProgress: '暂无产物',
+        filter: '仅看',
+        filterFiles: '筛选文件名/标题',
+        clearFilter: '清除',
+        loading: '读取中…',
         loadFail: '读取失败',
-        actionFail: '操作失败',
-        okMark: '✓',
-        failMark: '✗',
-        unknownMark: '?',
-        preflight: '环境自检',
-        envFail: '环境未就绪',
-        envWarn: '环境可用，但有降级',
-        envPending: '正在检查运行环境…',
-        recheck: '重新检查',
-        envHint: '技能包与 Python 依赖在启动时自动检查；缺了可以点「让 AI 装好环境」，它会自己 clone 技能包、装依赖（没有 Python 连 Python 一起装）。',
-        checkedAt: '检查时间',
-        advice: '处理建议',
-        draft: 'AI 起草',
-        draftTitle: '用 DSH 模型起草',
-        draftHint: '工作台只读项目产物拼上下文；模型没有工具，不会运行脚本，也不会编造数字。写入前请人工核对。',
-        draftModel: '模型',
-        modelFollow: '跟随 DSH 默认',
-        modelCustom: '自定义模型',
-        modelProvider: '提供方',
-        modelName: '模型',
-        modelUnavailable: '模型不可用',
-        draftTask: '起草任务',
-        draftInstruction: '补充要求',
-        draftInstructionPh: '例如：重点说明 in_analysis 口径；图注必须含 N',
-        generate: '生成',
-        generating: '生成中…',
-        copy: '复制',
-        write: '写入',
-        written: '已写入',
-        draftEmpty: '还没有内容：填好要求后点「生成」。',
-        draftSaved: '已写入项目文件',
-        modelsFail: '读取模型列表失败',
-        researchChat: '研究对话',
-        chatNone: '还没有绑定会话。点「开始研究对话」会在项目目录里建一个真正的 DSH 会话。',
-        chatBound: '已绑定 DSH 会话',
-        chatRunning: 'AI 正在干活…',
-        chatIdle: '会话空闲',
-        startChat: '开始研究对话',
-        openChat: '打开对话',
-        askAI: '让 AI 做这一步',
-        askAIHint: '把当前阶段的现状、命令、约束和期望产物投递到这条会话，并切到原生对话；AI 正在跑时会排队',
-        aiSent: '任务卡已投递，已切到对话',
-        aiFailed: '投递任务卡失败',
-        chatUnavailable: 'DSH 会话服务不可用（宿主没暴露 sessions）',
-        chatNoProject: '先打开一个项目',
-        nextStep: '运行',
-        nextAllDone: '全部完成',
-        nextStarting: '启动中…',
-        nextStarted: '已启动',
-        nextStartFailed: '启动失败',
-        nextStateRunning: '运行中',
-        nextStateManual: '待人工',
-        nextStateBlocked: '被拦住',
-        nextStateReview: '待裁定',
-        tailTitle: '工作台',
-        tailOpen: '打开',
-        chatCardTitle: '研究对话',
-        chatSessionShort: '会话',
-        // 左栏每个项目下面那一小条：项目 = 目录 + 它的研究对话，两件事都要一眼看见
-        projChat: '研究对话',
-        projChatNew: '还没有',
-        projChatBound: '已绑定',
-        projChatCurrent: '当前对话',
-        projChatRunning: '运行中',
-        projChatDirGone: '目录不见了',
-        projChatBoundHint: '进入这个项目的研究对话（DSH 会话：{id}）',
-        projChatCurrentHint: '右上角那条对话就属于这个项目（DSH 会话：{id}）：点一下回到它',
-        projChatNewHint: '这个项目还没有研究对话：点一下在项目目录里建一条并进入',
-        projChatGoneHint: '项目目录不见了，先恢复目录或从列表移除',
-        headerChat: '对话',
-        headerChatHint: '打开当前项目的研究对话：已绑定就直接进去，没有就建一条',
-        sessionGone: '会话已不存在，请重新开始研究对话',
-        retryChat: '重新建会话',
-        nextTitle: '全局下一步',
-        nextRun: '运行',
-        nextGo: '去这里',
-        nextAdjudicate: '去裁定',
-        nextInspect: '去查看',
-        nextAllDoneText: '十个阶段都已完成',
-        nextRunning: '正在运行',
-        nextBlocked: '被拦住',
-        nextReview: '待人工确认',
-        nextTodo: '还没开始',
-        nextAskAI: '让 AI 做这一步',
-        nextDraft: '让 AI 起草',
-        stageSelect: '阶段',
-        expected: '要产出',
-        noArtifacts: '这一阶段还没有可解析的产物。看上面的闸门与命令，跑一次或把产物放到预期路径再刷新。',
-        figPass: '达标',
-        figFail: '不达标',
-        figUnjudged: '待核',
-        figFontNote: '字号需要 PDF 文字层才能测，PNG 清单只能记「未核」。',
-        showAll: '显示全部',
-        collapse: '收起',
-        copyCmd: '复制命令',
-        copied: '已复制',
-        coefficients: '个系数',
-        inAnalysisLabel: 'in_analysis',
-        excludedLabel: '排除',
-        reportErrors: 'error',
-        reportWarnings: 'warning',
-        patchTitle: '套用补丁',
-        patchTarget: '将覆盖',
-        patchBase: '基线哈希',
-        patchBackup: '覆盖前会自动备份到 output/recheck/diffs。',
-        patchApply: '覆盖并重跑',
-        patchChanged: '补丁内容（前 24 行）',
-        aiReview: '让 AI 复核',
-        aiReviewHint: '把 12 项复算、已有问题与项目脚本交给模型，让它写 issues.jsonl 与覆盖表；工作台不替模型改产物',
-        chainRunning: '重跑中',
-        chainWaiting: '等人工步骤',
-        chainDone: '已跑完',
-        chainStopped: '已停下',
-        chainCancelled: '已取消',
-        chainStep: '步',
-        chainNoSteps: '没有需要重跑的下游阶段',
-        issueOpen: '待处理',
-        issueFixed: '已修',
-        issueWontfix: '不修',
-        issueDeferred: '延后',
-        severityError: '错误',
-        severityWarning: '警告',
-        severityInfo: '提示',
-        fixEditText: '改文本',
-        fixEditCode: '改脚本',
-        fixRerun: '重跑',
-        fixAcceptRisk: '接受风险',
-        fixAskUser: '问用户',
-        coverageTitle: '覆盖表',
-        coverageChecked: '已核',
-        runExit: '退出码',
-        runNoLog: '这次运行没有日志',
-        pipelineLegend: '完成 = 闸门全过；待裁定 = 有人工项或警告；被拦住 = 有 error 级未过',
-        stageOf: '阶段'      };
+        treeEmpty: '暂无文件',
+        treeMissing: '目录不存在或暂时无法读取。',
+        tabFigures: '图',
+        tabTables: '表',
+        tabDocs: '文档',
+        tabAll: '全部',
+        tabCode: 'code',
+        download: '下载',
+        openNew: '新窗口打开',
+        prev: '上一张（←）',
+        next: '下一张（→）',
+        tableRows: '行',
+        tableCols: '列',
+        tableTruncated: '仅显示前 200 行，可下载完整文件。',
+        docHint: 'Word 文档请下载后查看。',
+        imageUnsupported: '该格式无法在线预览，请下载原文件。',
+        rawUnsupported: '该文件无法在线预览，请下载原文件。',
+        scriptsHint: '暂无脚本',
+        fileCount: '个文件',
+        dirMissing: '目录不存在',
+        at: '最近',
+        nothingYet: '暂无更新',
+        justNow: '刚刚',
+        minutesAgo: '分钟前',
+        hoursAgo: '小时前',
+        daysAgo: '天前',
+        workspaceUnavailable: '工作区不可用',
+        unviewable: '无法在线预览，请下载原文件。',
+        emptyTab: '暂无文件',
+        emptyPrefix: '该目录暂无文件',
+        treeHint: '产物写入 output/ 后会自动出现。',
+        tooMany: '仅显示前 200 个，共 %n 个。',
+        preview: '预览',
+        dirRequired: '请先选择目录',
+      };
       function t(key) {
         return ZH[key] || key;
       }
-      var STATUS_TEXT = {
-        done: 'done',
-        blocked: 'blocked',
-        review: 'review',
-        todo: 'todo',
-        na: 'na',
-        running: 'runningState'      };
-      // 复核区原来直接显示英文枚举，人看不懂；这里统一成中文
-      var ISSUE_STATUS = { open: 'issueOpen', fixed: 'issueFixed', wontfix: 'issueWontfix', deferred: 'issueDeferred' };
-      var SEVERITY_TEXT = { error: 'severityError', warning: 'severityWarning', info: 'severityInfo' };
-      var FIX_KIND_TEXT = {
-        'edit-text': 'fixEditText',
-        'edit-code': 'fixEditCode',
-        rerun: 'fixRerun',
-        'accept-risk': 'fixAcceptRisk',
-        'ask-user': 'fixAskUser'      };
-      var CHAIN_STATUS = { running: 'chainRunning', waiting: 'chainWaiting', done: 'chainDone', stopped: 'chainStopped', cancelled: 'chainCancelled' };
-      var RUN_WORD = { ok: '成功', failed: '失败', cancelled: '已取消', running: '运行中', interrupted: '被中断' };
-      // 面板阶段 → AI 起草任务的对应关系：没有脚本的阶段，主按钮应该直接把起草任务打开
-      function hasPanel(stage,panel){return Boolean(stage&&stage.ui&&stage.ui.panels&&stage.ui.panels.indexOf(panel)>=0);}
-      function fmtTime(iso) {
-        if (!iso) return '';
-        var date = new Date(iso);
-        if (isNaN(date.getTime())) return String(iso);
-        var pad = function (n) { return String(n).padStart(2, '0'); };
-        return pad(date.getMonth() + 1) + '-' + pad(date.getDate()) + ' ' + pad(date.getHours()) + ':' + pad(date.getMinutes());
-      }
-      function fmtSpan(from, to) {
-        if (!from) return '';
-        var start = new Date(from).getTime();
-        var end = to ? new Date(to).getTime() : Date.now();
-        if (isNaN(start) || isNaN(end) || end < start) return '';
-        var sec = Math.round((end - start) / 1000);
-        if (sec < 60) return sec + ' 秒';
-        var min = Math.floor(sec / 60);
-        var rest = sec % 60;
-        return min + ' 分' + (rest ? ' ' + rest + ' 秒' : '');
+
+      /* ------------------------------------------------------------------ *
+       * 基础工具
+       * ------------------------------------------------------------------ */
+      function agoText(ms) {
+        var value = Number(ms || 0);
+        if (!value) return t('nothingYet');
+        var diff = Date.now() - value;
+        if (diff < 60 * 1000) return t('justNow');
+        if (diff < 60 * 60 * 1000) return Math.floor(diff / 60000) + ' ' + t('minutesAgo');
+        if (diff < 24 * 60 * 60 * 1000) return Math.floor(diff / 3600000) + ' ' + t('hoursAgo');
+        return Math.floor(diff / 86400000) + ' ' + t('daysAgo');
       }
       function sizeText(bytes) {
         var n = Number(bytes || 0);
@@ -282,11 +125,68 @@
         if (n < 1024 * 1024) return Math.round(n / 1024) + ' KB';
         return (n / 1024 / 1024).toFixed(1) + ' MB';
       }
-      /** 项目登记的 DSH 会话：宿主台账优先，其次本地副本（宿主还是旧进程时靠它）。 */
-      function projectChatId(project) {
-        if (!project) return '';
-        return project.sessionId || SESSION_HINTS.get(project.id) || '';
+      function extOf(rel) {
+        var hit = String(rel || '').match(/\.[^./\\]+$/);
+        return hit ? hit[0].toLowerCase() : '';
       }
+      function cardLabel(entry) {
+        return (entry && entry.title) || (entry && entry.name) || '';
+      }
+      function downloadLabel(entry) {
+        if (!entry) return '';
+        return entry.title ? entry.title + (entry.ext || '') : entry.name;
+      }
+      function pageVisible() {
+        try {
+          if (typeof document === 'undefined') return true;
+          if (typeof document.visibilityState === 'string') return document.visibilityState === 'visible';
+          return document.hidden !== true;
+        } catch (error) {
+          return true;
+        }
+      }
+
+      var VIEWABLE_IMAGE = /^\.(png|jpe?g|webp|gif|bmp|avif)$/i;
+      var HIDDEN_TWIN_EXT = /^\.(tiff?|hei[cf])$/i;
+      var CODE_EXTS = /^\.(py|r|jl|do|sps|json|md)$/i;
+
+      function artifactQuery(rel, wsId) {
+        var q = '?path=' + encodeURIComponent(rel);
+        if (wsId) q += '&workspaceId=' + encodeURIComponent(wsId);
+        return q;
+      }
+      function artifactRawUrl(rel, download, wsId, version) {
+        return API + '/artifacts/raw' + artifactQuery(rel, wsId)
+          + (version ? '&v=' + encodeURIComponent(version) : '')
+          + (download ? '&download=1' : '');
+      }
+      function artifactStem(rel) {
+        return String(rel || '').replace(/\.[^./\\]+$/, '');
+      }
+      function artifactTwins(files) {
+        var list = files || [];
+        var byStem = {};
+        list.forEach(function (entry) {
+          var stem = artifactStem(entry.rel);
+          (byStem[stem] || (byStem[stem] = [])).push(entry);
+        });
+        var hide = {};
+        var twinOf = {};
+        Object.keys(byStem).forEach(function (stem) {
+          var bucket = byStem[stem];
+          var preview = bucket.filter(function (entry) {
+            return VIEWABLE_IMAGE.test(entry.ext) && entry.viewable !== false;
+          })[0];
+          if (!preview) return;
+          bucket.forEach(function (entry) {
+            if (!HIDDEN_TWIN_EXT.test(entry.ext) || entry.rel === preview.rel) return;
+            hide[entry.rel] = true;
+            if (!twinOf[preview.rel] || extOf(entry.rel) === '.tiff') twinOf[preview.rel] = entry.rel;
+          });
+        });
+        return { hide: hide, twinOf: twinOf };
+      }
+
       /* ------------------------------------------------------------------ *
        * HTTP
        * ------------------------------------------------------------------ */
@@ -305,102 +205,14 @@
           });
         });
       }
-      function getState() {
-        return request('GET', '/state');
-      }
-      // sessionId 可选：对话里的徽章带着它问，宿主按「这条对话自己的项目」回答
-      function getSummary(sessionId) {
-        return request('GET', '/summary' + (sessionId ? '?sessionId=' + encodeURIComponent(sessionId) : ''));
-      }
+
       /* ------------------------------------------------------------------ *
-       * 研究对话：与 DSH 原生会话的桥
-       *
-       * 不实现聊天：会话、消息流、输入框、附件、工具卡都由宿主承担。
-       * 工作台只做三件事——建/绑会话、投递任务卡、在原生对话里加工作台动作。
+       * 宿主服务
        * ------------------------------------------------------------------ */
-      var runtime = { ctx: null, ref: null };
-      // 投卡去重记录：按项目路径存最近一次指纹。放模块作用域，面板卸载/切到对话后仍在。
-      var CARD_LOG = {};
-      /**
-       * 上一次拿到的快照。
-       *
-       * 面板每挂载一次都要重新 GET /state（宿主那边是全项目的只读扫描，面板侧省不掉），
-       * 但不该让用户先看一帧「从一个资料目录开始」再等数据回来——那是「重进一次空工作台」的错觉。
-       * 放模块作用域：面板卸载后这份还在，重进时第一帧就能拿它渲染，新快照到了照常覆盖。
-       * 只当渲染占位用，不参与任何判定：闸门三态永远以新快照为准。
-       */
-      var SNAPSHOT_CACHE = null;
-      /**
-       * 项目 → DSH 会话 id 的本地副本。
-       *
-       * 权威记录在宿主台账（/state 的 projects[].sessionId）。但宿主是旧进程时那个字段不在，
-       * 而「这个项目有没有对话、点一下能不能进去」是左栏每行都要显示的东西，不能等重启。
-       * 所以每次绑定/进对话都往这里记一份，界面先据此显示，快照里有值就以快照为准。
-       */
-      var SESSION_HINTS = (function () {
-        var KEY = 'dsh.data-analysis.sessionHints';
-        var map = {};
-        try {
-          var raw = window.localStorage.getItem(KEY);
-          var parsed = raw ? JSON.parse(raw) : null;
-          if (parsed && typeof parsed === 'object') map = parsed;
-        } catch (e) {
-          /* 隐私模式 / 无 storage：只丢跨刷新的记忆，不影响这次能用 */
-        }
-        return {
-          get: function (id) {
-            return (id && map[id]) || '';
-          },
-          set: function (id, sessionId) {
-            if (!id) return;
-            if (sessionId) {
-              if (map[id] === sessionId) return;
-              map[id] = sessionId;
-            } else {
-              if (!Object.prototype.hasOwnProperty.call(map, id)) return;
-              delete map[id];
-            }
-            try {
-              window.localStorage.setItem(KEY, JSON.stringify(map));
-            } catch (e) {
-              /* 存不下就只留内存版本 */
-            }
-          }
-        };
-      })();
-      /**
-       * 「现在屏幕上是哪条原生对话」。
-       *
-       * 面板切到工作台之后，会话头部那个按钮就卸载了，面板也就看不到 conversation 了；
-       * 所以这个值只记「刚才那条」，卸载时不清空。宿主那边也有同一份事实（/chat/focus），
-       * 面板跟着宿主走，这里只是给同屏渲染用。
-       */
-      var CURRENT_CHAT = { id: '', at: 0 };
-      // 每条会话只上报一次：面板要的是「现在跟哪条」，不是每次渲染都敲一下宿主
-      var FOCUS_SENT = {};
-      /**
-       * 用户在工作台里手动点开过项目：这条对话就不要再被「跟着对话」拽回来。
-       * 按会话记（chatId），换了对话自然失效——「不能随意切换」指的是绑定，不是禁止浏览。
-       */
-      var FOLLOW_SKIP = { chatId: '', path: '' };
-      // 上一次在屏幕上的是哪条对话：判断「换了一条对话」用（面板反复挂载，这个记忆不能放 ref）
-      var LAST_FOCUS_CHAT = '';
-      function noteCurrentChat(sessionId) {
-        var id = String(sessionId || '');
-        if (!id) return;
-        if (CURRENT_CHAT.id !== id) CURRENT_CHAT.at = Date.now();
-        CURRENT_CHAT.id = id;
-      }
-      function reportFocus(sessionId) {
-        var id = String(sessionId || '');
-        noteCurrentChat(id);
-        if (!id || FOCUS_SENT[id]) return;
-        FOCUS_SENT[id] = true;
-        request('POST', '/chat/focus', { sessionId: id }).catch(function () {
-          // 上报失败只是面板跟不过去，不打扰用户；下次挂载再试
-          FOCUS_SENT[id] = false;
-        });
-      }
+      var runtime = { ctx: null };
+      var CURRENT_CHAT = { id: '' };
+      // 面板重新挂载时先用上一帧渲染，避免闪一下空态；新快照到达后照常覆盖。
+      var STATE_CACHE = { state: null, tree: null };
       function svc(name) {
         var ctx = runtime.ctx;
         if (!ctx) return null;
@@ -409,130 +221,27 @@
             var hit = ctx.get(name);
             if (hit) return hit;
           }
-        } catch (e) {
+        } catch (error) {
           /* fall through */
         }
-        // 旧版 context 没有 get，服务挂在 reflect 上；比直接读属性稳（属性名可能被 getter 拦）
         try {
           if (ctx.reflect && typeof ctx.reflect.get === 'function') {
             var viaReflect = ctx.reflect.get(name);
             if (viaReflect) return viaReflect;
           }
-        } catch (e) {
+        } catch (error) {
           /* fall through */
         }
-        // 少数宿主形态里 client context 不暴露 get，直接按名字取一次
         try {
           return ctx[name] || null;
-        } catch (e) {
+        } catch (error) {
           return null;
         }
       }
-      function sessionService() {
-        return svc('sessions');
-      }
-      function releaseRef() {
-        var ref = runtime.ref;
-        runtime.ref = null;
-        if (ref && typeof ref.release === 'function') {
-          try {
-            ref.release();
-          } catch (e) {
-            /* ignore */
-          }
-        }
-      }
-      function ensureRef(sessionId) {
-        if (!sessionId) return Promise.reject(new Error(t('chatNoProject')));
-        var sessions = sessionService();
-        if (!sessions || typeof sessions.retain !== 'function') {
-          return Promise.reject(new Error(t('chatUnavailable')));
-        }
-        if (runtime.ref && runtime.ref.sessionId === sessionId) return Promise.resolve(runtime.ref);
-        releaseRef();
-        var ref = sessions.retain(sessionId, { source: 'gateway' });
-        runtime.ref = ref;
-        return Promise.resolve(ref.ready).then(function () {
-          return ref;
-        }).catch(function (error) {
-          if (runtime.ref === ref) runtime.ref = null;
-          try {
-            ref.release();
-          } catch (e) {
-            /* ignore */
-          }
-          throw error;
-        });
-      }
-      function createSession(cwd) {
-        var sessions = sessionService();
-        if (!sessions || typeof sessions.create !== 'function') {
-          return Promise.reject(new Error(t('chatUnavailable')));
-        }
-        // 没有项目目录时不要塞一个空串给宿主：那会被当成非法 cwd，直接开默认目录的会话
-        var where = typeof cwd === 'string' ? cwd.trim() : '';
-        // 宿主返回的可能是 id，也可能是 Promise<id>：统一成 Promise，调用方一律 .then
-        return Promise.resolve(sessions.create(where ? { cwd: where } : {}));
-      }
-      /**
-       * 把会话绑到一个项目上（不传 projectId = 当前项目；sessionId 为空 = 解绑）。
-       *
-       * 宿主那边的规则是「一条会话只属于一个项目」：这条会话已经绑在别处时返回 409 +
-       * 原来的项目，调用方要么问用户，要么显式 force。这里把 code/bound 一起抛出去，
-       * 免得面板把「绑不上」说成一句没头没尾的失败。
-       */
-      function persistSession(sessionId, projectId, force) {
-        var body = { sessionId: sessionId || '' };
-        if (projectId) body.projectId = projectId;
-        if (force === true) body.force = true;
-        return request('POST', '/project/session', body).then(function (json) {
-          if (json && json.ok) {
-            // 绑定成功顺手记一份本地副本：宿主还是旧进程（快照里没有 projects[].sessionId）时，
-            // 左栏也能立刻显示「已绑定 / 点一下进这条会话」。
-            var pid = (json.state && json.state.active ? json.state.active.id : '') || json.projectId || '';
-            if (pid) SESSION_HINTS.set(pid, sessionId || '');
-            return json;
-          }
-          var error = new Error((json && json.error) || '绑定会话失败');
-          if (json && json.code) error.code = json.code;
-          if (json && json.bound) error.bound = json.bound;
-          throw error;
-        });
-      }
-      /**
-       * 跳到某条会话的原生对话。
-       * 宿主版本不同入口不同：sessions.open(id)（旧）→ uiWorkspace.openSession(id)（0.1.6+，
-       * SessionTarget = SessionId）→ layout.selectPanel('conversation') 兜底（只切面板，选不中会话）。
-       * 返回是否真的点名了会话——调用方据此决定要不要提示「跳了但没选中」。
-       */
-      function openConversation(sessionId) {
-        var sessions = svc('sessions');
-        if (sessions && typeof sessions.open === 'function') {
-          try {
-            sessions.open(sessionId);
-            return true;
-          } catch (e) {
-            /* 换下一条路 */
-          }
-        }
-        var uiWorkspace = svc('uiWorkspace');
-        if (uiWorkspace && typeof uiWorkspace.openSession === 'function') {
-          try {
-            uiWorkspace.openSession(sessionId);
-            return true;
-          } catch (e) {
-            /* 换下一条路 */
-          }
-        }
-        var layout = svc('layout');
-        if (layout && typeof layout.selectPanel === 'function') layout.selectPanel('conversation');
-        return false;
-      }
-      function openWorkbenchPanel() {
+      function openViewerPanel() {
         var layout = svc('layout');
         if (layout && typeof layout.selectPanel === 'function') layout.selectPanel('data-analysis');
       }
-      /* 系统原生的「选文件夹」：桌面端有 preload 桥就直接用，Web 端走宿主的         directoryPicker/pick（在 DSH 所在那台机器上弹框）。两路都拿不到就报错，         由调用处写在字段下面——不静默失败，也不造一个假的路径。 */
       function pickDirectoryPath() {
         var bridge = typeof globalThis !== 'undefined' ? globalThis.__DSH_DIRECTORY_PICKER__ : null;
         if (bridge && typeof bridge.pick === 'function') return Promise.resolve(bridge.pick());
@@ -542,3878 +251,128 @@
         }
         return Promise.reject(new Error(t('pickUnsupported')));
       }
+
       /* ------------------------------------------------------------------ *
-       * 让 AI 装环境：开一个临时会话，把「装什么、怎么验」一次说清
-       * 会话由宿主建（sessions.create + retain + prompt），工作台不自己实现聊天。
+       * 通用零件
        * ------------------------------------------------------------------ */
-      var ENV_PROMPT = [
-        '帮我把「实证研究工作台」（DSH 插件 dsh-data-analysis）的运行环境一次性装好，装完自己验一遍再回话。',
-        '',
-        '需要两样东西：',
-        '',
-        '1) 技能包 empirical-research-pipeline',
-        '   仓库：https://github.com/lybxkl/SPSS-Style-Charting-Skill',
-        '   做法：git clone 到临时目录，把里面的 empirical-research-pipeline 整个目录复制到 ~/.agents/skills/',
-        '   （Windows 是 %USERPROFILE%\\.agents\\skills\\）。装完确认 ~/.agents/skills/empirical-research-pipeline/SKILL.md 存在。',
-        '',
-        '2) Python 3.9+ 与依赖',
-        '   依赖：pandas numpy scipy statsmodels matplotlib PyMuPDF python-docx openpyxl Pillow jsonschema',
-        '   没有 Python（或低于 3.9）就先装最新的 Python 3：Windows 用 winget install Python.Python.3.13 或官网安装包，',
-        '   macOS 用 brew install python，Linux 用发行版的包管理器。',
-        '   然后 pip install -r <技能仓库>/requirements.txt；缺哪个包单独补装也行。',
-        '   Windows 上还想用 Word→PDF 这一步的话，再装 pywin32（可选，缺了只影响那一步）。',
-        '',
-        '装完请依次做：',
-        '- 调 data_analysis_doctor 自查，把每一项结果原样贴出来；',
-        '- 如果 Python 不在 PATH，或用的是别的解释器，用 data_analysis_configure 把 pythonPath 设成绝对路径；',
-        '- 如果技能包装在别处，用 data_analysis_configure 把 skillRoot 指过去（仓库根或包目录都行）；',
-        '- 再调一次 data_analysis_doctor 确认全部通过。',
-        '',
-        '约束：不要动用户的研究资料，不要修改技能包里的脚本，不要装上面没提到的软件。',
-        '最后用一句话说明「环境已就绪」，并附上 Python 可执行文件路径与版本。'      ].join('\n');
-      /**
-       * 开一个临时会话并把安装提示词投进去。
-       * 用自己的一条 ref，不碰 runtime.ref（那是「研究对话」在用的），失败一律如实抛出。
-       */
-      function startInstallSession(cwd) {
-        var sessions = sessionService();
-        if (!sessions || typeof sessions.create !== 'function') {
-          return Promise.reject(new Error('宿主没有会话服务，开不了临时会话'));
-        }
-        if (runtime.installRef) {
-          try {
-            runtime.installRef.release();
-          } catch (e) {
-            /* ignore */
-          }
-          runtime.installRef = null;
-        }
-        var created = typeof cwd === 'string' && cwd ? sessions.create({ cwd: cwd }) : sessions.create({});
-        return Promise.resolve(created).then(function (sessionId) {
-          var ref = sessions.retain(sessionId, { source: 'gateway' });
-          return Promise.resolve(ref.ready).then(function () {
-            runtime.installRef = ref;
-            // 触发门：装环境要调 doctor/configure，而临时会话默认没有工具——
-            // 先显式启用这条对话，再投提示词；启用失败就不要发一条「注定跑不动」的指令。
-            return request('POST', '/session/arm', { sessionId: sessionId, reason: 'install' }).then(function (json) {
-              if (!json || json.ok !== true) {
-                throw new Error('启用失败：' + ((json && json.error) || '宿主拒绝了这条请求'));
-              }
-              return ref.binding.session.prompt([{ type: 'text', text: ENV_PROMPT }], 'queue');
-            });
-          }).then(function (result) {
-            if (!result || result.ok !== true) {
-              var detail = result && result.error && (result.error.message || result.error.code);
-              throw new Error('投递失败：' + (detail || '宿主拒绝了这条消息'));
-            }
-            openConversation(sessionId);
-            return sessionId;
-          });
-        });
+      function Btn(props) {
+        var cls = 'dsa-btn' + (props.variant ? ' ' + props.variant : '') + (props.className ? ' ' + props.className : '');
+        return h('button', {
+          type: 'button',
+          className: cls,
+          disabled: props.disabled,
+          title: props.title || undefined,
+          'aria-label': props.ariaLabel || undefined,
+          'aria-expanded': props.ariaExpanded,
+          'aria-pressed': props.ariaPressed,
+          onClick: props.onClick,
+        }, props.children);
       }
-      function textOfBlocks(content) {
-        if (!Array.isArray(content)) return '';
-        var out = [];
-        for (var i = 0; i < content.length; i += 1) {
-          var part = content[i];
-          if (part && part.type === 'text' && part.text) out.push(part.text);
-        }
-        return out.join('\n');
+      function IconSvg(props) {
+        var size = props.size || 16;
+        return h('svg', {
+          width: size, height: size, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor',
+          strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true',
+          className: props.className || undefined,
+        }, props.children);
       }
-      /**
-       * 把一段文字投给研究对话：有绑定就复用，没有就建会话 → prompt(queue) → 绑定 → 打开原生对话。
-       * `shouldOpen` 让调用方在弹窗已关闭时不要再把人拽进对话；任一步失败都如实抛回面板。
-       *
-       * 复用已有会话时不再发一次绑定：那条会话早就是某个项目的对话了，重复绑只会把
-       * 「已经关联好」答成 409，然后被这里当成失败写进红字。
-       */
-      function deliverText(text, projectDir, boundSessionId, shouldOpen) {
-        var open = typeof shouldOpen === 'function' ? shouldOpen : function () { return true; };
-        var idPromise = boundSessionId ? Promise.resolve(boundSessionId) : createSession(projectDir);
-        return idPromise.then(function (sessionId) {
-          return ensureRef(sessionId).then(function (ref) {
-            // 触发门：绑定 = 启用。必须先启用这条会话、再投任务卡——反过来的话，
-            // 会话可能在「没有工具的模型步」里读到卡，只能回一句「我做不了」。
-            var boundPromise = boundSessionId
-              ? request('GET', '/session/project?sessionId=' + encodeURIComponent(sessionId)).then(function (info) {
-                  // 已经有了归属就直接投；归属被别的项目/会话顶掉了（旧快照）就先绑回来再投。
-                  if (info && info.bound === true) return { ok: true, state: null };
-                  return persistSession(sessionId).then(function (json) {
-                    return { ok: true, state: json.state };
-                  }).catch(function (error) {
-                    return { ok: false, error: String((error && error.message) || error) };
-                  });
-                }).catch(function () {
-                  // 查询失败不等于没绑定：照常投递，也不吓用户。真正的绑定失败会在下一行（persist）里报。
-                  return { ok: true, state: null, unknown: true };
-                })
-              : persistSession(sessionId).then(function (json) {
-                  return { ok: true, state: json.state };
-                }).catch(function (error) {
-                  return { ok: false, error: String((error && error.message) || error) };
-                });
-            return boundPromise.then(function (bound) {
-              return ref.binding.session.prompt([{ type: 'text', text: text }], 'queue').then(function (result) {
-                if (!result || result.ok !== true) {
-                  var detail = result && result.error && (result.error.message || result.error.code);
-                  throw new Error('投递失败：' + (detail || '宿主拒绝了这条消息'));
-                }
-                if (open()) openConversation(sessionId);
-                return {
-                  ok: true,
-                  sessionId: sessionId,
-                  state: bound.state || null,
-                  // 绑定失败不能谎报「投递失败」：卡确实发出去了，但要说清模型可能看不到工具。
-                  warning: bound.ok ? undefined : ('任务卡已投递，但这条会话没启用成功（模型可能看不到工具）：' + (bound.error || '绑定失败'))
-                };
-              });
-            });
-          });
-        });
-      }
-      function deliverCard(stageId, projectDir, boundSessionId) {
-        return request('GET', '/task-card?stageId=' + encodeURIComponent(stageId) + (boundSessionId ? '&sessionId=' + encodeURIComponent(boundSessionId) : '')).then(function (card) {
-          if (!card || !card.ok) throw new Error((card && card.error) || '任务卡生成失败');
-          return deliverText(card.text, projectDir, boundSessionId);
-        });
-      }
-      /** 原生会话侧读工作台摘要：payload 只含 active/summary/totals/next，不搬图表清单。 */
-      // 共享轮询：同一会话的 N 个 WorkbenchTail（每轮对话一个）+ NextStepControl 共用一个定时器、
-      // 一条在途请求。此前每个组件各起 setInterval，几十轮对话就是几十个轮询器打 /summary，
-      // 宿主单线程全耗在整项目快照重算上（实测一次约 5 秒），整个应用被拖死。
-      // 现在按 sessionId 合并：一个会话最多 10 秒一次；页面不可见时暂停，回前台立刻补一次。
-      var SUMMARY_POLL_MS = 10000;
-      var summaryHub = new Map();
-      function hubEntry(key) {
-        var entry = summaryHub.get(key);
-        if (!entry) {
-          entry = { subs: new Set(), timer: null, inflight: false, state: null, err: '' };
-          summaryHub.set(key, entry);
-        }
-        return entry;
-      }
-      function hubFetch(key) {
-        var entry = hubEntry(key);
-        if (entry.inflight) return Promise.resolve(entry.state);
-        if (typeof document !== 'undefined' && document.hidden) return Promise.resolve(entry.state);
-        entry.inflight = true;
-        return getSummary(key).then(function (json) {
-          entry.inflight = false;
-          if (json && json.ok) {
-            entry.state = json;
-            entry.err = '';
-          } else {
-            entry.err = (json && json.error) || t('loadFail');
-          }
-          entry.subs.forEach(function (notify) { notify(entry.state, entry.err); });
-          return entry.state;
-        }).catch(function (e) {
-          entry.inflight = false;
-          entry.err = String((e && e.message) || e);
-          entry.subs.forEach(function (notify) { notify(entry.state, entry.err); });
-          return entry.state;
-        });
-      }
-      function hubEnsureTimer(key) {
-        var entry = hubEntry(key);
-        if (entry.timer) return;
-        entry.timer = setInterval(function () { void hubFetch(key); }, SUMMARY_POLL_MS);
-      }
-      function hubRelease(key) {
-        var entry = summaryHub.get(key);
-        if (!entry || entry.subs.size > 0) return;
-        if (entry.timer) clearInterval(entry.timer);
-        summaryHub.delete(key);
-      }
-      if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
-        document.addEventListener('visibilitychange', function () {
-          if (!document.hidden) summaryHub.forEach(function (_entry, key) { void hubFetch(key); });
-        });
-      }
-      // intervalMs 参数保留兼容旧调用，实际节奏统一为 SUMMARY_POLL_MS（共享后不能再各轮各的）
-      function useWorkbenchState(intervalMs, deps, sessionId) {
-        var stateTuple = useState(null);
-        var state = stateTuple[0];
-        var setState = stateTuple[1];
-        var errTuple = useState('');
-        var err = errTuple[0];
-        var setErr = errTuple[1];
-        var key = sessionId || '';
-        var reload = useCallback(function () {
-          return hubFetch(key);
-        }, [key]);
-        useEffect(function () {
-          var entry = hubEntry(key);
-          var notify = function (nextState, nextErr) {
-            setState(nextState);
-            setErr(nextErr);
-          };
-          entry.subs.add(notify);
-          // 共享结果已经在了就直接用：新挂载的轮次徽章不再各自打一次请求
-          if (entry.state || entry.err) notify(entry.state, entry.err);
-          hubEnsureTimer(key);
-          void hubFetch(key);
-          return function () {
-            entry.subs.delete(notify);
-            hubRelease(key);
-          };
-        }, [key].concat(deps || []));
-        return [state, reload, err];
-      }
-      function useSessionRunning(sessionId) {
-        var tuple = useState(false);
-        var running = tuple[0];
-        var setRunning = tuple[1];
-        useEffect(function () {
-          if (!sessionId) {
-            setRunning(false);
-            return undefined;
-          }
-          var alive = true;
-          var unsub = null;
-          void ensureRef(sessionId).then(function (ref) {
-            if (!alive) return;
-            var session = ref.binding.session;
-            var sync = function sync() {
-              try {
-                setRunning(Boolean(session.getSnapshot().running));
-              } catch (e) {
-                /* ignore */
-              }
-            };
-            sync();
-            if (session && typeof session.subscribe === 'function') unsub = session.subscribe(sync);
-          }).catch(function () {
-            if (alive) setRunning(false);
-          });
-          return function () {
-            alive = false;
-            if (typeof unsub === 'function') {
-              try {
-                unsub();
-              } catch (e) {
-                /* ignore */
-              }
-            }
-          };
-        }, [sessionId]);
-        return running;
-      }
-      /** 面板侧栏只放「最近一轮」的摘要，不搬运整段对话。 */
-      function useSessionSnippet(sessionId) {
-        var tuple = useState('');
-        var snippet = tuple[0];
-        var setSnippet = tuple[1];
-        useEffect(function () {
-          if (!sessionId) {
-            setSnippet('');
-            return undefined;
-          }
-          var alive = true;
-          var unsub = null;
-          void ensureRef(sessionId).then(function (ref) {
-            if (!alive) return;
-            var source = ref.binding.eventSource;
-            var read = function read() {
-              try {
-                var windowValue = source && source.getSnapshot && source.getSnapshot();
-                var entries = (windowValue && windowValue.entries) || [];
-                for (var i = entries.length - 1; i >= 0; i -= 1) {
-                  var item = entries[i];
-                  var event = item && item.event;
-                  if (event && event.type === 'assistant/message') {
-                    var message = event.data && event.data.message;
-                    var text = textOfBlocks(message && message.content).replace(/\s+/g, ' ').trim();
-                    if (text) {
-                      setSnippet(text.slice(0, 96) + (text.length > 96 ? '…' : ''));
-                      return;
-                    }
-                  }
-                }
-                setSnippet('');
-              } catch (e) {
-                setSnippet('');
-              }
-            };
-            read();
-            if (source && typeof source.subscribe === 'function') unsub = source.subscribe(read);
-          }).catch(function () {
-            if (alive) setSnippet('');
-          });
-          return function () {
-            alive = false;
-            if (typeof unsub === 'function') {
-              try {
-                unsub();
-              } catch (e) {
-                /* ignore */
-              }
-            }
-          };
-        }, [sessionId]);
-        return snippet;
-      }
-      /* ------------------------------------------------------------------ *
-       * 原生对话里的工作台零件（四个槽位，一个都不重画聊天）
-       * ------------------------------------------------------------------ */
-      function OpenWorkbenchAction(props) {
-        var sessionId = (props && props.sessionId) || '';
-        // 这条按钮只要在屏幕上是哪条对话就知道——工作台靠它决定「跟着哪条对话」。
-        // 面板切过去之后这个组件会卸载，宿主的记录还在，所以只上报不清空。
-        useEffect(function () {
-          reportFocus(sessionId);
-        }, [sessionId]);
-        return h(
-          'span',
-          { className: 'dsa-cmp' },
-          h(
-            'button',
-            { type: 'button', className: 'dsa-chat-btn', title: t('title'), onClick: openWorkbenchPanel },
-            h('span', { className: 'dsa-chat-glyph' }, '▤'),
-            ' ' + t('tailTitle')
-          )
+      function GridIcon(props) {
+        return h(IconSvg, { size: props.size || 16 },
+          h('rect', { x: 2.2, y: 2.2, width: 4.7, height: 4.7, rx: 1.1 }),
+          h('rect', { x: 9.1, y: 2.2, width: 4.7, height: 4.7, rx: 1.1 }),
+          h('rect', { x: 2.2, y: 9.1, width: 4.7, height: 4.7, rx: 1.1 }),
+          h('rect', { x: 9.1, y: 9.1, width: 4.7, height: 4.7, rx: 1.1 })
         );
       }
-      function WorkbenchTail(props) {
-        var tuple = useWorkbenchState(10000, [props.seq], props.sessionId);
-        var state = tuple[0];
-        if (!state || !state.active || !props.sessionId || state.active.sessionId !== props.sessionId) return null;
-        var summary = state.summary || {};
-        var totals = state.totals || {};
-        return h(
-          'div',
-          { className: 'dsa-tail dsa-cmp-tail' },
-          h('span', { className: 'dsa-chat-dot ' + (totals.fail ? 'err' : 'ok') }),
-          h('b', null, t('tailTitle')),
-          h(
-            'span',
-            null,
-            state.active.name              + ' · 完成 ' + (summary.done || 0)
-              + ' · 待裁定 ' + (summary.review || 0)
-              + ' · 未过 ' + (totals.fail || 0)
-          ),
-          h('button', { type: 'button', className: 'dsa-chat-btn', onClick: openWorkbenchPanel }, t('tailOpen'))
+      function RefreshIcon(props) {
+        return h(IconSvg, { className: props.spin ? 'dsa-spin' : undefined },
+          h('path', { d: 'M13.2 8a5.2 5.2 0 1 1-1.6-3.7' }),
+          h('path', { d: 'M13.2 2.8v3.4H9.8' })
         );
       }
-      /* 输入行左侧的「下一步」：所有状态装在同一个按钮里，不再往旁边追加一句话——         追加的那句会把输入行撑长，点完还一直挂着（按钮已经换成下一阶段，旁边仍写着         「已启动：上一阶段」）。状态只来自两处真东西：本次请求的结果、/summary 里         next.status。没有假进度，也没有前端计时器造出来的「进行中」。文案按「两字动词 +         阶段简称」收：▶ 运行 范围 / ● 运行中 统计 / → 待裁定 图表。 */
-      function NextStepControl(props) {
-        var tuple = useWorkbenchState(8000, [props.sessionId], props.sessionId);
-        var state = tuple[0];
-        var reload = tuple[1];
-        // idle | starting | ok | error：只记这一次点击；运行中 / 被拦住 / 待裁定 / 待人工取自服务端
-        var phaseTuple = useState('idle');
-        var phase = phaseTuple[0];
-        var setPhase = phaseTuple[1];
-        var flashTuple = useState('');
-        var flash = flashTuple[0];
-        var setFlash = flashTuple[1];
-        var timerRef = useRef(0);
-        // 反馈有时限：成功 3 秒、失败 8 秒后退回真实状态，免得一次点击的结果变成长住的假状态
-        useEffect(function () {
-          if (phase !== 'ok' && phase !== 'error') return undefined;
-          timerRef.current = setTimeout(function () {
-            setPhase('idle');
-            setFlash('');
-          }, phase === 'ok' ? 3000 : 8000);
-          return function () {
-            clearTimeout(timerRef.current);
-          };
-        }, [phase]);
-        if (!state || !state.active || !props.sessionId || state.active.sessionId !== props.sessionId) return null;
-        var next = state.next;
-        if (!next) {
-          return h('span', { className: 'dsa-cmp' }, h('span', { className: 'dsa-cmp-text' }, t('nextAllDone')));
-        }
-        var running = next.status === 'running';
-        // 芯片只放简称（范围 / 统计 / 图表…），完整阶段名留给悬停与面板：输入行本来就窄，
-        // 「运行下一步 编码与抽取」这种一行两截全名的写法，读起来比按钮本身还长
-        var stageName = next.short || next.name;
-        // 只有「未开始」才直接从输入行起跑：被拦住 / 待人工要先看清拦截原因，
-        // 否则点下去只会收到一句 409，还得再来一次面板。这两种状态点开工作台定位。
-        var runnable = Boolean(next.script) && next.status === 'todo';
-        var click = function click() {
-          if (phase === 'starting') return;
-          // 没有脚本、或者刚刚点过（服务端可能已经在跑）：点一下只去看日志，不再发一次 run
-          if (!runnable || phase === 'ok') {
-            openWorkbenchPanel();
-            return;
-          }
-          setPhase('starting');
-          setFlash('');
-          request('POST', '/stage/run', { stageId: next.id, sessionId: props.sessionId }).then(function (json) {
-            if (json && json.ok) {
-              setPhase('ok');
-              setFlash(t('nextStarted') + ' ' + stageName);
-              void reload();
-              return;
-            }
-            setPhase('error');
-            setFlash(t('nextStartFailed') + ' ' + ((json && json.error) || '未知错误'));
-          }).catch(function (e) {
-            setPhase('error');
-            setFlash(t('nextStartFailed') + ' ' + String((e && e.message) || e));
-          });
-        };
-        var view;
-        if (phase === 'starting') {
-          view = { spinner: true, label: t('nextStarting'), hint: '正在启动「' + next.name + '」' };
-        } else if (phase === 'ok') {
-          view = { glyph: '✓', tone: 'ok', flash: flash, hint: flash + '，点一下去工作台看日志' };
-        } else if (phase === 'error') {
-          view = { glyph: '⚠', tone: 'err', flash: flash, hint: flash };
-        } else if (running) {
-          view = {
-            dot: true,
-            tone: 'run',
-            label: t('nextStateRunning'),
-            name: stageName,
-            hint: '「' + next.name + '」正在运行，点一下打开工作台看日志'          };
-        } else if (runnable) {
-          view = { glyph: '▶', label: t('nextStep'), name: stageName, hint: '在工作台里运行「' + next.name + '」' };
-        } else {
-          // 点一下只能去看原因，所以标签分清「被卡住」和「等你拍板」，不再一律吞成「待人工」
-          view = {
-            glyph: '→',
-            label: next.status === 'blocked' ? t('nextStateBlocked') : next.status === 'review' ? t('nextStateReview') : t('nextStateManual'),
-            name: stageName,
-            hint: '「' + next.name + '」没法直接起跑，点一下打开工作台看原因'          };
-        }
-        var icon = view.spinner          ? h('span', { className: 'dsa-cmp-spin', 'aria-hidden': 'true' })          : view.dot            ? h('span', { className: 'dsa-cmp-dot', 'aria-hidden': 'true' })            : h('span', { className: 'dsa-cmp-icon', 'aria-hidden': 'true' }, view.glyph);
-        return h(
-          'span',
-          { className: 'dsa-cmp' + (view.tone ? ' tone-' + view.tone : ''), role: 'status', 'aria-live': 'polite' },
-          h(
-            'button',
-            {
-              type: 'button',
-              className: 'dsa-chat-btn',
-              disabled: phase === 'starting',
-              'aria-busy': phase === 'starting' ? 'true' : undefined,
-              title: view.hint,
-              onClick: click            },
-            icon,
-            view.flash              ? h('span', { className: 'dsa-cmp-flash' }, view.flash)              : [
-                  h('span', { key: 'label', className: 'dsa-cmp-label' }, view.label),
-                  view.name ? h('span', { key: 'name', className: 'dsa-cmp-name' }, view.name) : null                ]
-          )
+      function PlusIcon() {
+        return h(IconSvg, null, h('path', { d: 'M8 3v10M3 8h10' }));
+      }
+      function SlidersIcon() {
+        return h(IconSvg, null,
+          h('path', { d: 'M3 5h10M3 11h10' }),
+          h('circle', { cx: 6, cy: 5, r: 1.6 }),
+          h('circle', { cx: 10, cy: 11, r: 1.6 })
         );
       }
-      var TOOL_LABELS = {
-        data_analysis_status: '工作台状态',
-        data_analysis_list_stages: '阶段清单',
-        data_analysis_figures: '图表合规',
-        data_analysis_create_project: '新建项目',
-        data_analysis_open_project: '打开项目',
-        data_analysis_run_stage: '运行阶段',
-        data_analysis_run_log: '运行日志',
-        data_analysis_cancel_stage: '取消运行',
-        data_analysis_adjudicate: '人工裁定',
-        data_analysis_configure: '修改配置',
-        data_analysis_doctor: '环境自检',
-        data_analysis_draft: 'AI 起草'      };
-      function makeToolRow(toolName) {
-        return function WorkbenchToolRow(props) {
-          var phase = props.phase || '';
-          var block = props.block || {};
-          var text = phase === 'result' ? textOfBlocks(block.content) : '';
-          text = text.replace(/\s+/g, ' ').trim();
-          if (text.length > 160) text = text.slice(0, 160) + '…';
-          return h(
-            'div',
-            { className: 'dsa-toolrow', 'data-tool': toolName },
-            h('span', { className: 'dsa-tool-dot' }),
-            h('span', { className: 'dsa-tool-name' }, TOOL_LABELS[toolName] || toolName),
-            h('span', { className: 'dsa-tool-text', title: text }, phase === 'result' ? text || '完成' : '调用中…')
-          );
-        };
+      function MenuIcon() {
+        return h(IconSvg, null, h('path', { d: 'M3 5h10M3 8h10M3 11h10' }));
       }
-      var DATA_TOOLS = Object.keys(TOOL_LABELS);
-      /* ------------------------------------------------------------------ *
-       * 样式
-       * ------------------------------------------------------------------ */
-      var CSS = [
-        // 变量挂在面板根上，不写 :root —— 别把宿主全局的 --dsa-* 污染了
-        // 方向 C（卡片仪表盘）：白卡片浮在浅灰底上，圆角 + 极轻阴影，状态用「软色底 + 文字」而不是只靠色点
-        '.dsa-root{',
-        '  --dsa-bg:#f4f5f7;--dsa-band:#f7f8fa;--dsa-panel:#fff;--dsa-card:#fff;--dsa-card2:#fafbfc;',
-        '  --dsa-ink:#12141a;--dsa-ink2:#5a6070;--dsa-ink3:#666c7b;',
-        '  --dsa-line:#e6e8ec;--dsa-line2:#d5d8e0;',
-        '  --dsa-accent:#1e40af;--dsa-accent2:#3b6fe0;--dsa-soft:#eef2fd;',
-        '  --dsa-ok:#0f7a4a;--dsa-oksoft:#e7f6ee;--dsa-warn:#9a6400;--dsa-warnsoft:#fdf4e3;',
-        '  --dsa-err:#b42c22;--dsa-errsoft:#fdecea;--dsa-ctl:#7d8492;--dsa-hover:#eceef2;--dsa-sel:#fff;',
-        '  --dsa-r:12px;--dsa-r2:8px;--dsa-shadow:0 1px 3px rgba(16,24,40,.05);--dsa-shadow2:0 2px 6px rgba(16,24,40,.07);',
-        '  --dsa-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;',
-        '  --dsa-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;',
-        '}',
-        '[data-dsa-theme="dark"]{',
-        '  --dsa-bg:#0f1116;--dsa-band:#14171d;--dsa-panel:#171a21;--dsa-card:#171a21;--dsa-card2:#1b1f27;',
-        '  --dsa-ink:#e9ecf2;--dsa-ink2:#aab2c1;--dsa-ink3:#8b93a4;',
-        '  --dsa-line:#252a34;--dsa-line2:#333a47;',
-        '  --dsa-accent:#7aa2f7;--dsa-accent2:#9dbcf9;--dsa-soft:#1a2233;',
-        '  --dsa-ok:#5cc08f;--dsa-oksoft:#12261d;--dsa-warn:#d9a94e;--dsa-warnsoft:#2a2113;',
-        '  --dsa-err:#e08a82;--dsa-errsoft:#2b1513;--dsa-ctl:#6f7787;--dsa-hover:#1d212a;--dsa-sel:#1d212a;',
-        '  --dsa-shadow:0 1px 3px rgba(0,0,0,.45);--dsa-shadow2:0 2px 8px rgba(0,0,0,.55);',
-        '}',
-        '.dsa-root{position:relative;display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden;background:var(--dsa-bg);color:var(--dsa-ink);',
-        '  font-family:var(--dsa-sans);font-size:13.5px;line-height:1.55;-webkit-font-smoothing:antialiased;}',
-        '.dsa-root *{box-sizing:border-box;}',
-        '.dsa-root :focus-visible{outline:2px solid var(--dsa-accent);outline-offset:2px;}',
-        '.dsa-root button{font-family:inherit;}',
-        '.dsa-top{height:44px;flex:0 0 44px;display:flex;align-items:center;gap:12px;padding:0 14px;',
-        '  background:var(--dsa-panel);border-bottom:1px solid var(--dsa-line);}',
-        '.dsa-brand{display:flex;align-items:baseline;gap:8px;min-width:0;}',
-        '.dsa-brand b{font-size:13.5px;font-weight:600;letter-spacing:.2px;white-space:nowrap;}',
-        '.dsa-brand span{color:var(--dsa-ink3);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
-        '.dsa-spacer{flex:1 1 auto;}',
-        '.dsa-chip{display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 8px;border:1px solid var(--dsa-line);',
-        '  border-radius:3px;color:var(--dsa-ink2);font-size:11.5px;background:transparent;white-space:nowrap;}',
-        '.dsa-chip.ok{color:var(--dsa-ok);border-color:color-mix(in srgb,var(--dsa-ok) 35%,var(--dsa-line));}',
-        '.dsa-chip.warn{color:var(--dsa-warn);border-color:color-mix(in srgb,var(--dsa-warn) 35%,var(--dsa-line));}',
-        '.dsa-chip.err{color:var(--dsa-err);border-color:color-mix(in srgb,var(--dsa-err) 35%,var(--dsa-line));}',
-        '.dsa-chip.quiet{color:var(--dsa-ink3);border-style:dashed;}',
-        // 默认按钮要有「填充」才像按钮：原来白底白边框，落在白色弹窗里就成了一条细线
-        '.dsa-btn{appearance:none;height:30px;padding:0 11px;border:1px solid var(--dsa-line2);border-radius:4px;',
-        '  background:var(--dsa-band);color:var(--dsa-ink);font:inherit;font-size:12.5px;cursor:pointer;white-space:nowrap;}',
-        '.dsa-btn:hover{background:var(--dsa-hover);}',
-        '.dsa-btn:disabled{opacity:.5;cursor:default;}',
-        '.dsa-btn.primary{background:var(--dsa-accent);border-color:var(--dsa-accent);color:#fff;}',
-        '[data-dsa-theme="dark"] .dsa-btn.primary{color:#0f1216;}',
-        '.dsa-btn.primary:hover{background:color-mix(in srgb,var(--dsa-accent) 88%,#000);}',
-        '.dsa-btn.danger{color:var(--dsa-err);border-color:color-mix(in srgb,var(--dsa-err) 40%,var(--dsa-line2));}',
-        '.dsa-btn.ghost{border-color:transparent;background:transparent;color:var(--dsa-ink2);}',
-        '.dsa-btn.ghost:hover{background:var(--dsa-hover);color:var(--dsa-ink);}',
-        // 设置常驻顶栏：图标+文字，窄屏只留齿轮（标题/无障碍名还在，不会变成无字按钮）
-        '.dsa-settings-btn{display:inline-flex;align-items:center;gap:5px;}',
-        // 「本对话」这类附注只在宽屏露脸：窄屏顶栏装不下，品牌标会被压扁（视觉回归会抓）
-        '.dsa-root[data-dsa-width="narrow"] .dsa-chat-link,',
-        '.dsa-root[data-dsa-width="compact"] .dsa-chat-link,',
-        '.dsa-root[data-dsa-width="mid"] .dsa-chat-link{display:none;}',
-        '.dsa-settings-btn .dsa-ico{font-size:13px;line-height:1;}',
-        '.dsa-root[data-dsa-width="narrow"] .dsa-settings-btn .dsa-settings-label{display:none;}',
-        // 空状态三步动线：编号列表，弱化正文但让「第几步」一眼可数
-        '.dsa-steps{margin:12px 0 10px;padding-left:20px;color:var(--dsa-ink2);font-size:12.5px;line-height:1.85;}',
-        '.dsa-steps li::marker{color:var(--dsa-ink3);font-variant-numeric:tabular-nums;}',
-        '.dsa-steps b{color:var(--dsa-ink);font-weight:600;}',
-        '.dsa-body{flex:1 1 auto;display:flex;min-height:0;}',
-        '.dsa-rail{flex:0 0 296px;width:296px;border-right:1px solid var(--dsa-line);background:var(--dsa-band);',
-        '  overflow-y:auto;padding:6px 0 16px;}',
-        '.dsa-rail-h{padding:10px 14px 6px;color:var(--dsa-ink2);font-size:11.5px;font-weight:600;}',
-        // 左栏顶部的项目区：项目是「你在哪儿干活」，比阶段更高一层，所以给它独立的分区 + 卡片行
-        '.dsa-rail-sec{border-bottom:1px solid var(--dsa-line);padding-bottom:8px;margin-bottom:4px;}',
-        '.dsa-rail-h .dsa-count{margin-left:6px;color:var(--dsa-ctl);font-weight:400;}',
-        '.dsa-proj-list{padding:0 8px;}',
-        '.dsa-proj{display:block;width:100%;text-align:left;border:0;background:transparent;font:inherit;',
-        '  padding:5px 8px;border-radius:4px;cursor:pointer;color:inherit;}',
-        '.dsa-proj:hover{background:var(--dsa-hover);}',
-        '.dsa-proj.sel{background:var(--dsa-panel);box-shadow:inset 2px 0 0 var(--dsa-accent);}',
-        '.dsa-proj-name{display:block;font-size:12.5px;color:var(--dsa-ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
-        '.dsa-proj.sel .dsa-proj-name{font-weight:600;}',
-        '.dsa-proj-path{display:block;margin-top:1px;font-size:11px;color:var(--dsa-ink3);overflow:hidden;',
-        '  text-overflow:ellipsis;white-space:nowrap;}',
-        '.dsa-link{border:0;background:transparent;color:var(--dsa-ink2);font:inherit;font-size:11.5px;',
-        '  cursor:pointer;padding:2px 0;}',
-        '.dsa-link:hover{color:var(--dsa-accent);}',
-        '.dsa-proj-actions{display:flex;gap:12px;padding:4px 16px 0;}',
-        '.dsa-stage{display:flex;gap:10px;align-items:flex-start;padding:9px 12px;cursor:pointer;border-left:3px solid transparent;',
-        '  width:100%;border-top:0;border-right:0;border-bottom:0;background:transparent;text-align:left;color:inherit;font:inherit;}',
-        '.dsa-stage:hover{background:var(--dsa-hover);}',
-        '.dsa-stage.sel{background:var(--dsa-sel);border-left-color:var(--dsa-accent);}',
-        '.dsa-idx{flex:0 0 20px;height:20px;border-radius:50%;border:1px solid var(--dsa-line2);color:var(--dsa-ink3);',
-        '  font-size:11px;font-family:var(--dsa-mono);display:flex;align-items:center;justify-content:center;margin-top:1px;}',
-        '.dsa-stage.done .dsa-idx{border-color:var(--dsa-ok);color:var(--dsa-ok);}',
-        '.dsa-stage.blocked .dsa-idx{border-color:var(--dsa-err);color:var(--dsa-err);}',
-        '.dsa-stage.review .dsa-idx{border-color:var(--dsa-warn);color:var(--dsa-warn);}',
-        '.dsa-stage.na .dsa-idx{border-color:var(--dsa-ctl);color:var(--dsa-ink3);border-style:dashed;}',
-        '.dsa-stage.running .dsa-idx{border-color:var(--dsa-accent);color:var(--dsa-accent);}',
-        '.dsa-stage-main{min-width:0;flex:1 1 auto;}',
-        '.dsa-stage-name{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:500;line-height:1.35;}',
-        '.dsa-stage-name .dot{width:6px;height:6px;border-radius:50%;flex:0 0 6px;background:var(--dsa-ctl);}',
-        '.dsa-stage-name .dot.pass{background:var(--dsa-ok);}',
-        '.dsa-stage-name .dot.fail{background:var(--dsa-err);}',
-        '.dsa-stage-name .dot.warn{background:var(--dsa-warn);}',
-        '.dsa-stage-name .dot.run{background:var(--dsa-accent);}',
-        '.dsa-stage-meta{margin-top:2px;color:var(--dsa-ink3);font-size:11.5px;',
-        '  font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
-        // 还没轮到的阶段退到背景里：当前该看哪一步，靠「已完成 / 等你拍板 / 未开始」的明暗差来指路
-        '.dsa-stage.todo{opacity:.48;}',
-        '.dsa-stage.todo .dsa-stage-name{color:var(--dsa-ink3);font-weight:400;}',
-        '.dsa-stage.todo .dsa-idx{border-color:var(--dsa-line);color:var(--dsa-ink3);}',
-        '.dsa-stage.todo .dot{background:transparent;box-shadow:inset 0 0 0 1px var(--dsa-ctl);}',
-        '.dsa-stage.todo:hover{opacity:.82;}',
-        '.dsa-stage.sel{opacity:1;}',
-        '.dsa-main{flex:1 1 auto;min-width:0;overflow-y:auto;padding:20px 24px 44px;}',
-        '.dsa-side{flex:0 0 352px;width:352px;border-left:1px solid var(--dsa-line);background:var(--dsa-band);',
-        '  display:flex;flex-direction:column;min-height:0;}',
-        '.dsa-side.hide{display:none;}',
-        '.dsa-h1{font-size:20px;font-weight:600;letter-spacing:.1px;margin:0 0 3px;line-height:1.25;}',
-        '.dsa-sub{color:var(--dsa-ink2);margin:0 0 14px;font-size:12.5px;line-height:1.55;}',
-        '.dsa-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}',
-        '.dsa-section{margin:22px 0 9px;display:flex;align-items:baseline;gap:8px;}',
-        '.dsa-section h3{font-size:15px;font-weight:600;color:var(--dsa-ink);margin:0;}',
-        '.dsa-section .count{color:var(--dsa-ink3);font-size:11.5px;font-variant-numeric:tabular-nums;}',
-        '.dsa-card{border:1px solid var(--dsa-line);border-radius:6px;background:var(--dsa-panel);}',
-        '.dsa-pad{padding:12px 14px;}',
-        '.dsa-gate{display:flex;gap:10px;padding:10px 14px;border-top:1px solid var(--dsa-line);align-items:flex-start;}',
-        '.dsa-gate:first-child{border-top:0;}',
-        '.dsa-gate .mark{flex:0 0 17px;font-family:var(--dsa-mono);font-size:13px;line-height:1.5;}',
-        '.dsa-gate.pass .mark{color:var(--dsa-ok);}',
-        '.dsa-gate.fail .mark{color:var(--dsa-err);}',
-        '.dsa-gate.unjudged .mark{color:var(--dsa-ctl);}',
-        '.dsa-gate.na .mark{color:var(--dsa-ink3);}',
-        '.dsa-gate.na .dsa-gate-label{color:var(--dsa-ink2);}',
-        '.dsa-gate.todo .mark{color:var(--dsa-ctl);}',
-        '.dsa-gate.manual .mark{color:var(--dsa-warn);}',
-        '.dsa-gate-body{flex:1 1 auto;min-width:0;}',
-        '.dsa-gate-label{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:500;}',
-        '.dsa-gate-detail{color:var(--dsa-ink2);font-size:12px;margin-top:2px;word-break:break-word;line-height:1.5;}',
-        '.dsa-tag{display:inline-block;height:18px;line-height:17px;padding:0 6px;border-radius:3px;font-size:11px;',
-        '  border:1px solid var(--dsa-line2);color:var(--dsa-ink3);}',
-        '.dsa-tag.err{color:var(--dsa-err);border-color:color-mix(in srgb,var(--dsa-err) 45%,var(--dsa-line2));}',
-        '.dsa-tag.manual{color:var(--dsa-accent);border-color:color-mix(in srgb,var(--dsa-accent) 40%,var(--dsa-line2));}',
-        '.dsa-code{font-family:var(--dsa-mono);font-size:12px;background:var(--dsa-bg);border:1px solid var(--dsa-line);',
-        '  border-radius:4px;padding:9px 10px;color:var(--dsa-ink2);white-space:pre-wrap;overflow-wrap:anywhere;}',
-        '.dsa-flow{display:flex;flex-wrap:wrap;gap:6px;align-items:stretch;}',
-        '.dsa-flow-step{border:1px solid var(--dsa-line);border-radius:4px;padding:7px 10px;min-width:92px;background:var(--dsa-panel);}',
-        '.dsa-flow-step .s{color:var(--dsa-ink3);font-size:11.5px;}',
-        '.dsa-flow-step .n{font-family:var(--dsa-mono);font-size:18px;font-variant-numeric:tabular-nums;margin-top:1px;}',
-        '.dsa-flow-step.bad{border-color:color-mix(in srgb,var(--dsa-err) 55%,var(--dsa-line));}',
-        '.dsa-table{width:100%;border-collapse:collapse;font-size:12px;}',
-        '.dsa-table th{text-align:left;font-weight:500;color:var(--dsa-ink2);border-bottom:1px solid var(--dsa-line);padding:7px 8px;white-space:nowrap;}',
-        '.dsa-table td{border-bottom:1px solid var(--dsa-line);padding:7px 8px;vertical-align:top;}',
-        '.dsa-table tr:last-child td{border-bottom:0;}',
-        '.dsa-mono{font-family:var(--dsa-mono);font-variant-numeric:tabular-nums;}',
-        '.dsa-badge{display:inline-flex;align-items:center;height:17px;line-height:16px;padding:0 6px;border-radius:3px;',
-        '  font-size:11px;margin:0 4px 3px 0;white-space:nowrap;}',
-        '.dsa-badge.pass{color:var(--dsa-ok);background:color-mix(in srgb,var(--dsa-ok) 10%,transparent);}',
-        '.dsa-badge.fail{color:var(--dsa-err);background:color-mix(in srgb,var(--dsa-err) 12%,transparent);}',
-        '.dsa-badge.unjudged{color:var(--dsa-ink3);background:color-mix(in srgb,var(--dsa-ctl) 14%,transparent);}',
-        '.dsa-badge.na{color:var(--dsa-ink2);background:transparent;border:1px dashed var(--dsa-line2);}',
-        '.dsa-side-h{flex:0 0 auto;height:42px;display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid var(--dsa-line);background:var(--dsa-panel);}',
-        '.dsa-side-h b{font-size:12.5px;font-weight:600;color:var(--dsa-ink);}',
-        '.dsa-runs{flex:0 0 auto;max-height:42%;overflow-y:auto;border-bottom:1px solid var(--dsa-line);background:var(--dsa-panel);}',
-        '.dsa-run{display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;border-left:2px solid transparent;',
-        '  width:100%;border-top:0;border-right:0;border-bottom:0;background:transparent;text-align:left;color:inherit;font:inherit;}',
-        '.dsa-run:hover{background:var(--dsa-hover);}',
-        '.dsa-run.sel{background:var(--dsa-sel);border-left-color:var(--dsa-accent);}',
-        '.dsa-run .st{font-size:11.5px;width:46px;flex:0 0 46px;color:var(--dsa-ink3);}',
-        '.dsa-run .st.ok{color:var(--dsa-ok);}.dsa-run .st.failed{color:var(--dsa-err);}',
-        '.dsa-run .st.cancelled{color:var(--dsa-warn);}.dsa-run .st.running{color:var(--dsa-accent);}',
-        '.dsa-run .sid{flex:1 1 auto;min-width:0;font-size:12.5px;color:var(--dsa-ink);',
-        '  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
-        '.dsa-log{flex:1 1 auto;min-height:0;overflow:auto;padding:10px 12px;font-family:var(--dsa-mono);font-size:11.5px;',
-        '  line-height:1.7;color:var(--dsa-ink2);white-space:pre-wrap;word-break:break-all;background:var(--dsa-bg);}',
-        '.dsa-log .ln-err{color:var(--dsa-err);}',
-        '.dsa-log .ln-warn{color:var(--dsa-warn);}',
-        '.dsa-empty{padding:24px 14px;color:var(--dsa-ink3);font-size:12.5px;text-align:center;}',
-        '.dsa-empty b{display:block;color:var(--dsa-ink);font-size:15px;font-weight:600;margin-bottom:6px;}',
-        '.dsa-form{max-width:560px;display:flex;flex-direction:column;gap:10px;}',
-        '.dsa-field{display:flex;flex-direction:column;gap:4px;}',
-        '.dsa-field label{font-size:12px;color:var(--dsa-ink2);}',
-        '.dsa-input{height:32px;padding:0 9px;border:1px solid var(--dsa-ctl);border-radius:4px;background:var(--dsa-panel);',
-        '  color:var(--dsa-ink);font:inherit;font-size:13px;width:100%;}',
-        '.dsa-input:focus{outline:none;border-color:var(--dsa-accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--dsa-accent) 18%,transparent);}',
-        '.dsa-hint{color:var(--dsa-ink3);font-size:12px;line-height:1.55;}',
-        '.dsa-error{color:var(--dsa-err);font-size:12px;background:color-mix(in srgb,var(--dsa-err) 8%,transparent);',
-        '  border:1px solid color-mix(in srgb,var(--dsa-err) 30%,var(--dsa-line));border-radius:3px;padding:8px 10px;}',
-        '.dsa-ok-note{color:var(--dsa-ok);font-size:12px;}',
-        '.dsa-mask{position:absolute;inset:0;background:rgba(20,20,18,.32);display:flex;align-items:center;justify-content:center;',
-        '  z-index:40;padding:20px;}',
-        '.dsa-modal{width:min(620px,100%);max-height:88%;overflow:auto;background:var(--dsa-panel);border:1px solid var(--dsa-line2);',
-        '  border-radius:5px;padding:18px 20px;}',
-        '.dsa-modal h2{margin:0 0 4px;font-size:15px;font-weight:600;}',
-        '.dsa-modal p{margin:0 0 12px;color:var(--dsa-ink3);font-size:12px;}',
-        '.dsa-modal-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:16px;}',
-        '.dsa-inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}',
-        '.dsa-split{display:grid;grid-template-columns:1fr 1fr;gap:14px;}',
-        '.dsa-drawer-toggle{display:none;}',
-        // 断点按「面板自身宽度」而不是窗口宽度：宿主侧栏可能已折叠，两者能差 200px 以上
-        '.dsa-root[data-dsa-width="compact"] .dsa-side{position:absolute;right:0;top:44px;bottom:0;z-index:30;',
-        '  box-shadow:none;border-left:1px solid var(--dsa-line2);}',
-        '.dsa-root[data-dsa-width="compact"] .dsa-side.hide{display:none;}',
-        '.dsa-root[data-dsa-width="compact"] .dsa-drawer-toggle{display:inline-flex;}',
-        // 面板 1160px 左右时三栏只剩 500px 给主区：右栏也改成抽屉，别把表格挤变形
-        '.dsa-root[data-dsa-width="mid"] .dsa-side{position:absolute;right:0;top:44px;bottom:0;z-index:30;',
-        '  border-left:1px solid var(--dsa-line2);}',
-        '.dsa-root[data-dsa-width="mid"] .dsa-side.hide{display:none;}',
-        '.dsa-root[data-dsa-width="mid"] .dsa-drawer-toggle{display:inline-flex;}',
-        '.dsa-root[data-dsa-width="compact"] .dsa-rail{flex-basis:240px;width:240px;}',
-        '.dsa-root[data-dsa-width="narrow"] .dsa-rail{display:none;}',
-        '.dsa-root[data-dsa-width="narrow"] .dsa-main{padding:14px;}',
-        '.dsa-banner{display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap;margin:0 0 12px;padding:9px 11px;',
-        '  border:1px solid color-mix(in srgb,var(--dsa-err) 34%,var(--dsa-line));',
-        '  background:color-mix(in srgb,var(--dsa-err) 7%,transparent);border-radius:3px;}',
-        '.dsa-banner b{color:var(--dsa-err);font-size:12px;white-space:nowrap;}',
-        '.dsa-banner .dsa-banner-text{flex:1 1 180px;min-width:120px;color:var(--dsa-ink2);font-size:11.5px;line-height:1.5;word-break:break-word;}',
-        '.dsa-check{display:flex;gap:8px;align-items:flex-start;padding:5px 0;border-bottom:1px solid var(--dsa-line);font-size:11.5px;}',
-        '.dsa-check:last-child{border-bottom:none;}',
-        '.dsa-check-mark{flex:0 0 14px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;}',
-        '.dsa-check.pass .dsa-check-mark{color:var(--dsa-ok);}',
-        '.dsa-check.fail .dsa-check-mark{color:var(--dsa-err);}',
-        '.dsa-check.warn .dsa-check-mark{color:var(--dsa-warn);}',
-        '.dsa-check.unjudged .dsa-check-mark{color:var(--dsa-ink3);}',
-        '.dsa-check-body{flex:1 1 auto;min-width:0;line-height:1.5;word-break:break-word;}',
-        '.dsa-check-label{color:var(--dsa-ink);}',
-        '.dsa-check-detail{color:var(--dsa-ink3);}',
-        '.dsa-check-advice{color:var(--dsa-warn);}',
-        '.dsa-draft-out{margin:0;padding:9px 11px;border:1px solid var(--dsa-line);background:var(--dsa-bg);',
-        '  border-radius:2px;max-height:44vh;overflow:auto;white-space:pre-wrap;word-break:break-word;',
-        '  font-family:var(--dsa-sans);font-size:12px;line-height:1.7;color:var(--dsa-ink);}',
-        '.dsa-model-line{font-family:var(--dsa-mono);font-size:11px;color:var(--dsa-ink3);}',
-        '.dsa-draft-meta{display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--dsa-ink3);}',
-        // 研究对话：面板里的会话卡、对话里的工作台徽章
-        '.dsa-chat-card{border:1px solid var(--dsa-line);border-radius:3px;background:var(--dsa-bg);padding:9px 10px;',
-        '  display:flex;flex-direction:column;gap:6px;}',
-        '.dsa-chat-card .dsa-hint{line-height:1.5;}',
-        '.dsa-chat-id{font-family:var(--dsa-mono);font-size:11px;color:var(--dsa-ink3);word-break:break-all;}',
-        '.dsa-chat-dot{width:6px;height:6px;border-radius:50%;display:inline-block;margin-right:5px;background:var(--dsa-ink3);}',
-        '.dsa-chat-dot.run{background:var(--dsa-accent);}',
-        '.dsa-chat-dot.ok{background:var(--dsa-ok);}',
-        '.dsa-chat-dot.err{background:var(--dsa-err);}',
-        '.dsa-chat-btn{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 7px;border:1px solid var(--dsa-line2);',
-        '  border-radius:3px;background:var(--dsa-panel);color:var(--dsa-ink2);font:inherit;font-size:11.5px;cursor:pointer;}',
-        '.dsa-chat-btn:hover{background:var(--dsa-bg);color:var(--dsa-ink);}',
-        '.dsa-chat-glyph{font-size:12px;line-height:1;}',
-        '.dsa-tail{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:4px 0 2px;padding:3px 7px;',
-        '  border:1px solid var(--dsa-line);border-radius:3px;background:var(--dsa-bg);font-size:11px;color:var(--dsa-ink3);}',
-        '.dsa-tail b{color:var(--dsa-ink2);font-weight:600;}',
-        // 原生对话里的零件长在 .dsa-root 之外：那里没有 --dsa-* 令牌，凡是 var() 写的边框、底色、
-        // 字色都会整条失效，按钮就退化成一行裸文字（看不出来能点，点了也看不出变化）。
-        // 这一组只用 currentColor 混色，跟着宿主主题走；宽度一律封顶——输入行是横向窄条，
-        // 标签再长也不许把右边的控件挤走。
-        '.dsa-cmp{display:inline-flex;align-items:center;min-width:0;max-width:min(280px,52vw);flex:0 1 auto;overflow:hidden;}',
-        '.dsa-cmp .dsa-chat-btn{display:inline-flex;align-items:center;gap:6px;height:24px;min-width:0;max-width:100%;',
-        '  padding:0 8px;border:1px solid color-mix(in srgb,currentColor 20%,transparent);border-radius:6px;',
-        '  background:transparent;color:inherit;font-size:12px;line-height:1;white-space:nowrap;cursor:pointer;',
-        '  transition:background-color .12s ease,border-color .12s ease;}',
-        '.dsa-cmp .dsa-chat-btn:hover{background:color-mix(in srgb,currentColor 7%,transparent);',
-        '  border-color:color-mix(in srgb,currentColor 32%,transparent);}',
-        '.dsa-cmp .dsa-chat-btn:active{background:color-mix(in srgb,currentColor 13%,transparent);}',
-        '.dsa-cmp .dsa-chat-btn:disabled{cursor:default;opacity:.72;}',
-        '.dsa-cmp .dsa-chat-btn:focus-visible{outline:2px solid color-mix(in srgb,currentColor 42%,transparent);outline-offset:2px;}',
-        '.dsa-cmp-icon{flex:0 0 auto;font-size:10px;line-height:1;color:color-mix(in srgb,#1e40af 72%,currentColor);}',
-        '.dsa-cmp-label{flex:0 0 auto;}',
-        '.dsa-cmp-name,.dsa-cmp-flash,.dsa-cmp-text{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;',
-        '  white-space:nowrap;}',
-        '.dsa-cmp-name{color:color-mix(in srgb,currentColor 58%,transparent);}',
-        '.dsa-cmp.tone-ok .dsa-chat-btn{color:color-mix(in srgb,#0f7a4a 74%,currentColor);',
-        '  border-color:color-mix(in srgb,#0f7a4a 34%,transparent);}',
-        '.dsa-cmp.tone-err .dsa-chat-btn{color:color-mix(in srgb,#b42c22 74%,currentColor);',
-        '  border-color:color-mix(in srgb,#b42c22 40%,transparent);}',
-        '.dsa-cmp.tone-run .dsa-chat-btn{color:color-mix(in srgb,#1e40af 74%,currentColor);',
-        '  border-color:color-mix(in srgb,#1e40af 30%,transparent);}',
-        '.dsa-cmp-dot{flex:0 0 auto;width:6px;height:6px;border-radius:50%;background:currentColor;',
-        '  animation:dsa-cmp-pulse 1.6s ease-in-out infinite;}',
-        '.dsa-cmp-spin{flex:0 0 auto;width:10px;height:10px;border-radius:50%;',
-        '  border:1.5px solid color-mix(in srgb,currentColor 26%,transparent);border-top-color:currentColor;',
-        '  animation:dsa-cmp-spin .7s linear infinite;}',
-        '@keyframes dsa-cmp-spin{to{transform:rotate(360deg)}}',
-        '@keyframes dsa-cmp-pulse{0%,100%{opacity:.4}50%{opacity:1}}',
-        '@media (prefers-reduced-motion:reduce){.dsa-cmp-dot,.dsa-cmp-spin{animation:none}.dsa-cmp-dot{opacity:.85}}',
-        // 会话尾巴上的工作台徽章同理：令牌拿不到时色点会变成看不见的透明点
-        '.dsa-cmp-tail{flex-wrap:nowrap;max-width:min(620px,92vw);overflow:hidden;white-space:nowrap;',
-        '  border:1px solid color-mix(in srgb,currentColor 12%,transparent);background:color-mix(in srgb,currentColor 4%,transparent);}',
-        '.dsa-cmp-tail>span{min-width:0;overflow:hidden;text-overflow:ellipsis;}',
-        '.dsa-cmp-tail .dsa-chat-btn{flex:0 0 auto;height:20px;padding:0 6px;background:transparent;color:inherit;',
-        '  border-color:color-mix(in srgb,currentColor 20%,transparent);}',
-        '.dsa-cmp-tail .dsa-chat-dot{background:color-mix(in srgb,currentColor 42%,transparent);}',
-        '.dsa-cmp-tail .dsa-chat-dot.ok{background:color-mix(in srgb,#0f7a4a 76%,currentColor);}',
-        '.dsa-cmp-tail .dsa-chat-dot.err{background:color-mix(in srgb,#b42c22 76%,currentColor);}',
-        '.dsa-cmp-tail .dsa-chat-dot.run{background:color-mix(in srgb,#1e40af 76%,currentColor);}',
-        '.dsa-toolrow{display:flex;align-items:baseline;gap:7px;padding:3px 0;font-size:11.5px;color:var(--dsa-ink3);',
-        '  min-width:0;}',
-        '.dsa-tool-dot{width:5px;height:5px;border-radius:50%;background:var(--dsa-accent);flex:0 0 auto;}',
-        '.dsa-tool-name{color:var(--dsa-ink2);flex:0 0 auto;}',
-        '.dsa-tool-text{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
-        // 窄屏没有阶段栏：用下拉补一个入口，否则只能看当前阶段、无法切换
-        '.dsa-stage-select{display:none;height:26px;max-width:190px;padding:0 6px;border:1px solid var(--dsa-line2);',
-        '  border-radius:3px;background:var(--dsa-panel);color:var(--dsa-ink);font:inherit;font-size:11.5px;}',
-        '.dsa-root[data-dsa-width="narrow"] .dsa-stage-select{display:inline-flex;}',
-        // 744px 时标题会被挤成 0 宽：窄屏只保留「标题 + 阶段下拉 + 动作」，技能包徽章退场
-        '.dsa-root[data-dsa-width="narrow"] .dsa-chip.ok{display:none;}',
-        '.dsa-root[data-dsa-width="narrow"] .dsa-brand span{display:none;}',
-        '.dsa-root[data-dsa-width="narrow"] .dsa-top{gap:7px;padding:0 10px;}',
-        // 窄屏的右栏必须是抽屉：默认显示会把主区挤到一半
-        '.dsa-root[data-dsa-width="narrow"] .dsa-side{position:absolute;right:0;top:44px;bottom:0;z-index:30;',
-        '  border-left:1px solid var(--dsa-line2);}',
-        '.dsa-root[data-dsa-width="narrow"] .dsa-side.hide{display:none;}',
-        '.dsa-root[data-dsa-width="narrow"] .dsa-drawer-toggle{display:inline-flex;}',
-        // 「下一步」条：面板要有一句话说清现在卡在哪、该点哪个按钮
-        '.dsa-next{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 14px;margin:0 0 18px;',
-        '  border:1px solid var(--dsa-line);border-left:3px solid var(--dsa-accent);border-radius:6px;background:var(--dsa-panel);}',
-        '.dsa-next.done{border-left-color:var(--dsa-ok);}',
-        '.dsa-next.blocked{border-left-color:var(--dsa-err);}',
-        '.dsa-next.review{border-left-color:var(--dsa-warn);}',
-        '.dsa-next.run{border-left-color:var(--dsa-accent);}',
-        // tone 直接取 stage.status：running 也是合法取值，todo 走默认色，别让它们悄悄没样式
-        '.dsa-next.running{border-left-color:var(--dsa-accent);}',
-        '.dsa-next.todo{border-left-color:var(--dsa-ctl);}',
-        '.dsa-next-label{font-size:11.5px;font-weight:600;color:var(--dsa-accent);flex:0 0 auto;}',
-        '.dsa-next-body{flex:1 1 260px;min-width:0;}',
-        '.dsa-next-line{font-size:14px;font-weight:600;line-height:1.4;}',
-        '.dsa-next-sub{color:var(--dsa-ink2);font-size:12.5px;margin-top:3px;line-height:1.5;word-break:break-word;}',
-        // 折叠「已通过」与「技术细节」共用
-        '.dsa-fold{margin-top:8px;border:1px solid var(--dsa-line);border-radius:6px;background:var(--dsa-panel);}',
-        '.dsa-fold>summary{cursor:pointer;padding:9px 14px;font-size:12.5px;color:var(--dsa-ink2);list-style:none;}',
-        '.dsa-fold>summary::-webkit-details-marker{display:none;}',
-        '.dsa-fold>summary:before{content:"▸";display:inline-block;width:14px;color:var(--dsa-ink3);}',
-        '.dsa-fold[open]>summary:before{content:"▾";}',
-        // AI 接手：一个入口，三种意图
-        '.dsa-menu{position:relative;}',
-        '.dsa-menu>summary{list-style:none;display:inline-flex;align-items:center;gap:5px;height:30px;padding:0 11px;',
-        '  border:1px solid var(--dsa-line2);border-radius:4px;background:var(--dsa-panel);font-size:12.5px;cursor:pointer;white-space:nowrap;}',
-        '.dsa-menu>summary::-webkit-details-marker{display:none;}',
-        '.dsa-menu[open]>summary{background:var(--dsa-hover);}',
-        '.dsa-menu-list{position:absolute;right:0;top:34px;z-index:35;min-width:252px;padding:5px;background:var(--dsa-panel);',
-        '  border:1px solid var(--dsa-line2);border-radius:6px;}',
-        '.dsa-menu-list button{display:block;width:100%;text-align:left;padding:8px 9px;border:0;border-radius:4px;background:transparent;',
-        '  color:var(--dsa-ink);font:inherit;font-size:12.5px;cursor:pointer;}',
-        '.dsa-menu-list button:hover{background:var(--dsa-hover);}',
-        '.dsa-menu-list button .dsa-hint{display:block;margin-top:2px;padding:0;}',
-        // 抽屉遮罩：点哪里都能关，Esc 也行
-        '.dsa-scrim{position:absolute;inset:44px 0 0 0;background:rgba(20,20,18,.22);z-index:29;}',
-        // 只给读屏用的播报区：视觉上不可见，但不能用 display:none（那样读屏也读不到）
-        '.dsa-sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0;}',
-        '.dsa-agg{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 8px;}',
-        '.dsa-kv{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--dsa-ink2);}',
-        '.dsa-kv b{font-family:var(--dsa-mono);font-variant-numeric:tabular-nums;}',
-        '.dsa-run .tm{flex:0 0 74px;font-size:11px;color:var(--dsa-ink3);font-variant-numeric:tabular-nums;}',
-        '.dsa-run .ex{flex:0 0 30px;text-align:right;font-family:var(--dsa-mono);font-size:11px;color:var(--dsa-ink3);}',
-        '.dsa-run-h{padding:8px 12px;border-bottom:1px solid var(--dsa-line);font-size:11.5px;color:var(--dsa-ink2);}',
-        '.dsa-run-h .dsa-kv{gap:12px;}',
-        '.dsa-chat-card summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:6px;}',
-        '.dsa-chat-card summary::-webkit-details-marker{display:none;}',
-        '.dsa-chat-card .dsa-chat-more{display:flex;flex-direction:column;gap:6px;margin-top:7px;}',
-        '.dsa-issue-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}',
-        '.dsa-patch-pre{max-height:220px;overflow:auto;margin:6px 0 0;padding:8px 10px;border:1px solid var(--dsa-line);',
-        '  background:var(--dsa-bg);border-radius:2px;font-family:var(--dsa-mono);font-size:11px;white-space:pre-wrap;word-break:break-word;}',
-        '.dsa-inline-tight{display:inline-flex;gap:4px;align-items:center;flex-wrap:wrap;}',
-        /* ================================================================== *
-         * 方向 C：卡片仪表盘
-         *
-         * 这一层放在数组最后，只覆盖「形状与密度」，一个功能类名都没改——
-         * 所以行为完全沿用上面的规则，改的只是看起来的样子。
-         * 三条硬口径：① 状态永远有文字，不只靠颜色 ② 数字等宽对齐
-         *            ③ 项目多时列表自己滚，不把下面的阶段挤走
-         * ================================================================== */
-        // ---- 顶栏：58px、圆角渐变标、pill 徽章、有填充的按钮
-        '.dsa-top{height:58px;flex:0 0 58px;gap:10px;padding:0 18px;}',
-        '.dsa-logo{flex:0 0 30px;width:30px;height:30px;border-radius:9px;',
-        '  background:linear-gradient(140deg,var(--dsa-accent2),var(--dsa-accent));display:flex;align-items:center;',
-        '  justify-content:center;color:#fff;font-size:14px;font-weight:700;',
-        '  box-shadow:0 2px 6px color-mix(in srgb,var(--dsa-accent) 30%,transparent);}',
-        '[data-dsa-theme="dark"] .dsa-logo{color:#0f1216;}',
-        '.dsa-brand{display:flex;align-items:center;gap:9px;min-width:0;}',
-        '.dsa-brand-tx{display:flex;flex-direction:column;min-width:0;line-height:1.32;}',
-        '.dsa-brand b{font-size:13.5px;font-weight:650;letter-spacing:-.01em;}',
-        '.dsa-brand-tx span{font-size:11px;color:var(--dsa-ink3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
-        '.dsa-chip{height:28px;padding:0 12px;border-radius:999px;background:var(--dsa-card2);}',
-        '.dsa-btn{height:32px;padding:0 13px;border-radius:var(--dsa-r2);background:var(--dsa-panel);',
-        '  transition:background .16s,border-color .16s,box-shadow .16s,transform .06s;}',
-        '.dsa-btn:hover{background:var(--dsa-card2);border-color:var(--dsa-line2);}',
-        '.dsa-btn:active{transform:translateY(.5px);}',
-        '.dsa-btn.ghost{background:transparent;border-color:transparent;}',
-        '.dsa-btn.ghost:hover{background:var(--dsa-hover);}',
-        '.dsa-btn.primary{background:linear-gradient(180deg,var(--dsa-accent2),var(--dsa-accent));border-color:var(--dsa-accent);',
-        '  box-shadow:0 1px 2px rgba(16,24,40,.14),inset 0 1px 0 rgba(255,255,255,.16);}',
-        '.dsa-btn.primary:hover{background:linear-gradient(180deg,var(--dsa-accent2),var(--dsa-accent));',
-        '  filter:brightness(1.07);}',
-        '.dsa-stage-select,.dsa-menu>summary{height:32px;border-radius:var(--dsa-r2);font-size:12.5px;}',
-        '.dsa-menu-list{top:38px;border-radius:10px;box-shadow:var(--dsa-shadow2);}',
-        // ---- 左栏：分区 + 项目列表「自己滚」，阶段永远在下面看得见
-        '.dsa-rail{flex:0 0 276px;width:276px;display:flex;flex-direction:column;min-height:0;overflow:hidden;',
-        '  background:var(--dsa-bg);padding:12px 12px 0;border-right:1px solid var(--dsa-line);}',
-        '.dsa-rail-sec{flex:0 1 auto;min-height:0;max-height:46%;display:flex;flex-direction:column;',
-        '  padding-bottom:8px;margin-bottom:6px;border-bottom:1px solid var(--dsa-line);}',
-        '.dsa-rail-body{flex:1 1 auto;min-height:0;overflow-y:auto;padding:8px 0 24px;}',
-        '.dsa-rail-h{padding:0 6px 7px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;',
-        '  font-weight:650;color:var(--dsa-ink3);}',
-        '.dsa-rail-h .dsa-count{margin-left:auto;font-family:var(--dsa-mono);font-size:11px;letter-spacing:0;',
-        '  text-transform:none;background:var(--dsa-line);color:var(--dsa-ink2);padding:1px 6px;border-radius:999px;font-weight:400;}',
-        '.dsa-proj-list{flex:0 1 auto;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:2px;padding:0 2px 0 0;}',
-        '.dsa-proj{padding:7px 8px;border:1px solid transparent;border-radius:var(--dsa-r2);',
-        '  transition:background .16s,border-color .16s,box-shadow .16s;}',
-        '.dsa-proj:hover{background:var(--dsa-hover);}',
-        '.dsa-proj.sel{background:var(--dsa-panel);border-color:var(--dsa-line);box-shadow:var(--dsa-shadow);}',
-        '.dsa-proj-h{display:flex;align-items:center;gap:7px;min-width:0;}',
-        '.dsa-proj-av{flex:0 0 20px;width:20px;height:20px;border-radius:6px;background:var(--dsa-soft);',
-        '  color:var(--dsa-accent);font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;}',
-        '.dsa-proj.sel .dsa-proj-av{background:linear-gradient(140deg,var(--dsa-accent2),var(--dsa-accent));color:#fff;}',
-        '[data-dsa-theme="dark"] .dsa-proj.sel .dsa-proj-av{color:#0f1216;}',
-        '.dsa-proj-name{font-size:12.5px;font-weight:550;}',
-        '.dsa-proj-path{margin:1px 0 0 27px;font-family:var(--dsa-mono);font-size:11px;color:var(--dsa-ink3);}',
-        '.dsa-proj-actions{gap:8px;padding:5px 4px 0;}',
-        '.dsa-link{padding:3px 5px;border-radius:6px;font-size:11.5px;}',
-        '.dsa-link:hover{background:var(--dsa-hover);}',
-        // ---- 阶段行：圆号 + 名称 + 右侧状态徽章（徽章是文字，色弱也读得出）
-        '.dsa-stage{padding:5px 8px;border:1px solid transparent;border-radius:var(--dsa-r2);align-items:center;',
-        '  gap:9px;margin-bottom:1px;transition:background .16s,border-color .16s,box-shadow .16s;}',
-        '.dsa-stage:hover{background:var(--dsa-hover);}',
-        '.dsa-stage.sel{background:var(--dsa-panel);border-color:var(--dsa-line);border-left-color:var(--dsa-line);',
-        '  box-shadow:var(--dsa-shadow);}',
-        '.dsa-idx{flex:0 0 18px;width:18px;height:18px;border-radius:50%;background:var(--dsa-line);',
-        '  border:1px solid transparent;color:var(--dsa-ink3);font-size:11px;font-weight:600;margin-top:0;line-height:1;}',
-        '.dsa-stage.done .dsa-idx{background:var(--dsa-oksoft);color:var(--dsa-ok);',
-        '  border-color:color-mix(in srgb,var(--dsa-ok) 30%,transparent);}',
-        '.dsa-stage.blocked .dsa-idx{background:var(--dsa-errsoft);color:var(--dsa-err);',
-        '  border-color:color-mix(in srgb,var(--dsa-err) 30%,transparent);}',
-        '.dsa-stage.review .dsa-idx{background:var(--dsa-warnsoft);color:var(--dsa-warn);',
-        '  border-color:color-mix(in srgb,var(--dsa-warn) 30%,transparent);}',
-        '.dsa-stage.running .dsa-idx{background:var(--dsa-soft);color:var(--dsa-accent);}',
-        '.dsa-stage-main{display:flex;align-items:center;gap:8px;}',
-        '.dsa-stage-name{flex:1 1 auto;min-width:0;display:block;font-size:12.5px;',
-        '  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
-        '.dsa-stage-name .dot{display:none;}',
-        '.dsa-stage-meta{flex:0 0 auto;margin-top:0;padding:1px 7px;border-radius:999px;background:var(--dsa-line);',
-        '  color:var(--dsa-ink2);font-size:11px;font-weight:600;max-width:52%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
-        '.dsa-stage.done .dsa-stage-meta{background:var(--dsa-oksoft);color:var(--dsa-ok);}',
-        '.dsa-stage.blocked .dsa-stage-meta{background:var(--dsa-errsoft);color:var(--dsa-err);}',
-        '.dsa-stage.review .dsa-stage-meta{background:var(--dsa-warnsoft);color:var(--dsa-warn);}',
-        '.dsa-stage.running .dsa-stage-meta{background:var(--dsa-soft);color:var(--dsa-accent);}',
-        '.dsa-stage.todo{opacity:1;}',
-        '.dsa-stage.todo .dsa-stage-name{color:var(--dsa-ink3);font-weight:400;}',
-        // ---- 主区：hero 卡 + KPI 条 + 卡片化的段落
-        '.dsa-main{padding:16px 20px 60px;background:var(--dsa-bg);}',
-        '.dsa-hero{background:var(--dsa-panel);border:1px solid var(--dsa-line);border-radius:var(--dsa-r);',
-        '  padding:16px 18px;box-shadow:var(--dsa-shadow);margin:0 0 14px;}',
-        '.dsa-kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin:0 0 14px;}',
-        '.dsa-kpi{background:var(--dsa-panel);border:1px solid var(--dsa-line);border-radius:var(--dsa-r);',
-        '  padding:11px 13px;box-shadow:var(--dsa-shadow);min-width:0;}',
-        '.dsa-kpi .k{font-size:11px;color:var(--dsa-ink3);letter-spacing:.04em;font-weight:550;',
-        '  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
-        '.dsa-kpi .v{font-family:var(--dsa-mono);font-size:21px;font-weight:600;letter-spacing:-.03em;margin-top:2px;',
-        '  font-variant-numeric:tabular-nums;line-height:1.2;white-space:nowrap;}',
-        '.dsa-kpi .v small{font-size:11px;color:var(--dsa-ink3);margin-left:2px;font-weight:400;letter-spacing:0;}',
-        '.dsa-kpi.hi{background:linear-gradient(180deg,color-mix(in srgb,var(--dsa-soft) 65%,var(--dsa-panel)),var(--dsa-panel));',
-        '  border-color:color-mix(in srgb,var(--dsa-accent) 22%,var(--dsa-line));}',
-        '.dsa-kpi.hi .v{color:var(--dsa-accent);}',
-        '.dsa-h1{font-size:20px;font-weight:680;letter-spacing:-.02em;}',
-        '.dsa-sub{margin:4px 0 0;}',
-        '.dsa-section{margin:20px 0 8px;}',
-        '.dsa-section h3{font-size:13px;font-weight:650;letter-spacing:-.005em;}',
-        '.dsa-card,.dsa-fold,.dsa-next{border-radius:var(--dsa-r);box-shadow:var(--dsa-shadow);}',
-        '.dsa-next{padding:13px 16px;margin:0 0 14px;}',
-        '.dsa-gate{padding:11px 15px;}',
-        '.dsa-gate .mark{font-size:14px;}',
-        '.dsa-code{border-radius:var(--dsa-r2);}',
-        '.dsa-tag{border-radius:999px;padding:0 7px;height:19px;line-height:18px;}',
-        '.dsa-badge{border-radius:999px;height:18px;line-height:17px;padding:0 7px;font-weight:550;}',
-        // ---- 右栏：运行记录卡片 + 终端风格的日志卡（日志固定深色，像 C 的 .log）
-        '.dsa-side{flex:0 0 330px;width:330px;background:var(--dsa-bg);padding-bottom:18px;}',
-        '.dsa-side-h{height:46px;background:transparent;}',
-        '.dsa-runs{flex:0 1 auto;max-height:34%;margin:12px 12px 0;overflow-y:auto;background:var(--dsa-panel);',
-        '  border:1px solid var(--dsa-line);border-radius:var(--dsa-r);box-shadow:var(--dsa-shadow);}',
-        '.dsa-run{padding:8px 12px;border-left:0;transition:background .16s;}',
-        '.dsa-run.sel{background:var(--dsa-soft);box-shadow:inset 3px 0 0 var(--dsa-accent);}',
-        '.dsa-run-h{margin:10px 12px 0;padding:9px 12px;border:1px solid var(--dsa-line);border-radius:var(--dsa-r);',
-        '  background:var(--dsa-panel);box-shadow:var(--dsa-shadow);}',
-        '.dsa-log{flex:1 1 auto;min-height:120px;margin:10px 12px 0;padding:11px 13px;border:1px solid #232a38;',
-        '  border-radius:var(--dsa-r);background:#141821;color:#c3c9d6;}',
-        '.dsa-log .ln-err{color:#e58d84;}',
-        '.dsa-log .ln-warn{color:#dfb267;}',
-        '.dsa-chat-card{margin:12px 12px 0;border-radius:var(--dsa-r);background:var(--dsa-panel);box-shadow:var(--dsa-shadow);}',
-        // ---- 弹窗与输入：跟着圆角走，输入框加柔光圈
-        '.dsa-modal{border-radius:14px;box-shadow:0 18px 50px rgba(16,24,40,.22);}',
-        '.dsa-input,.dsa-btn,.dsa-chat-btn,.dsa-menu-list button,.dsa-flow-step{border-radius:var(--dsa-r2);}',
-        // 路径输入 + 「选择…」：输入框吃掉剩余宽度，按钮不被挤扁；按钮与输入框同高（32px）
-        '.dsa-input-row{display:flex;align-items:center;gap:8px;}',
-        '.dsa-input-row .dsa-input{flex:1 1 auto;min-width:0;width:auto;}',
-        '.dsa-input-row .dsa-btn{flex:0 0 auto;height:32px;}',
-        '.dsa-field-note{color:var(--dsa-ink3);font-size:11px;line-height:1.5;}',
-        // ---- 断点：顶栏变高了，抽屉与遮罩的起点要跟着改
-        '.dsa-root[data-dsa-width="compact"] .dsa-rail{flex-basis:248px;width:248px;}',
-        '.dsa-root[data-dsa-width="compact"] .dsa-kpis{grid-template-columns:repeat(3,1fr);}',
-        '.dsa-root[data-dsa-width="narrow"] .dsa-kpis{grid-template-columns:repeat(2,1fr);}',
-        '.dsa-root[data-dsa-width="compact"] .dsa-side,',
-        '.dsa-root[data-dsa-width="mid"] .dsa-side,',
-        '.dsa-root[data-dsa-width="narrow"] .dsa-side{top:58px;}',
-        '.dsa-scrim{top:58px;}',
-        // ---- 折叠行：卡里的折叠不能是「卡中卡」，独立折叠也要有可点的手感
-        '.dsa-card .dsa-fold{margin-top:0;border:0;border-top:1px solid var(--dsa-line);border-radius:0;',
-        '  background:transparent;box-shadow:none;}',
-        '.dsa-card .dsa-fold>summary{padding:10px 15px;}',
-        // 折叠行压在卡片底部时，hover 底色要跟着卡片圆角收，否则卡片下缘会露出直角
-        '.dsa-card .dsa-fold:last-child>summary{border-radius:0 0 var(--dsa-r) var(--dsa-r);}',
-        '.dsa-card .dsa-fold[open]:last-child>summary{border-radius:0;}',
-        '.dsa-fold>summary{transition:background .15s;border-radius:inherit;}',
-        '.dsa-fold>summary:hover{background:var(--dsa-hover);}',
-        '.dsa-fold[open]>summary{border-bottom:1px solid var(--dsa-line);}',
-        // 独立折叠（执行细节 · 命令）平时只是一行可点的说明，展开后才长出卡片边
-        '.dsa-fold-quiet{margin:2px 0 0;border:0;border-radius:var(--dsa-r2);background:transparent;box-shadow:none;}',
-        '.dsa-fold-quiet>summary{padding:7px 10px;font-size:12px;}',
-        '.dsa-fold-quiet[open]{background:var(--dsa-card);border:1px solid var(--dsa-line);box-shadow:var(--dsa-shadow);}',
-        '.dsa-fold-quiet[open]>summary{border-radius:var(--dsa-r2) var(--dsa-r2) 0 0;}',
-        '.dsa-fold-body{padding:10px 12px 12px;}',
-        // 闸门行里的小折叠（证据）：跟大折叠同一套三角，但更轻，不抢闸门结论
-        '.dsa-fold-sub>summary{cursor:pointer;list-style:none;font-size:11.5px;color:var(--dsa-ink2);}',
-        '.dsa-fold-sub>summary::-webkit-details-marker{display:none;}',
-        '.dsa-fold-sub>summary:before{content:"▸";display:inline-block;width:12px;color:var(--dsa-ink3);}',
-        '.dsa-fold-sub[open]>summary:before{content:"▾";}',
-        // ---- 项目行：整行可点 + 右侧移除键（两个并列 button，不能嵌套）
-        '.dsa-proj{position:relative;}',
-        '.dsa-proj-main{display:block;width:100%;padding:0 22px 0 0;border:0;background:none;',
-        '  font:inherit;color:inherit;text-align:left;cursor:pointer;}',
-        '.dsa-proj-main:focus-visible{outline:2px solid var(--dsa-accent);outline-offset:2px;}',
-        '.dsa-proj-del{position:absolute;top:5px;right:5px;width:20px;height:20px;padding:0;border:0;',
-        '  border-radius:6px;background:transparent;color:var(--dsa-ink2);font-size:14px;line-height:18px;',
-        // 常态可见（.3）：藏到悬停才出现等于没有按钮，用户会问「删除在哪」
-        '  cursor:pointer;opacity:.3;transition:opacity .15s,background .15s,color .15s;}',
-        '.dsa-proj:hover .dsa-proj-del,.dsa-proj:focus-within .dsa-proj-del{opacity:1;}',
-        // 没有 hover 的设备（触屏笔记本、平板）上没有「悬停」这一步，移除键不能永远隐身
-        '@media (hover: none){.dsa-proj-del{opacity:.55;}}',
-        '.dsa-proj-del:hover{background:var(--dsa-errsoft);color:var(--dsa-err);}',
-        '.dsa-proj-del:focus-visible{opacity:1;outline:2px solid var(--dsa-accent);outline-offset:1px;}',
-        // 目录已经不见的项目：移除键常显，因为这是用户唯一能对它做的动作
-        '.dsa-proj.orphan .dsa-proj-del{opacity:.85;}',
-        '.dsa-proj.orphan .dsa-proj-name{color:var(--dsa-err);}',
-        // ---- 每个项目下面那条「研究对话」：常驻可见（不等 hover），点一下就进会话
-        '.dsa-proj-chat{display:flex;align-items:center;gap:6px;width:auto;margin:5px 0 0 27px;height:23px;',
-        '  padding:0 7px;border:1px solid var(--dsa-line2);border-radius:6px;background:transparent;',
-        '  color:var(--dsa-ink);font:inherit;font-size:11.5px;text-align:left;cursor:pointer;',
-        '  transition:background .12s,border-color .12s,color .12s;}',
-        '.dsa-proj-chat:hover{border-color:var(--dsa-accent);color:var(--dsa-accent);background:var(--dsa-soft);}',
-        '.dsa-proj-chat:focus-visible{outline:2px solid var(--dsa-accent);outline-offset:1px;}',
-        '.dsa-proj-chat.run{border-color:var(--dsa-accent);color:var(--dsa-accent);}',
-        '.dsa-proj-chat .dsa-chat-dot{flex:0 0 auto;margin-right:0;}',
-        '.dsa-proj-chat-tx{font-weight:550;white-space:nowrap;}',
-        '.dsa-proj-chat-state{min-width:0;font-size:11px;color:var(--dsa-ink3);white-space:nowrap;',
-        '  overflow:hidden;text-overflow:ellipsis;}',
-        '.dsa-proj-chat.bound .dsa-proj-chat-state{color:var(--dsa-ok);}',
-        // 「当前对话」= 右上角那条对话就属于这个项目：实心一点，和「只是绑过」区分开
-        '.dsa-proj-chat.current{border-color:var(--dsa-ok);background:var(--dsa-soft);}',
-        '.dsa-proj-chat.current .dsa-proj-chat-state{color:var(--dsa-ok);font-weight:600;}',
-        '.dsa-proj-chat.run .dsa-proj-chat-state{color:var(--dsa-accent);}',
-        '.dsa-proj-chat-go{margin-left:auto;font-size:11px;color:var(--dsa-ctl);}',
-        '.dsa-proj-chat:hover .dsa-proj-chat-go{color:var(--dsa-accent);}',
-        '.dsa-proj-chat:disabled{opacity:.5;cursor:default;border-style:dashed;}',
-        '.dsa-proj-chat.gone{color:var(--dsa-err);}',
-        // ---- 移除项目的确认弹窗
-        '.dsa-forget-name{font-size:13px;font-weight:600;color:var(--dsa-ink);}',
-        '.dsa-forget-path{margin-top:3px;font-family:var(--dsa-mono);font-size:11px;color:var(--dsa-ink3);',
-        '  word-break:break-all;}',
-        '.dsa-forget-facts{margin-top:10px;padding:10px 12px;border-radius:var(--dsa-r2);background:var(--dsa-card2);',
-        '  border:1px solid var(--dsa-line);font-size:12px;color:var(--dsa-ink2);line-height:1.7;}',
-        '.dsa-ack{display:flex;align-items:flex-start;gap:8px;margin-top:12px;font-size:12.5px;color:var(--dsa-ink);cursor:pointer;}',
-        '.dsa-ack input{margin:2px 0 0;flex:0 0 auto;}',
-        /* 弹窗内的二次确认条：破坏性动作不走 window.confirm */
-        '.dsa-ask{display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:8px 10px;',
-        '  border:1px solid var(--dsa-line2);border-radius:var(--dsa-r2);background:var(--dsa-warnsoft);}',
-        '.dsa-ask-t{flex:1 1 auto;font-size:12.5px;line-height:1.5;color:var(--dsa-ink);}',
-        // ---- 产物中心
-        '.dsa-art-bar{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;}',
-        '.dsa-tabs{display:inline-flex;gap:4px;padding:3px;border-radius:999px;background:var(--dsa-card2);',
-        '  border:1px solid var(--dsa-line);}',
-        '.dsa-tab{padding:5px 12px;border:0;border-radius:999px;background:transparent;color:var(--dsa-ink2);',
-        '  font:inherit;font-size:12px;cursor:pointer;}',
-        '.dsa-tab:hover{background:var(--dsa-hover);color:var(--dsa-ink);}',
-        '.dsa-tab.sel{background:var(--dsa-panel);color:var(--dsa-ink);font-weight:600;box-shadow:var(--dsa-shadow);}',
-        '.dsa-art-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:10px;}',
-        '.dsa-art-card{display:flex;flex-direction:column;gap:4px;padding:6px;border:1px solid var(--dsa-line);',
-        '  border-radius:var(--dsa-r2);background:var(--dsa-card);cursor:pointer;text-align:left;min-width:0;}',
-        '.dsa-art-card:hover{border-color:var(--dsa-line2);box-shadow:var(--dsa-shadow2);}',
-        '.dsa-art-card.sel{border-color:var(--dsa-accent);box-shadow:0 0 0 2px var(--dsa-soft);}',
-        '.dsa-art-thumb{width:100%;height:96px;object-fit:contain;background:var(--dsa-card2);border-radius:6px;}',
-        '.dsa-art-ext{display:flex;align-items:center;justify-content:center;height:96px;border-radius:6px;',
-        '  background:var(--dsa-soft);color:var(--dsa-accent);font-family:var(--dsa-mono);font-size:13px;}',
-        '.dsa-art-name{font-size:11.5px;color:var(--dsa-ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
-        '.dsa-art-meta{font-size:11px;color:var(--dsa-ink3);}',
-        '.dsa-art-detail{margin-top:12px;padding:12px;border:1px solid var(--dsa-line);border-radius:var(--dsa-r2);',
-        '  background:var(--dsa-card);}',
-        '.dsa-art-detail-h{display:flex;align-items:center;gap:10px;margin-bottom:10px;font-size:12px;',
-        '  font-family:var(--dsa-mono);color:var(--dsa-ink2);overflow:hidden;}',
-        '.dsa-art-detail-h b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;}',
-        '.dsa-art-full{display:block;max-width:100%;max-height:60vh;margin:0 auto;border-radius:6px;}',
-        '.dsa-art-tablewrap{max-height:52vh;overflow:auto;border:1px solid var(--dsa-line);border-radius:6px;}',
-        '.dsa-art-table{border-collapse:collapse;font-size:11.5px;white-space:nowrap;}',
-        '.dsa-art-table th,.dsa-art-table td{padding:4px 8px;border-bottom:1px solid var(--dsa-line);text-align:left;}',
-        '.dsa-art-table th{position:sticky;top:0;background:var(--dsa-card2);font-weight:600;color:var(--dsa-ink2);}',
-        '.dsa-art-pre{margin:0;padding:10px;max-height:52vh;overflow:auto;border-radius:6px;background:var(--dsa-card2);',
-        '  font-family:var(--dsa-mono);font-size:11.5px;line-height:1.6;color:var(--dsa-ink);white-space:pre-wrap;}',
-        // ---- 契约卡
-        '.dsa-reg-section{margin-top:14px;}',
-        '.dsa-reg-card{margin-top:8px;}',
-        '.dsa-reg-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}',
-        '.dsa-reg-pill{display:inline-flex;align-items:baseline;gap:5px;padding:3px 10px;border-radius:999px;',
-        '  background:var(--dsa-card2);border:1px solid var(--dsa-line);font-size:11px;color:var(--dsa-ink2);}',
-        '.dsa-reg-pill b{font-size:13px;color:var(--dsa-ink);}',
-        '.dsa-reg-pill.muted{color:var(--dsa-ink3);background:transparent;border-style:dashed;}',
-        '.dsa-reg-lists{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin-top:12px;}',
-        '.dsa-reg-list{min-width:0;}',
-        '.dsa-reg-h{margin-bottom:4px;font-size:11px;letter-spacing:.04em;color:var(--dsa-ink3);text-transform:uppercase;}',
-        '.dsa-reg-item{font-size:12px;color:var(--dsa-ink);line-height:1.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
-        '.dsa-reg-item b{font-family:var(--dsa-mono);font-weight:600;}',
-        '.dsa-reg-issues{margin-top:10px;padding-top:8px;border-top:1px solid var(--dsa-line);',
-        '  font-size:11.5px;line-height:1.6;color:var(--dsa-ink2);}',
-        // ---- 大图（点缩略图就地弹一层，不让人滚到底部找按钮）
-        '.dsa-lightbox{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;',
-        '  padding:24px;background:rgba(10,12,16,.78);}',
-        '.dsa-lightbox-card{position:relative;display:flex;flex-direction:column;gap:10px;max-width:min(1480px,94vw);',
-        '  max-height:92vh;padding:12px 14px 14px;border-radius:var(--dsa-r);background:var(--dsa-panel);',
-        '  border:1px solid var(--dsa-line2);box-shadow:0 18px 48px rgba(8,10,14,.45);}',
-        // 表格/文本/PDF 要宽：图是竖着长的，表是横着长的
-        '.dsa-lightbox-card.wide{width:min(1600px,96vw);max-width:min(1600px,96vw);}',
-        '.dsa-art-tablewrap-lg{max-height:70vh;background:var(--dsa-panel);}',
-        '.dsa-art-pre-lg{max-height:70vh;background:var(--dsa-card2);}',
-        '.dsa-lightbox-pdf{width:100%;height:70vh;border:0;border-radius:var(--dsa-r2);background:var(--dsa-card2);}',
-        '.dsa-lightbox-bar{display:flex;align-items:center;gap:12px;font-size:12px;color:var(--dsa-ink2);min-width:0;}',
-        '.dsa-lightbox-bar .dsa-link{flex:0 0 auto;white-space:nowrap;}',
-        '.dsa-lightbox-name{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;',
-        '  font-family:var(--dsa-mono);font-size:11.5px;font-weight:600;color:var(--dsa-ink);}',
-        '.dsa-lightbox-img{display:block;max-width:100%;max-height:76vh;margin:0 auto;object-fit:contain;',
-        '  border-radius:var(--dsa-r2);background:var(--dsa-card2);}',
-        '.dsa-lightbox-navs{position:absolute;inset:44px 0 32px;display:flex;align-items:center;justify-content:space-between;',
-        '  pointer-events:none;}',
-        '.dsa-lightbox-nav{pointer-events:auto;width:38px;height:38px;border-radius:999px;border:1px solid var(--dsa-line2);',
-        '  background:var(--dsa-panel);color:var(--dsa-ink2);font-size:20px;line-height:1;cursor:pointer;',
-        '  box-shadow:var(--dsa-shadow2);}',
-        '.dsa-lightbox-nav:hover{color:var(--dsa-ink);border-color:var(--dsa-accent);}',
-        '.dsa-lightbox-nav.prev{margin-left:-19px;}',
-        '.dsa-lightbox-nav.next{margin-right:-19px;}',
-        // 首屏骨架：只占位、不假装有数据。灰条用面板线条色，脉冲节奏比转圈慢，
-        // 看起来像「在铺页面」而不是「卡住了」；reduced-motion 下静止不动。
-        '.dsa-skeleton .dsa-rail,.dsa-skeleton .dsa-main,.dsa-skeleton .dsa-side{pointer-events:none;}',
-        '.dsa-sk-bar{display:block;height:9px;border-radius:3px;background:var(--dsa-line);',
-        '  animation:dsa-cmp-pulse 1.8s ease-in-out infinite;}',
-        '.dsa-sk-bar.tall{height:14px;}',
-        '.dsa-sk-row{display:flex;align-items:center;min-height:26px;padding:0 14px;}',
-        '.dsa-sk-row .dsa-sk-bar{width:100%;}',
-        '.dsa-sk-hero{display:flex;flex-direction:column;gap:10px;margin:6px 0 18px;}',
-        '.dsa-sk-kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:14px;}',
-        '.dsa-sk-card{height:64px;border:1px solid var(--dsa-line);border-radius:var(--dsa-r,6px);background:var(--dsa-card);}',
-        '.dsa-sk-block{border:1px solid var(--dsa-line);border-radius:var(--dsa-r,6px);background:var(--dsa-card);padding:10px 0;}',
-        '.dsa-skeleton .dsa-side .dsa-sk-block{margin:10px 12px;}',
-        '@media (prefers-reduced-motion:reduce){.dsa-sk-bar{animation:none;opacity:.75}}',
-        // ==================================================================
-        // 密度档：紧凑（用户要「间距调小、紧凑一点」）
-        // 口径：只收紧「内边距 / 行高 / 间距 / 控件尺寸」，不动栏宽——
-        //      栏宽一动，窄屏立刻横向溢出（视觉回归会抓 docWidth > viewWidth）。
-        // 同时保证：并排控件最小间隙 8px，按钮永远不粘连；顶栏高度收进一个变量，
-        //      抽屉/遮罩的起始位置跟着它走，不再写死 44px（原来比 58px 的顶栏短一截）。
-        // ==================================================================
-        '.dsa-root{--dsa-top-h:46px;}',
-        '.dsa-top{height:var(--dsa-top-h);flex:0 0 var(--dsa-top-h);gap:8px;padding:0 12px;}',
-        '.dsa-root[data-dsa-width="narrow"] .dsa-side{top:var(--dsa-top-h);}',
-        '.dsa-scrim{inset:var(--dsa-top-h) 0 0 0;}',
-        '.dsa-logo{flex:0 0 26px;width:26px;height:26px;border-radius:8px;font-size:13px;}',
-        '.dsa-brand{gap:8px;}',
-        '.dsa-brand b{font-size:13px;}',
-        '.dsa-brand-tx span{font-size:11px;}',
-        // 顶栏与阶段头的按钮统一 28px：一排并排时高度一致，缝才看得见
-        '.dsa-chip{height:22px;padding:0 9px;font-size:11px;}',
-        '.dsa-btn{height:28px;padding:0 10px;font-size:12px;}',
-        '.dsa-menu>summary{height:28px;padding:0 10px;font-size:12px;}',
-        '.dsa-menu-list{top:32px;}',
-        '.dsa-menu-list button{padding:6px 8px;font-size:12px;}',
-        // 左栏：项目行与阶段行各收 1–2px，14 个项目时一屏能多露两行
-        '.dsa-rail{padding:10px 10px 0;}',
-        '.dsa-rail-h{padding:0 5px 6px;font-size:11px;}',
-        '.dsa-proj{padding:6px 7px;}',
-        '.dsa-proj-h{gap:6px;}',
-        '.dsa-proj-name{font-size:12px;}',
-        '.dsa-proj-path{font-size:11px;}',
-        '.dsa-proj-actions{gap:10px;padding:4px 3px 0;}',
-        '.dsa-stage{padding:4px 7px;gap:8px;}',
-        '.dsa-stage-name{font-size:12px;}',
-        '.dsa-stage-meta{padding:1px 6px;font-size:11px;}',
-        // 主区：外框与 hero 各收一圈，KPI 数字小一号（21→18），五张卡照样一屏排开
-        '.dsa-main{padding:12px 14px 36px;}',
-        '.dsa-hero{padding:12px 14px;margin:0 0 10px;}',
-        '.dsa-h1{font-size:18px;}',
-        '.dsa-sub{margin:3px 0 0;font-size:12px;}',
-        '.dsa-kpis{gap:8px;margin:0 0 10px;}',
-        '.dsa-kpi{padding:8px 11px;}',
-        '.dsa-kpi .k{font-size:11px;}',
-        '.dsa-kpi .v{font-size:18px;margin-top:1px;}',
-        '.dsa-section{margin:14px 0 6px;}',
-        '.dsa-pad{padding:10px 12px;}',
-        '.dsa-gate{padding:9px 12px;gap:8px;}',
-        '.dsa-next{padding:10px 13px;margin:0 0 10px;gap:10px;}',
-        '.dsa-next-line{font-size:13.5px;}',
-        '.dsa-next-sub{font-size:12px;margin-top:2px;}',
-        '.dsa-fold{margin-top:6px;}',
-        '.dsa-fold>summary{padding:7px 12px;font-size:12px;}',
-        '.dsa-fold-body{padding:9px 11px 10px;}',
-        '.dsa-fold-quiet>summary{padding:6px 9px;font-size:11.5px;}',
-        '.dsa-hint{font-size:11.5px;}',
-        '.dsa-kv{gap:12px;}',
-        // 右栏运行台：卡片与日志各收一圈，日志区因此更长
-        '.dsa-side-h{height:40px;}',
-        '.dsa-runs{margin:10px 10px 0;}',
-        '.dsa-run{padding:6px 9px;}',
-        '.dsa-run-h{margin:9px 10px 0;padding:8px 10px;}',
-        '.dsa-log{margin:9px 10px 0;padding:10px 12px;}',
-        '.dsa-chat-card{margin:10px 10px 0;}',
-        '.dsa-tab{padding:4px 10px;font-size:11.5px;}',
-        '.dsa-tag{height:18px;line-height:17px;padding:0 6px;font-size:11px;}',
-        '.dsa-badge{height:17px;line-height:16px;padding:0 6px;}',
-        // 兜底：并排的两个控件之间至少 8px，谁也别贴谁（0 间隙是「挤到一起」的元凶）
-        '.dsa-row{gap:8px;}',
-        '.dsa-inline{gap:8px;}'      ].join('');
-      function installStyles() {
-        if (document.getElementById('dsa-style')) return function () {};
-        var el = document.createElement('style');
-        el.id = 'dsa-style';
-        el.textContent = CSS;
-        document.head.appendChild(el);
-        return function () {
-          try {
-            el.remove();
-          } catch (e) {
-            void e;
-          }
-        };
+      function SearchIcon() {
+        return h(IconSvg, null, h('circle', { cx: 7, cy: 7, r: 3.6 }), h('path', { d: 'M9.8 9.8L13 13' }));
       }
-      /* ------------------------------------------------------------------ *
-       * 小组件
-       * ------------------------------------------------------------------ */
+      function CloseIcon() {
+        return h(IconSvg, null, h('path', { d: 'M4 4l8 8M12 4l-8 8' }));
+      }
+      function FolderIcon(props) {
+        var size = props.size || 16;
+        return h('svg', {
+          width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+          strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true',
+        }, h('path', { d: 'M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2h7A1.5 1.5 0 0 1 19 9.5v8A1.5 1.5 0 0 1 17.5 19h-13A1.5 1.5 0 0 1 3 17.5z' }));
+      }
       function Chip(props) {
         return h('span', { className: 'dsa-chip ' + (props.tone || ''), title: props.title || undefined }, props.children);
       }
-      function Btn(props) {
-        var cls = 'dsa-btn' + (props.variant ? ' ' + props.variant : '') + (props.className ? ' ' + props.className : '');
-        return h(
-          'button',
-          {
-            type: 'button',
-            className: cls,
-            disabled: props.disabled,
-            title: props.title || undefined,
-            onClick: props.onClick          },
-          props.children        );
-      }
-      function stateDot(status) {
-        if (status === 'done') return 'pass';
-        if (status === 'blocked') return 'fail';
-        if (status === 'review') return 'warn';
-        if (status === 'na') return 'na';
-        if (status === 'running') return 'run';
-        return '';
-      }
-      function statusLabel(status) {
-        return t(STATUS_TEXT[status] || 'todo');
-      }
-      function gateMarks(gates) {
-        var pass = 0;
-        var fail = 0;
-        var unknown = 0;
-        var na = 0;
-        for (var i = 0; i < gates.length; i += 1) {
-          if (gates[i].status === 'pass') pass += 1;
-          else if (gates[i].status === 'fail') fail += 1;
-          else if (gates[i].status === 'na') na += 1;
-          else unknown += 1;
-        }
-        return { pass: pass, fail: fail, unjudged: unknown, na: na };
-      }
-      // 一套词表：通过 / 未通过 / 等你拍板 / 还没查 / 不适用。
-      // 「不适用」是有依据的结论（例如纯表格语料不需要文本编码），既不能画成通过，也不能画成未核。
-      function gateFace(gate, stageStatus) {
-        if (gate.status === 'na') return { cls: 'na', mark: '—', word: '不适用' };
-        if (stageStatus === 'todo' && gate.status !== 'pass') return { cls: 'todo', mark: '○', word: '未评价' };
-        if (gate.status === 'pass') return { cls: 'pass', mark: '✓', word: '通过' };
-        if (gate.status === 'fail') return { cls: 'fail', mark: '✗', word: '未通过' };
-        if (gate.manual) return { cls: 'manual', mark: '!', word: '等你拍板' };
-        return { cls: 'unjudged', mark: '○', word: '还没查' };
-      }
-      function stageWord(stage) {
-        if (!stage) return '';
-        if (stage.status === 'running') return '运行中';
-        if (stage.status === 'done') return '已完成';
-        if (stage.status === 'blocked') return '被拦住';
-        if (stage.status === 'todo') return '未开始';
-        if (stage.status === 'na') return '不适用';
-        var manual = 0;
-        var unknown = 0;
-        for (var i = 0; i < (stage.gates || []).length; i += 1) {
-          var gate = stage.gates[i];
-          if (gate.level === 'info') continue;
-          if (gate.status !== 'unjudged') continue;
-          if (gate.manual) manual += 1;
-          else unknown += 1;
-        }
-        if (manual) return '等你拍板 ' + manual;
-        if (unknown) return '还没查 ' + unknown;
-        return '待复核';
-      }
-      function Badge(props) {
-        var mark = props.state === 'pass' ? '✓' : props.state === 'fail' ? '✗' : '?';
-        return h('span', { className: 'dsa-badge ' + props.state, title: props.title || undefined }, mark + ' ' + props.text);
-      }
-      /** 一个 AI 入口：不再让用户猜「起草 / 让 AI 做 / 复核」有什么区别。 */
-      function AiMenu(props) {
-        var items = [];
-        if (props.onDraft) items.push({ label: '写一份草稿', hint: '不跑脚本，只依据已有产物，落 docs/', run: props.onDraft });
-        if (props.onChat) items.push({ label: '在对话里做这一步', hint: '投任务卡到项目会话，会改文件', run: props.onChat });
-        if (props.onReview) items.push({ label: '复核', hint: '让模型按证据包写问题清单', run: props.onReview });
-        if (!items.length) return null;
-        return h(
-          'details',
-          { className: 'dsa-menu' },
-          h('summary', { className: 'dsa-btn' + (props.primary ? ' primary' : ''), title: 'AI 接手' }, 'AI 接手 ▾'),
-          h(
-            'div',
-            { className: 'dsa-menu-list' },
-            items.map(function (item) {
-              return h(
-                'button',
-                {
-                  key: item.label,
-                  type: 'button',
-                  disabled: props.busy,
-                  onClick: function (e) {
-                    var d = e.currentTarget.closest('details');
-                    if (d) d.open = false;
-                    item.run();
-                  }
-                },
-                item.label,
-                h('span', { className: 'dsa-hint' }, item.hint)
-              );
-            })
-          )
-        );
-      }
-      /** 一行闸门：符号 + 一句话结论 + 证据。符号只有 ✓ ✗ ○ ! 四种，别再造新词。 */
-      function GateRow(props) {
-        var gate = props.gate;
-        var face = gateFace(gate, props.stageStatus);
-        var missing = (gate.evidence || []).map(function (item) { return item.actual && typeof item.actual.missing === 'string' ? item.actual.missing : ''; }).filter(Boolean);
-        var detail = gate.status === 'unjudged' && missing.length ? '缺少当前证据：' + missing.join('；') : gate.detail;
-        var tag = null;
-        if (gate.status === 'fail') {
-          tag = h('span', { className: 'dsa-tag ' + (gate.level === 'error' ? 'err' : '') }, gate.level === 'error' ? '拦截' : '提醒');
-        } else if (gate.manual && gate.status === 'unjudged') {
-          tag = props.stageStatus === 'todo'            ? h('span', { className: 'dsa-tag' }, '开工后确认')            : h('span', { className: 'dsa-tag manual' }, '需要你');
-        }
-        return h(
-          'div',
-          { className: 'dsa-gate ' + face.cls },
-          h('span', { className: 'mark', title: face.word }, face.mark),
-          h(
-            'div',
-            { className: 'dsa-gate-body' },
-            h(
-              'div',
-              { className: 'dsa-gate-label' },
-              gate.label,
-              tag,
-              gate.manual && props.stageStatus !== 'todo'                ? h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'dsa-btn ghost',
-                      style: { height: '24px', padding: '0 7px', fontSize: '12px', marginLeft: 'auto' },
-                      onClick: function () { props.onAdjudicate(gate); }
-                    },
-                    gate.status === 'unjudged' ? '现在拍板' : '重新裁定'                  )                : null            ),
-            h(
-              'div',
-              { className: 'dsa-gate-detail' },
-              detail || (gate.status === 'unjudged' ? '缺少可读证据，先补齐再判断' : '')
-            ),
-            gate.source ? h('div', { className: 'dsa-hint', style: { fontSize: '11.5px', marginTop: '2px' } }, gate.source==='skill'?'技能体检':gate.source==='workbench'?'工作台核验':String(gate.source)) : null,
-            gate.blockingAt?h('div',{className:'dsa-hint'},'生效检查点：'+({'data-ready':'数据准备完成','analysis-ready':'进入分析','figures-ready':'进入成稿','manuscript-ready':'进入质检','delivery-ready':'正式交付'}[gate.blockingAt]||gate.blockingAt)):null,
-            gate.validationReason ? h('div',{className:'dsa-error'},gate.validationReason==='binding-mismatch'?'输入已变化，原结论已失效':'报告暂时无法采信，请重新体检') : null,
-            gate.advice ? h('div',{className:'dsa-hint',style:{overflowWrap:'anywhere'}},gate.advice) : null,
-            gate.evidence && gate.evidence.length ? h('details',{className:'dsa-fold'},
-              h('summary',null,'查看判定依据'),
-              gate.generatedAt?h('p',{className:'dsa-hint'},'报告生成于 '+fmtTime(gate.generatedAt)):null,
-              h('pre',{className:'dsa-mono',style:{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:'240px',overflowY:'auto'}},JSON.stringify(gate.evidence,null,2)),
-              (gate.resources||[]).map(function(resource){return h('p',{key:resource.id,style:{overflowWrap:'anywhere'}},
-                h('a',{href:API+'/gates/resource?stageId='+encodeURIComponent(props.stageId||'')+'&gateId='+encodeURIComponent(gate.id)+'&resourceId='+encodeURIComponent(resource.id),download:true},resource.path));})
-            ) : null          )
-        );
-      }
       function Modal(props) {
         var boxRef = useRef(null);
-        // 打开就把焦点放进弹窗：键盘用户不应该还停在背后的阶段栏上
         useEffect(function () {
           var node = boxRef.current;
-          if (!node || typeof node.focus !== 'function') return;
-          try {
-            node.focus();
-          } catch (error) {
-            /* 焦点抢不到不影响操作 */
-          }
-        }, []);
-        // Esc 关闭：遮罩挡住了背后整块面板，没有键盘出口时用户只能找鼠标
-        useEffect(function () {
-          function onKey(e) {
-            if (e.key !== 'Escape') return;
-            // 大图是弹窗里再弹的一层：Esc 先关它，别一次把弹窗也关掉
-            if (typeof document !== 'undefined' && document.querySelector && document.querySelector('.dsa-lightbox')) return;
-            if (props.onCancel) props.onCancel();
-            else if (props.onMask) props.onMask(e);
-          }
-          window.addEventListener('keydown', onKey);
-          return function () {
-            window.removeEventListener('keydown', onKey);
-          };
-        }, [props.onCancel, props.onMask]);
-        // Tab 不能跑出弹窗：aria-modal 只是声明，焦点还得自己圈住；关闭时把焦点还给原来的位置
-        useEffect(function () {
-          var box = boxRef.current;
-          var previous = null;
-          try {
-            previous = window.document ? window.document.activeElement : null;
-          } catch (error) {
-            previous = null;
-          }
-          function onKey(e) {
-            if (e.key !== 'Tab' || !box || typeof box.querySelector !== 'function') return;
-            var nodes = box.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
-            var list = Array.prototype.filter.call(nodes, function (node) {
-              return !node.disabled && node.getAttribute && node.getAttribute('aria-hidden') !== 'true';
-            });
-            if (!list.length) return;
-            var first = list[0];
-            var last = list[list.length - 1];
-            var active = window.document ? window.document.activeElement : null;
-            if (!e.shiftKey && active === last) {
-              e.preventDefault();
-              first.focus();
-            } else if (e.shiftKey && (active === first || active === box)) {
-              e.preventDefault();
-              last.focus();
-            }
-          }
-          window.addEventListener('keydown', onKey);
-          return function () {
-            window.removeEventListener('keydown', onKey);
+          if (node && typeof node.focus === 'function') {
             try {
-              if (previous && typeof previous.focus === 'function') previous.focus();
+              node.focus();
             } catch (error) {
-              /* 焦点还不了不影响操作 */
+              /* ignore */
             }
-          };
-        }, []);
-        // 点空白处关闭：给了 onMask 就用它；浏览类弹窗传 maskClose 即可点遮罩关掉。
-        // 用 onMouseDown 而不是 onClick，配合卡片上的 stopPropagation：
-        // 从卡片里按下、拖到外面松开不会误关，也不会把正在拖选的文字丢掉。
-        var onMask = props.onMask || (props.maskClose && props.onCancel          ? function () { props.onCancel(); }          : null);
-        return h(
-          'div',
-          { className: 'dsa-mask', onMouseDown: onMask || undefined },
-          h(
-            'div',
-            {
-              className: 'dsa-modal',
-              ref: boxRef,
-              role: 'dialog',
-              'aria-modal': 'true',
-              'aria-label': props.title,
-              tabIndex: -1,
-              onMouseDown: function (e) { e.stopPropagation(); },
-            },
-            h('h2', null, props.title),
-            props.desc ? h('p', null, props.desc) : null,
-            // 操作失败要显示在弹窗里：错误落在面板背后等于没报
-            props.error ? h('div', { className: 'dsa-error', role: 'alert', style: { marginBottom: '10px' } }, props.error) : null,
-            props.children,
-            h(
-              'div',
-              { className: 'dsa-modal-foot' },
-              props.onCancel ? h(Btn, { variant: 'ghost', onClick: props.onCancel }, t('cancel')) : null,
-              props.onConfirm                ? h(Btn, { variant: props.confirmVariant || 'primary', disabled: props.busy || props.confirmDisabled, onClick: props.onConfirm }, props.busy ? t('saving') : props.confirmText || t('confirm'))                : null            )
-          )
-        );
-      }
-      /* ------------------------------------------------------------------ *
-       * 启动自检
-       * ------------------------------------------------------------------ */
-      var CHECK_MARK = { pass: '✓', fail: '✗', warn: '!', unjudged: '?' };
-      /** 环境自检的紧凑清单：面板顶部横幅与设置弹窗共用。 */
-      function PreflightList(props) {
-        var pre = props.preflight;
-        if (!pre || pre.status === 'pending' || !pre.checks || !pre.checks.length) {
-          return h('div', { className: 'dsa-hint' }, t('envPending'));
-        }
-        return h(
-          'div',
-          null,
-          pre.checks.map(function (item) {
-            return h(
-              'div',
-              { key: item.id, className: 'dsa-check ' + item.status },
-              h('span', { className: 'dsa-check-mark' }, CHECK_MARK[item.status] || '?'),
-              h(
-                'span',
-                { className: 'dsa-check-body' },
-                h('span', { className: 'dsa-check-label' }, item.label),
-                h('span', { className: 'dsa-check-detail' }, ' — ' + item.detail),
-                item.hint && item.status !== 'pass'                  ? h('div', { className: 'dsa-check-advice' }, t('advice') + '：' + item.hint)                  : null              )
-            );
-          })
-        );
-      }
-      function PreflightBanner(props) {
-        var pre = props.preflight;
-        if (!pre || pre.status === 'pass' || pre.status === 'pending') return null;
-        var fails = (pre.checks || []).filter(function (item) { return item.status === 'fail'; });
-        if (!fails.length) return null;
-        return h(
-          'div',
-          { className: 'dsa-banner' },
-          h('b', null, t('envFail')),
-          h(
-            'div',
-            { className: 'dsa-banner-text' },
-            fails.map(function (item) { return item.label + '：' + item.detail; }).join('；')
-          ),
-          h(Btn, { disabled: props.busy, onClick: props.onRecheck }, t('recheck'))
-        );
-      }
-      /** 环境不全（有 error 级检查没通过）时，工作台整体不可用。还没查到结论时不算拦。 */
-      function envBlocked(pre) {
-        if (!pre) return false;
-        if (pre.status === 'fail') return true;
-        return (pre.checks || []).some(function (item) { return item.status === 'fail'; });
-      }
-      /**
-       * 环境闸门：拦在整个工作台前面。
-       * 只有两条出路——让 AI 装好，或者自己去设置里填路径；判不了/warn 不算拦（Mac 上没有 Word COM 是正常的）。
-       */
-      function EnvGate(props) {
-        var pre = props.preflight;
-        var fails = (pre && pre.checks ? pre.checks : []).filter(function (item) { return item.status === 'fail'; });
-        return h(
-          'div',
-          { className: 'dsa-main', style: { overflow: 'auto' } },
-          h(
-            'div',
-            { className: 'dsa-card dsa-pad', style: { maxWidth: '760px', margin: '28px auto', padding: '22px 24px' } },
-            h('h1', { className: 'dsa-h1', style: { marginBottom: '6px' } }, '环境还没就绪'),
-            h(
-              'p',
-              { className: 'dsa-sub', style: { marginTop: 0 } },
-              '工作台不自己算数：脚本来自技能包，跑在 Python 子进程里。这两样缺一样，十个阶段一个都跑不起来，所以先把环境装齐再进来。'            ),
-            fails.length              ? h(
-                  'div',
-                  { className: 'dsa-hint', style: { marginBottom: '8px' } },
-                  '卡住的是：' + fails.map(function (item) { return item.label; }).join('、') + '（共 ' + fails.length + ' 项）'                )              : null,
-            h(PreflightList, { preflight: pre }),
-            h(
-              'div',
-              { className: 'dsa-inline', style: { marginTop: '16px', gap: '8px', flexWrap: 'wrap' } },
-              h(
-                Btn,
-                { variant: 'primary', disabled: props.busy, onClick: props.onAi },
-                props.busy ? '正在开临时会话…' : '让 AI 装好环境'              ),
-              h(Btn, { disabled: props.busy, onClick: props.onSettings }, '手动配置'),
-              h(Btn, { disabled: props.busy, onClick: props.onRecheck }, t('recheck'))
-            ),
-            h(
-              'div',
-              { className: 'dsa-hint', style: { marginTop: '10px' } },
-              '点「让 AI 装好环境」会开一个临时会话：它自己 clone 技能包、装 Python 依赖（机器上没有 Python 的话连 Python 一起装），再用 data_analysis_doctor 自查。装完回到这里会自动复查，通过后就能正常使用。'            ),
-            props.note ? h('div', { className: 'dsa-error', style: { marginTop: '8px' } }, props.note) : null          )
-        );
-      }
-      /* ------------------------------------------------------------------ *
-       * 面板
-       * ------------------------------------------------------------------ */
-      function Panel() {
-        var snapState = useState(null);
-        var snap = snapState[0];
-        var setSnap = snapState[1];
-        var errState = useState('');
-        var error = errState[0];
-        var setError = errState[1];
-        var loadingState = useState(true);
-        var loading = loadingState[0];
-        var setLoading = loadingState[1];
-        // 重进面板：先用上次快照渲染（宿主一次快照是整项目扫描，0.1～3 秒不等），
-        // 别先闪一帧「无项目」再等数据回来；下面的 load 拿到新数据会直接覆盖它。
-        var fromCache = false;
-        if (!snap && loading && SNAPSHOT_CACHE) {
-          snap = SNAPSHOT_CACHE;
-          // 这一帧是旧数据：可以让用户先看到上次的界面，但不许拿它去发任何请求
-          // （比如「跟着对话切项目」——旧焦点可能已经过期，切错一次就是切了两次）
-          fromCache = true;
-        }
-        // 宿主没重启时快照里不会有 registry（v2 才有）：新入口要降级成「重启后可用」，而不是报错
-        var hostStale = Boolean(snap && snap.ok && snap.registry === undefined);
-        var selectedState = useState('');
-        var selected = selectedState[0];
-        var setSelected = selectedState[1];
-        var dialogState = useState(null);
-        var dialog = dialogState[0];
-        var setDialogState = dialogState[1];
-        var setDialog = useCallback(function (next) {
-          setError('');
-          setDialogState(next);
-        }, []);
-        // 起草结果按任务留在面板层：关掉弹窗（Esc/遮罩/取消）不该丢掉刚生成的正文
-        var draftMemoState = useState({});
-        var draftMemo = draftMemoState[0];
-        var setDraftMemo = draftMemoState[1];
-        var busyState = useState(false);
-        var busy = busyState[0];
-        var setBusy = busyState[1];
-        var actionCountRef = useRef(0);
-        var gateOpState = useState(null);
-        var gateOp = gateOpState[0];
-        var setGateOp = gateOpState[1];
-        var gateNoteState = useState('');
-        var gateNote = gateNoteState[0];
-        var setGateNote = gateNoteState[1];
-        var gateChecking = (snap && snap.gateChecking) || (gateOp && snap && snap.active && gateOp.projectId === snap.active.id ? gateOp : null);
-        var loadRef = useRef(null);
-        var stateVersionRef = useRef(0);
-        var runIdState = useState('');
-        var runId = runIdState[0];
-        var setRunId = runIdState[1];
-        var logState = useState({ id: '', lines: [], run: null });
-        var logData = logState[0];
-        var setLogData = logState[1];
-        var drawerState = useState(false);
-        var drawer = drawerState[0];
-        var setDrawer = drawerState[1];
-        // 图表默认只列 10 行：33 行徽章会把整页挤爆，但用户要能展开看全
-        var figsOpenState = useState(false);
-        var figsOpen = figsOpenState[0];
-        var setFigsOpen = figsOpenState[1];
-        var cmdCopiedState = useState(false);
-        var cmdCopied = cmdCopiedState[0];
-        var setCmdCopied = cmdCopiedState[1];
-        var logRef = useRef(null);
-        // 投卡去重：同一阶段、同一闸门指纹、同一产物状态，不重复投第二张卡。
-        // 上一轮会话同一张「数据集」卡被投了 4 次，后两次模型只能核对一遍再停下。
-                var timerRef = useRef(null);
-        var rootRef = useRef(null);
-        var roRef = useRef(null);
-        // 断点看「面板自己有多宽」而不是窗口：宿主侧栏折叠后，同一窗口下面板能差 200px 以上
-        var widthState = useState('wide');
-        var width = widthState[0];
-        var setWidth = widthState[1];
-        var themeState = useState('light');
-        var theme = themeState[0];
-        var setTheme = themeState[1];
-        // 启动自检结果：state 里带的是缓存摘要，没查过时单独拉一次（不会重复起 python，服务端共用 promise）
-        var preflightState = useState(null);
-        var preflight = preflightState[0];
-        var setPreflight = preflightState[1];
-        // 环境闸门：开临时会话让 AI 装环境时的状态
-        var envBusyState = useState(false);
-        var envBusy = envBusyState[0];
-        var setEnvBusy = envBusyState[1];
-        var envNoteState = useState('');
-        var envNote = envNoteState[0];
-        var setEnvNote = envNoteState[1];
-        // 手稿骨架：生成 / 取改稿说明时各自按钮转圈，文案各自记
-        var manBusyState = useState('');
-        var manBusy = manBusyState[0];
-        var setManBusy = manBusyState[1];
-        var manNoteState = useState('');
-        var manNote = manNoteState[0];
-        var setManNote = manNoteState[1];
-        // 覆盖已有 manuscript.json 是破坏性动作：先弹一条确认，不靠悬停提示
-        var manAskState = useState(false);
-        var manAsk = manAskState[0];
-        var setManAsk = manAskState[1];
-        // v2 契约：采纳现有产物是一次批量推断，按钮转圈、结果写一行说明
-        var regBusyState = useState(false);
-        var regBusy = regBusyState[0];
-        var setRegBusy = regBusyState[1];
-        var regNoteState = useState('');
-        var regNote = regNoteState[0];
-        var setRegNote = regNoteState[1];
-        var measureRoot = useCallback(function () {
-          var el = rootRef.current;
-          if (!el) return;
-          var w = el.clientWidth || 0;
-          var next = w <= 860 ? 'narrow' : w <= 1100 ? 'compact' : w <= 1240 ? 'mid' : 'wide';
-          setWidth(function (prev) { return prev === next ? prev : next; });
-        }, []);
-        // 用回调 ref 而不是 [] effect：面板首帧是 loading 占位，那时 .dsa-root 还不存在，
-        // effect 只跑一次就永远拿不到节点（这是实测踩到的坑）。
-        var attachRoot = useCallback(function (node) {
-          rootRef.current = node;
-          if (!node) return;
-          if (roRef.current) roRef.current.observe(node);
-          measureRoot();
-          setTimeout(measureRoot, 0);
-          setTimeout(measureRoot, 300);
-        }, [measureRoot]);
-        useEffect(function () {
-          var onResize = function () { measureRoot(); };
-          window.addEventListener('resize', onResize);
-          if (typeof window.ResizeObserver !== 'undefined') {
-            roRef.current = new window.ResizeObserver(function () { measureRoot(); });
-            if (rootRef.current) roRef.current.observe(rootRef.current);
           }
-          return function () {
-            window.removeEventListener('resize', onResize);
-            if (roRef.current) {
-              roRef.current.disconnect();
-              roRef.current = null;
-            }
-          };
-        }, [measureRoot]);
-        // Esc 关抽屉：右栏在 mid/compact/narrow 是覆盖式抽屉，没有键盘出口就只能点遮罩
+        }, []);
         useEffect(function () {
+          if (typeof window === 'undefined' || typeof document === 'undefined') return undefined;
           function onKey(e) {
-            if (e.key === 'Escape' && drawer && !dialog) setDrawer(false);
-          }
-          window.addEventListener('keydown', onKey);
-          return function () { window.removeEventListener('keydown', onKey); };
-        }, [drawer, dialog]);
-        useEffect(function () {
-          function detect() {
-            var dark = null;
-            try {
-              var scheme = (window.getComputedStyle(document.documentElement).colorScheme || '').toLowerCase();
-              if (scheme) dark = scheme.indexOf('dark') >= 0;
-            } catch (e) { void e; }
-            if (dark === null) {
-              var bg = '';
-              try { bg = window.getComputedStyle(document.body).backgroundColor || ''; } catch (e) { void e; }
-              var m = /rgba?\(([^)]+)\)/.exec(bg);
-              var parts = m ? m[1].split(',').map(Number) : null;
-              if (parts && (parts.length < 4 || parts[3] > 0.05)) {
-                var lum = (0.2126 * parts[0] + 0.7152 * parts[1] + 0.0722 * parts[2]) / 255;
-                dark = lum < 0.5;
-              } else {
-                // body 背景是透明的（很多主题只给容器上色）：退回系统偏好，至少不会反着来
-                dark = Boolean(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
-              }
-            }
-            setTheme(dark ? 'dark' : 'light');
-          }
-          detect();
-          var mo = null;
-          if (window.MutationObserver) {
-            mo = new window.MutationObserver(detect);
-            mo.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style', 'data-theme', 'data-color-scheme'] });
-          }
-          var mq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
-          if (mq && mq.addEventListener) mq.addEventListener('change', detect);
-          return function () {
-            if (mo) mo.disconnect();
-            if (mq && mq.removeEventListener) mq.removeEventListener('change', detect);
-          };
-        }, []);
-        /* 所有「宿主刚把新鲜快照给我」的地方都走这里：顺手更新模块级缓存。
-         * 否则换了项目（/project/open、绑定对话、保存产物都会带新 state）之后重进面板，
-         * 第一帧拿到的还是上一个项目那份旧快照——虽然马上会被新数据替换，但闪一下也没必要。 */
-        var commitState = useCallback(function (state) {
-          if (state) SNAPSHOT_CACHE = state;
-          setSnap(state);
-        }, []);
-        var load = useCallback(function (silent) {
-          if (loadRef.current) return loadRef.current;
-          var version = stateVersionRef.current;
-          if (!silent) setLoading(true);
-          loadRef.current = getState()
-            .then(function (json) {
-              if (version !== stateVersionRef.current) return;
-              if (json && json.ok && json.state) {
-                // 记进模块级缓存：下次重进面板第一帧直接拿它渲染，不再等这一趟
-                commitState(json.state);
-                if (!silent) setError('');
-                var pre = json.state.preflight || null;
-                if (pre) setPreflight(pre);
-                if (!pre || pre.status === 'pending') {
-                  request('GET', '/preflight')
-                    .then(function (res) {
-                      if (res && res.ok && res.preflight) setPreflight(res.preflight);
-                    })
-                    .catch(function () {});
-                }
-              } else {
-                setError((json && json.error) || t('loadFail'));
-              }
-            })
-            .catch(function (e) {
-              setError(String((e && e.message) || e));
-              // 拉失败时别把已经显示过的数据换成「无项目」：错误横幅会把原因说清楚
-              if (SNAPSHOT_CACHE) setSnap(SNAPSHOT_CACHE);
-            })
-            .then(function () {
-              loadRef.current = null;
-              if (!silent) setLoading(false);
-            });
-          return loadRef.current;
-        }, []);
-        useEffect(function () {
-          void load(false);
-          return function () {
-            if (timerRef.current) clearInterval(timerRef.current);
-          };
-        }, [load]);
-        var running = useMemo(function () {
-          if (!snap || !snap.activeRuns) return false;
-          for (var key in snap.activeRuns) {
-            if (Object.prototype.hasOwnProperty.call(snap.activeRuns, key)) return true;
-          }
-          return false;
-        }, [snap]);
-        // 研究对话：会话 id 存在宿主台账里，running / 最近一轮都从原生会话读
-        var projectSession = (snap && snap.active && snap.active.sessionId) || '';
-        var chatRunning = useSessionRunning(projectSession);
-        var chatSnippet = useSessionSnippet(projectSession);
-        var chatErrState = useState('');
-        var chatError = chatErrState[0];
-        var setChatError = chatErrState[1];
-        // 快照里带着每个项目的会话 id：把它对进本地副本。
-        // 两种方向都要：有会话就记下（宿主没重启也能立刻显示「已绑定」），
-        // 宿主说「这条项目没有对话」就把副本清掉——否则改绑之后，旧项目的入口还会
-        // 指着一条已经属于别的项目的会话，点进去就是「随意切换」。
-        // 老宿主的 projects[] 里没有 sessionId 这个键，那种情况副本才是唯一来源，不能清。
-        var sessionKey = snap && Array.isArray(snap.projects)          ? snap.projects.map(function (p) { return p.id + ':' + (p.sessionId === undefined ? '?' : (p.sessionId || '')); }).join(',')
-            + '|' + (snap.active ? snap.active.id + ':' + (snap.active.sessionId || '') : '')          : '';
-        useEffect(function () {
-          if (!snap) return;
-          var list = Array.isArray(snap.projects) ? snap.projects : [];
-          for (var i = 0; i < list.length; i += 1) {
-            var p = list[i];
-            if (!p || !p.id) continue;
-            if (Object.prototype.hasOwnProperty.call(p, 'sessionId')) SESSION_HINTS.set(p.id, p.sessionId || '');
-            else if (p.sessionId) SESSION_HINTS.set(p.id, p.sessionId);
-          }
-          if (snap.active && snap.active.sessionId) SESSION_HINTS.set(snap.active.id, snap.active.sessionId);
-        }, [sessionKey]);
-        useEffect(function () {
-          return function () {
-            releaseRef();
-          };
-        }, []);
-        useEffect(function () {
-          if (timerRef.current) clearInterval(timerRef.current);
-          // 跑着的时候才轮询，而且 5 秒一次就够：每打一次 /state，宿主就要把整项目重算一遍，
-          // 跑脚本本身也在写产物——2.5 秒一次等于让宿主一直在算快照，反而拖慢脚本与面板。
-          timerRef.current = setInterval(function () {
-            if (running || gateChecking) void load(true);
-          }, gateChecking ? 1000 : 5000);
-          return function () {
-            if (timerRef.current) clearInterval(timerRef.current);
-          };
-        }, [running, Boolean(gateChecking), load]);
-        var stages = (snap && snap.stages) || [];
-        var current = useMemo(function () {
-          for (var i = 0; i < stages.length; i += 1) if (stages[i].id === selected) return stages[i];
-          return stages[0] || null;
-        }, [stages, selected]);
-        useEffect(function () {
-          if (current) return;
-          if (stages.length) setSelected(stages[0].id);
-        }, [stages, current]);
-        // 第一次拿到快照时，直接落在「该做的那一步」：已完成的不当前，未开始的不抢眼
-        var landingProjectId = snap && snap.active ? snap.active.id : '';
-        var landedRef = useRef('');
-        useEffect(function () {
-          if (landedRef.current === landingProjectId || !stages.length) return;
-          landedRef.current = landingProjectId;
-          var target = null;
-          for (var i = 0; i < stages.length; i += 1) {
-            if (stages[i].status !== 'done' && stages[i].status !== 'na') { target = stages[i]; break; }
-          }
-          if (!target) target = stages[stages.length - 1];
-          if (target) setSelected(target.id);
-        }, [stages, landingProjectId]);
-        var refreshLog = useCallback(function (id) {
-          if (!id) return;
-          request('GET', '/run/log?id=' + encodeURIComponent(id) + '&limit=300')
-            .then(function (json) {
-              if (json && json.ok) setLogData({ id: id, lines: json.lines || [], run: json.run });
-            })
-            .catch(function () {});
-        }, []);
-        useEffect(function () {
-          if (!runId) return undefined;
-          refreshLog(runId);
-          // 只在跑的时候轮询：结束之后还每 6 秒打一次接口纯属浪费
-          if (!running) return undefined;
-          var id = setInterval(function () { refreshLog(runId); }, 1500);
-          return function () { clearInterval(id); };
-        }, [runId, running, refreshLog]);
-        // 运行中的日志滚到底：不然长脚本要每 2 秒手动往下拽
-        useEffect(function () {
-          var el = logRef.current;
-          if (el && running) el.scrollTop = el.scrollHeight;
-        }, [logData.lines, running]);
-        var action = useCallback(function (path, body) {
-          actionCountRef.current += 1;
-          setBusy(true);
-          setError('');
-          if (path === '/stage/run' || path === '/gates/control') setGateNote('');
-          var gateOperation = null;
-          if (path === '/gates/control' && body && body.action === 'inspect') {
-            gateOperation = {projectId:activeIdRef.current,stageId:body.stageId||'',startedAt:new Date().toISOString()};
-            setGateOp(gateOperation);
-          }
-          // 用户自己点开的项目：记下「这次是人的选择」，跟着对话走的那条逻辑不要再覆盖它
-          if (path === '/project/open' && body && body.dir) {
-            FOLLOW_SKIP = { chatId: CURRENT_CHAT.id, path: String(body.dir) };
-          }
-          // 主动关掉项目也是人的选择：否则一进面板就被「跟着对话」重新打开，关闭键等于失效
-          if (path === '/project/close') {
-            FOLLOW_SKIP = { chatId: CURRENT_CHAT.id, path: 'close' };
-          }
-          return request('POST', path, body)
-            .then(function (json) {
-              if (json && json.ok) {
-                if (json.state) { stateVersionRef.current += 1; commitState(json.state); }
-                else void load(true);
-                if (gateOperation) setGateNote('体检完成，结论见下方判读。');
-              } else {
-                if (json && json.state) { stateVersionRef.current += 1; commitState(json.state); }
-                if (gateOperation && json && json.status === 'cancelled') setGateNote('体检已停止，请重新体检后查看当前结论。');
-                else setError((json && json.error) || t('actionFail'));
-              }
-              return json;
-            })
-            .catch(function (e) {
-              setError(String((e && e.message) || e));
-              return { ok: false };
-            })
-            .then(function (json) {
-              if (gateOperation) setGateOp(function (previous) { return previous === gateOperation ? null : previous; });
-              actionCountRef.current = Math.max(0, actionCountRef.current - 1);
-              setBusy(actionCountRef.current > 0);
-              return json;
-            });
-        }, [load]);
-        var doRun = useCallback(function (stage) {
-          action('/stage/run', { stageId: stage.id }).then(function (json) {
-            if (json && json.ok && json.run) {
-              setRunId(json.run.id);
-              setDrawer(true);
-            }
-          });
-        }, [action]);
-        var doCancel = useCallback(function (stage) {
-          action('/stage/cancel', { stageId: stage.id });
-        }, [action]);
-        // 重新检查环境：只探测，不安装；结果同时刷新横幅与设置弹窗
-        var doRecheck = useCallback(function () {
-          setBusy(true);
-          return request('POST', '/preflight/refresh', {})
-            .then(function (json) {
-              if (json && json.preflight) setPreflight(json.preflight);
-              if (json && json.state) commitState(json.state);
-              if (!json || !json.ok) setError((json && json.error) || t('actionFail'));
-              return json;
-            })
-            .catch(function (e) {
-              setError(String((e && e.message) || e));
-              return { ok: false };
-            })
-            .then(function (json) {
-              setBusy(false);
-              return json;
-            });
-        }, []);
-        var doAdjudicate = useCallback(function (payload) {
-          return action('/adjudicate', payload).then(function (json) {
-            if (json && json.ok) setDialog(null);
-            return json;
-          });
-        }, [action]);
-        /* ---------------- 手稿骨架 ---------------- */
-        var doScaffold = useCallback(function (overwrite) {
-          // 请求发出时的项目：回来时已经切走就整条丢弃，别把 A 的结果写到 B 的卡片上
-          var startKey = activeIdRef.current;
-          setManBusy('scaffold');
-          setManAsk(false);
-          setManNote('');
-          return request('POST', '/manuscript/scaffold', { overwrite: Boolean(overwrite) })
-            .then(function (json) {
-              if (activeIdRef.current !== startKey) return json;
-              if (!json || !json.ok) {
-                setError((json && json.error) || t('actionFail'));
-                // 失败多半是快照过期（AI 刚写完 manuscript.json）：重取一次，
-                // 按钮才会从「生成骨架」变成「重排骨架」
-                void load(true);
-                return json;
-              }
-              var skipped = '';
-              if (json.skippedNoPng) skipped += '；' + json.skippedNoPng + ' 张图缺 png（补齐后重排）';
-              if (json.skippedBadStatus) {
-                skipped += '；' + json.skippedBadStatus + ' 张图在清单里是失败状态' +                  (json.skippedBadExample ? '（如 ' + json.skippedBadExample + '）' : '') + '（先重跑图表阶段）';
-              }
-              setManNote(
-                '已生成 ' + json.file + '：' + json.blocks + ' 块（图 ' + json.figures + ' / 表 ' + json.tables + ' / 待补 ' + json.placeholders + '）' +                  skipped +                  (json.backup ? '；原文件已备份到 ' + json.backup : '') +                  (json.warning ? '。注意：' + json.warning : '')
-              );
-              return load(true).then(function () {
-                return json;
-              });
-            })
-            .catch(function (e) {
-              if (activeIdRef.current === startKey) setError(String((e && e.message) || e));
-              return { ok: false };
-            })
-            .then(function (json) {
-              if (activeIdRef.current === startKey) setManBusy('');
-              return json;
-            });
-        }, [load]);
-        var doAdopt = useCallback(function (overwrite) {
-          var startKey = activeIdRef.current;
-          setRegBusy(true);
-          setRegNote('');
-          return request('POST', '/registry/adopt', { overwrite: Boolean(overwrite) })
-            .then(function (json) {
-              if (activeIdRef.current !== startKey) return json;
-              if (!json || !json.ok) {
-                setError(hostHint((json && json.error) || t('actionFail'), '契约卡'));
-                return json;
-              }
-              var c = json.counts || {};
-              var warn = Array.isArray(json.warnings) && json.warnings.length ? '；注意：' + json.warnings[0] : '';
-              setRegNote('已生成注册表：数据集 ' + (c.datasets || 0) + ' / 模型 ' + (c.models || 0) + ' / 产物 ' + (c.artifacts || 0) + warn);
-              return load(true).then(function () { return json; });
-            })
-            .catch(function (error) {
-              if (activeIdRef.current === startKey) setError(String((error && error.message) || error));
-              return { ok: false };
-            })
-            .then(function (json) {
-              if (activeIdRef.current === startKey) setRegBusy(false);
-              return json;
-            });
-        }, [load]);
-        var doBrief = useCallback(function () {
-          var startKey = activeIdRef.current;
-          setManBusy('brief');
-          setManNote('');
-          return request('GET', '/manuscript/brief')
-            .then(function (json) {
-              if (activeIdRef.current !== startKey) return json;
-              if (!json || !json.ok) {
-                setError((json && json.error) || t('actionFail'));
-                return json;
-              }
-              var dir = snap && snap.active && snap.active.path;
-              var sid = snap && snap.active && snap.active.sessionId;
-              return deliverText(json.text, dir, sid).then(function (result) {
-                if (activeIdRef.current !== startKey) return json;
-                if (result && result.state) commitState(result.state);
-                // 绑定失败是「没投出去」，不是成功提示：和投卡一样走红字
-                if (result && result.warning) setError(result.warning);
-                else setManNote('已把改稿说明投进研究对话');
-                return json;
-              });
-            })
-            .catch(function (e) {
-              if (activeIdRef.current === startKey) setError(String((e && e.message) || e));
-              return { ok: false };
-            })
-            .then(function (json) {
-              if (activeIdRef.current === startKey) setManBusy('');
-              return json;
-            });
-        }, [snap, deliverText]);
-        /* ---------------- 环境闸门 ---------------- */
-        // 项目一换，开着的弹窗（拍板 / 补丁 / 草稿）指向的就都是旧项目了：
-        // 直接关掉，别让它对着新项目把旧结论写进去。
-        var activeIdRef = useRef('');
-        var activeId = snap && snap.active ? snap.active.id : '';
-        useEffect(function () {
-          if (activeIdRef.current !== activeId) {
-            activeIdRef.current = activeId;
-            setDialog(null);
-            // 手稿骨架与契约卡的提示都属于上一个项目，别把它们带到新项目上
-            setManNote('');
-            setRegNote('');
-            setGateNote('');
-          }
-        }, [activeId]);
-        // 让 AI 装环境：开临时会话投递安装提示词，然后把界面切过去
-        var doAiInstall = useCallback(function () {
-          setEnvNote('');
-          setEnvBusy(true);
-          var cwd = snap && snap.active ? snap.active.path : '';
-          return startInstallSession(cwd)
-            .then(function (sessionId) {
-              setEnvNote('已在新会话里开始安装（' + String(sessionId).slice(0, 22) + '…）。装完回到这里会自动复查。');
-              return sessionId;
-            })
-            .catch(function (e) {
-              setEnvNote('没能开出临时会话：' + String((e && e.message) || e) + '。可以点「手动配置」自己填路径，或直接在对话里新建一个会话让我装。');
-              return null;
-            })
-            .then(function (value) {
-              setEnvBusy(false);
-              return value;
-            });
-        }, [snap]);
-        // 被环境挡住时每 12 秒强制复查一次：AI 那边装完，这里应该自己放行。
-        // 用 refresh 而不是取缓存的 /preflight —— 否则最长要等 5 分钟缓存过期才看到变化。
-        var envBlockedNow = envBlocked(preflight);
-        useEffect(function () {
-          if (!envBlockedNow) return undefined;
-          var stopped = false;
-          var inflight = false;
-          var timer = setInterval(function () {
-            if (inflight) return;
-            inflight = true;
-            request('POST', '/preflight/refresh', {})
-              .then(function (json) {
-                if (!stopped && json && json.preflight) setPreflight(json.preflight);
-              })
-              .catch(function () {
-                /* 复查失败不打扰，下一轮再说 */
-              })
-              .then(function () {
-                inflight = false;
-              });
-          }, 12000);
-          return function () {
-            stopped = true;
-            clearInterval(timer);
-          };
-        }, [envBlockedNow]);
-        /* ---------------- 研究对话 ---------------- */
-        // 「让 AI 做这一步」：拿任务卡 → 复用/新建会话 → 投递 → 绑定 → 切到原生对话
-        var doAskAI = useCallback(function (stage) {
-          if (!snap || !snap.active || !stage) return;
-          if (chatRunning) {
-            setChatError('研究对话正在跑这一轮，先等它结束；要打断就点对话里的停止。');
-            return;
-          }
-          var key = [
-            stage.id,
-            stage.lastRun ? stage.lastRun.id : 'no-run',
-            (stage.gates || []).map(function (g) { return g.id + ':' + g.status; }).join(',')
-          ].join('|');
-          var logged = CARD_LOG[snap.active.path];
-          if (logged && logged.key === key) {
-            setChatError('这张卡已经投过，闸门和产物都没有变化；没有再投一次。产物有更新后可以再投。');
-            return;
-          }
-          setBusy(true);
-          setChatError('');
-          deliverCard(stage.id, snap.active.path, projectSession)
-            .then(function (result) {
-              if (result && result.state) commitState(result.state);
-              if (result && result.warning) setChatError(result.warning);
-              CARD_LOG[snap.active.path] = { stageId: stage.id, key: key, at: Date.now() };
-            })
-            .catch(function (e) {
-              setChatError(String((e && e.message) || e) || t('aiFailed'));
-            })
-            .then(function () {
-              setBusy(false);
-            });
-        }, [snap, projectSession, chatRunning]);
-        var reviewNow = useCallback(function () {
-          var target = null;
-          for (var i = 0; i < (snap?.stages || []).length; i += 1) {
-            if (hasPanel(snap.stages[i],'recheck')) target = snap.stages[i];
-          }
-          if (!target) return;
-          setSelected(target.id);
-          doAskAI(target);
-        }, [snap, doAskAI]);
-        // 只打开对话，不投递：已有会话直接进；没有就先建一个空会话
-        var doOpenChat = useCallback(function () {
-          if (!snap || !snap.active) return;
-          setBusy(true);
-          setChatError('');
-          var existing = projectSession || projectChatId(snap.active);
-          var idPromise = existing ? Promise.resolve(existing) : createSession(snap.active.path);
-          idPromise            .then(function (sessionId) {
-              return ensureRef(sessionId).then(function () {
-                if (existing) return null;
-                return persistSession(sessionId, snap.active.id).then(function (json) {
-                  if (json.state) commitState(json.state);
-                });
-              }).then(function () {
-                openConversation(sessionId);
-              });
-            })
-            .catch(function (e) {
-              setChatError(String((e && e.message) || e) || t('chatUnavailable'));
-            })
-            .then(function () {
-              setBusy(false);
-            });
-        }, [snap, projectSession]);
-        // 绑定失效（会话被删）时：清掉旧 id，下一次重新建
-        var doResetChat = useCallback(function () {
-          setBusy(true);
-          setChatError('');
-          releaseRef();
-          persistSession('')
-            .then(function (json) {
-              if (json.state) commitState(json.state);
-            })
-            .catch(function (e) {
-              setChatError(String((e && e.message) || e));
-            })
-            .then(function () {
-              setBusy(false);
-            });
-        }, []);
-        /**
-         * 左栏每一行的「研究对话」：点一下就直接进这个项目的 DSH 会话。
-         *
-         * 三步，顺序是用户要的，不是实现方便：
-         *   1. 不是当前项目 → 先切过去（会话绑定写的是当前项目，切不过去就会绑错项目）；
-         *   2. 已经绑过 → 直接 retain + 打开原生对话；
-         *   3. 没绑过（或会话已被删）→ 在项目目录里建一条，绑定，再进去。
-         * 会话服务不可用时如实报错，不假装进去。
-         */
-        var enterProjectChat = useCallback(function (project) {
-          if (!project || !project.path) return Promise.resolve(null);
-          if (project.exists === false) {
-            setChatError(t('projChatGoneHint'));
-            return Promise.resolve(null);
-          }
-          if (busy) return Promise.resolve(null);
-          setBusy(true);
-          setChatError('');
-          var isOn = Boolean(snap && snap.active && project.id === snap.active.id);
-          function fresh(target) {
-            var where = (target && target.path) || project.path;
-            return createSession(where).then(function (sessionId) {
-              // 绑定要指名项目：光「绑当前项目」在切项目竞态下会挂到错的那个上
-              return persistSession(sessionId, project.id).then(function (json) {
-                if (json.state) commitState(json.state);
-                SESSION_HINTS.set(project.id, sessionId);
-                openConversation(sessionId);
-                return sessionId;
-              });
-            });
-          }
-          var opened = isOn            ? Promise.resolve(snap && snap.active)            : request('POST', '/project/open', { dir: project.path }).then(function (json) {
-                if (!json || !json.ok) throw new Error((json && json.error) || '打开项目失败');
-                if (json.state) commitState(json.state);
-                // 打开失败时 active 还是旧项目：拿它去建会话会把会话挂到错的项目上
-                return json.state && json.state.active ? json.state.active : null;
-              });
-          return opened            .then(function (target) {
-              var bound = (target && target.sessionId) || SESSION_HINTS.get(project.id) || '';
-              if (bound) SESSION_HINTS.set(project.id, bound);
-              if (!bound) return fresh(target);
-              // 绑定过但那条会话已经没了：不把用户钉在「会话不存在」上，直接换一条新的
-              return ensureRef(bound)
-                .then(function () {
-                  openConversation(bound);
-                  return bound;
-                })
-                .catch(function () {
-                  SESSION_HINTS.set(project.id, '');
-                  return fresh(target);
-                });
-            })
-            .catch(function (e) {
-              setChatError(String((e && e.message) || e) || t('chatUnavailable'));
-              return null;
-            })
-            .then(function (value) {
-              setBusy(false);
-              return value;
-            });
-        }, [snap, busy]);
-        /* ---------------- 复核 ---------------- */
-        // 只有选中复核阶段才拉：12 项检查 + 问题清单不该跟着 /state 每 8 秒轮询
-        var recheckState = useState(null);
-        var recheck = recheckState[0];
-        var setRecheck = recheckState[1];
-        var recheckErrState = useState('');
-        var recheckError = recheckErrState[0];
-        var setRecheckError = recheckErrState[1];
-        var noticeState = useState('');
-        var notice = noticeState[0];
-        var setNotice = noticeState[1];
-        /* ---------------- 面板跟着对话走 ----------------
-         *
-         * 用户要的是「互相关联，不能随意切换」：进工作台时看到的应该是「我刚在聊的那个项目」，
-         * 而不是「上次顺手点开的那个」。所以每条对话只跟一次——切过去之后，用户在面板里
-         * 手动点别的项目就是他的选择，面板不会再把他拽回来（那就是「随意切换」）。
-         */
-        var followedRef = useRef('');
-        useEffect(function () {
-          if (!snap) return;
-          // 这一帧是「上次的快照」：只用来占位，不能据此切项目。新快照到了再决定跟不跟。
-          if (fromCache) return;
-          var focus = snap.focus;
-          if (!focus || !focus.sessionId || !focus.projectId) return;
-          // 换了一条对话 = 新的意图：上一条对话那次「别跟过来」不再适用于这一条
-          if (LAST_FOCUS_CHAT && LAST_FOCUS_CHAT !== focus.sessionId) {
-            FOLLOW_SKIP.chatId = '';
-            FOLLOW_SKIP.path = '';
-          }
-          LAST_FOCUS_CHAT = focus.sessionId;
-          // 记住的是「哪条对话 → 哪个项目」：对话在别处被改绑到另一个项目后，这里还要跟一次
-          var key = focus.sessionId + '|' + focus.projectId;
-          if (followedRef.current === key) return;
-          followedRef.current = key;
-          // 用户已经在工作台里自己点开过项目：那是浏览，不动他的选择
-          if (FOLLOW_SKIP.chatId && FOLLOW_SKIP.chatId === focus.sessionId) return;
-          if (snap.active && snap.active.id === focus.projectId) return;
-          request('POST', '/project/open', { dir: focus.projectPath })
-            .then(function (json) {
-              if (!json || !json.ok) return null;
-              if (json.state) commitState(json.state);
-              return null;
-            })
-            .catch(function () {
-              // 跟不过去（目录没了/宿主忙）就停在原项目，不用一条红字打断当前工作
-            });
-        }, [snap]);
-        var loadRecheck = useCallback(function () {
-          if (!snap || !snap.active) return Promise.resolve(null);
-          return request('GET', '/recheck')
-            .then(function (json) {
-              if (json && json.ok) {
-                setRecheck(json);
-                setRecheckError('');
-              } else {
-                setRecheckError((json && json.error) || '复核状态读取失败');
-              }
-              return json;
-            })
-            .catch(function (e) {
-              setRecheckError(String((e && e.message) || e));
-              return null;
-            });
-        }, [snap && snap.active ? snap.active.id : '']);
-        useEffect(function () {
-          if (!hasPanel((snap&&snap.stages||[]).find(function(stage){return stage.id===selected;}),'recheck')) return undefined;
-          void loadRecheck();
-          // 重跑链/模型审计落盘后，复核页要自己更新：不要求用户每改一步都手动刷新
-          var timer = setInterval(function () { void loadRecheck(); }, 5000);
-          return function () { clearInterval(timer); };
-        }, [selected, snap && snap.active ? snap.active.id : '']);
-        var doIssue = function (id, status) {
-          action('/recheck/issue', { id: id, status: status }).then(function (json) {
-            if (json && json.ok) void loadRecheck();
-          });
-        };
-        var doApply = function (id) {
-          setNotice('');
-          action('/recheck/apply', { id: id, advance: true }).then(function (json) {
-            if (json && json.ok) {
-              setDialog(null);
-              setNotice(json.chain                ? '补丁已应用，开始重跑：' + json.chain.steps.join(' → ')                : (json.note || '补丁已应用'));
-              void loadRecheck();
-            }
-          });
-        };
-        var doCancelChain = function () {
-          action('/recheck/cancel-chain', {}).then(function (json) {
-            if (json && json.ok) void loadRecheck();
-          });
-        };
-        // 人工步骤停下后的续跑：先不带 force 试一次，被前置闸门拦住时再问人。
-        var doResumeChain = function (force) {
-          return action('/recheck/resume-chain', { force: Boolean(force) }).then(function (json) {
-            if (json && json.ok) {
-              void loadRecheck();
+            if (e.key === 'Escape') {
+              if (document.querySelector && document.querySelector('.dsa-lightbox')) return;
+              if (props.onCancel) props.onCancel();
               return;
             }
-            var reason = (json && json.error) || '续跑失败';
-            setNotice((force ? '仍然没跑起来：' : '停在人工步骤：') + reason + (force ? '' : '（确认要跳过前置闸门时点「跳过闸门继续」）'));
-            void loadRecheck();
-          });
-        };
-        /* ---------------- 顶栏 ---------------- */
-        var header = h(
-          'div',
-          { className: 'dsa-top' },
-          h(
-            'div',
-            { className: 'dsa-brand' },
-            h('div', { className: 'dsa-logo', 'aria-hidden': 'true' }, '研'),
-            h(
-              'div',
-              { className: 'dsa-brand-tx' },
-              h('b', null, t('title')),
-              snap && snap.active                ? h('span', { title: snap.active.path }, snap.active.name || snap.active.path)                : h('span', null, t('subtitle'))
-            )
-          ),
-          // 窄屏没有左侧阶段栏，用下拉补一个入口；宽屏由 CSS 隐藏
-          stages.length            ? h(
-                'select',
-                {
-                  className: 'dsa-stage-select',
-                  value: selected,
-                  title: t('stageSelect'),
-                  onChange: function (e) { setSelected(e.target.value); }
-                },
-                stages.map(function (stage) {
-                  return h('option', { key: stage.id, value: stage.id }, String(stage.index) + '. ' + stage.name);
-                })
-              )            : null,
-          h('span', { className: 'dsa-spacer' }),
-          snap && snap.active && snap.active.skillDrift            ? h(Chip, { tone: 'warn', title: t('skillDrift') }, '⚠ SKILL.md 指纹不一致')            : null,
-          // 快照还没回来时别急着说「技能包未就位」：那只是默认值，会把「正在读」说成「坏了」。
-          !snap            ? h(Chip, { tone: 'quiet', title: '正在读取工作台状态（含环境自检结果）' }, '环境检查中…')            : snap.skill && snap.skill.ok              ? h(Chip, { tone: 'ok', title: snap.skill.packageDir }, t('skillOk') + ' · ' + (snap.skill.version || '?'))              : h(Chip, { tone: 'err', title: snap.skill ? snap.skill.reason : '' }, t('skillMissing')),
-          h(AiMenu, {
-            busy: busy,
-            onDraft: function () { setDialog({ kind: 'draft' }); },
-            onChat: current ? function () { doAskAI(current); } : null,
-            onReview: reviewNow          }),
-          // 研究对话常驻顶栏：窄屏整块左栏是隐藏的，项目行里那条入口就看不见了；
-          // 宽屏也省得为了进对话先去开「运行台」抽屉。
-          snap && snap.active            ? h(
-                Btn,
-                {
-                  className: 'dsa-settings-btn',
-                  variant: 'ghost',
-                  title: t('headerChatHint') + (projectSession ? '（' + projectSession + '）' : ''),
-                  onClick: function () { void doOpenChat(); }
-                },
-                h('span', { className: 'dsa-ico', 'aria-hidden': 'true' }, '💬'),
-                h('span', { className: 'dsa-settings-label' }, t('headerChat')),
-                h('span', {
-                  className: 'dsa-chat-dot ' + (projectSession ? (chatRunning ? 'run' : 'ok') : ''),
-                  'aria-hidden': 'true'                })
-              )            : null,
-          // 这条对话属不属于现在这个项目：一眼能看出来，不靠记忆。
-          // 不属于时给一个「切过去」的入口——但绝不自动改绑（改绑是工具或用户的事）。
-          // 只在宽屏出现：≤1240 时顶栏已经很挤（品牌标会被压扁），而左栏那行本来就标着「当前对话」。
-          snap && snap.active && snap.focus && snap.focus.sessionId && snap.focus.projectId            ? snap.focus.projectId === snap.active.id              ? h('span', { className: 'dsa-chat-link' }, h(Chip, { tone: 'ok', title: '本对话关联的就是当前项目（' + (snap.active.name || snap.active.path) + '）' }, '本对话'))              : h(
-                  Btn,
-                  {
-                    className: 'dsa-settings-btn dsa-chat-link',
-                    variant: 'ghost',
-                    title: '这条对话关联的是「' + (snap.focus.projectName || snap.focus.projectPath) + '」，点一下切过去',
-                    onClick: function () {
-                      if (snap.focus.projectPath) action('/project/open', { dir: snap.focus.projectPath });
-                    }
-                  },
-                  h('span', { className: 'dsa-ico', 'aria-hidden': 'true' }, '⇄'),
-                  h('span', { className: 'dsa-settings-label' }, '对话在「' + (snap.focus.projectName || '另一个项目') + '」')
-                )            : null,
-          // 材料库是「给项目喂资料」的主入口，不该藏在项目菜单里：和设置一样常驻顶栏。
-          h(
-            Btn,
-            {
-              className: 'dsa-settings-btn',
-              variant: 'ghost',
-              title: '材料库：把项目外的资料目录挂进来，不复制',
-              onClick: function () { setDialog({ kind: 'materials' }); }
-            },
-            h('span', { className: 'dsa-ico', 'aria-hidden': 'true' }, '🗂'),
-            h('span', { className: 'dsa-settings-label' }, '材料')
-          ),
-          // 产物中心：图、表、docx 都在 output/ 里，以前面板一个都打不开
-          snap && snap.active            ? h(
-                Btn,
-                {
-                  className: 'dsa-settings-btn',
-                  variant: 'ghost',
-                  title: hostStale ? '产物中心需要重启 DSH（宿主还是旧代码）' : '产物中心：看图、表格与文档（只读）',
-                  onClick: function () { setDialog({ kind: 'artifacts' }); }
-                },
-                h('span', { className: 'dsa-ico', 'aria-hidden': 'true' }, '▦'),
-                h('span', { className: 'dsa-settings-label' }, '产物')
-              )            : null,
-          // 设置是「配置入口」，不是项目动作：常驻在顶栏右上角，别塞进「项目」菜单里让人翻。
-          // 窄屏只留图标（标题与无障碍名仍在），不给顶栏添负担。
-          h(
-            Btn,
-            {
-              className: 'dsa-settings-btn',
-              variant: 'ghost',
-              title: '设置：技能目录 · Python · 台账位置 · 模型',
-              onClick: function () { setDialog({ kind: 'settings' }); }
-            },
-            h('span', { className: 'dsa-ico', 'aria-hidden': 'true' }, '⚙'),
-            h('span', { className: 'dsa-settings-label' }, t('settings'))
-          ),
-          h(
-            'details',
-            { className: 'dsa-menu' },
-            h('summary', { className: 'dsa-btn' }, '项目 ▾'),
-            h(
-              'div',
-              { className: 'dsa-menu-list' },
-              h('button', { type: 'button', onClick: function () { setDialog({ kind: 'open' }); } }, t('open')),
-              h('button', { type: 'button', onClick: function () { setDialog({ kind: 'create' }); } }, t('create'))
-            )
-          ),
-          h(Btn, { className: 'dsa-drawer-toggle', variant: 'ghost', onClick: function () { setDrawer(!drawer); } }, t('drawer')),
-          h(Btn, { disabled: loading, onClick: function () { void load(false); } }, loading ? t('refreshing') : t('refresh'))
-        );
-        /* ---------------- 首屏骨架 ---------------- */
-        // 还没有快照、又正在读：此刻并不知道有没有项目，不能先画「从一个资料目录开始」——
-        // 那会让「等数据」看起来像「重进是个空工作台」。骨架沿用真实的三栏布局，
-        // 数据回来时位置不变，只有内容从灰条换成真东西。
-        if (!snap && loading) {
-          var skBar = function (w, extra) {
-            return h('span', { className: 'dsa-sk-bar' + (extra ? ' ' + extra : ''), style: w ? { width: w } : undefined });
-          };
-          var skRows = function (n, widths) {
-            var out = [];
-            for (var i = 0; i < n; i += 1) {
-              out.push(h('div', { key: i, className: 'dsa-sk-row' }, skBar(widths[i % widths.length])));
+            if (e.key !== 'Tab') return;
+            var box = boxRef.current;
+            if (!box) return;
+            var nodes = [].slice.call(box.querySelectorAll('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])'))
+              .filter(function (el) { return !el.disabled && el.offsetParent !== null; });
+            if (!nodes.length) return;
+            var first = nodes[0];
+            var last = nodes[nodes.length - 1];
+            if (e.shiftKey && document.activeElement === first) {
+              e.preventDefault();
+              last.focus();
+            } else if (!e.shiftKey && document.activeElement === last) {
+              e.preventDefault();
+              first.focus();
             }
-            return out;
+          }
+          window.addEventListener('keydown', onKey);
+          return function () {
+            window.removeEventListener('keydown', onKey);
           };
-          return h(
-            'div',
-            { className: 'dsa-root', 'data-dsa-width': width, 'data-dsa-theme': theme },
-            header,
-            // 读屏用户听得到进度；视觉上靠灰条脉冲
-            h('div', { className: 'dsa-sr-only', role: 'status', 'aria-live': 'polite' }, '正在读取工作台状态…'),
-            h(
-              'div',
-              { className: 'dsa-body dsa-skeleton', 'aria-busy': 'true' },
-              h(
-                'div',
-                { className: 'dsa-rail' },
-                h('div', { className: 'dsa-rail-sec' }, h('div', { className: 'dsa-rail-h' }, '项目'), skRows(2, ['86%', '64%'])),
-                h('div', { className: 'dsa-rail-sec' }, h('div', { className: 'dsa-rail-h' }, '阶段'), skRows(8, ['78%', '92%', '58%']))
-              ),
-              h(
-                'div',
-                { className: 'dsa-main' },
-                h('div', { className: 'dsa-sk-hero' }, skBar('38%', 'tall'), skBar('66%')),
-                h('div', { className: 'dsa-sk-kpis' }, h('div', { className: 'dsa-sk-card' }), h('div', { className: 'dsa-sk-card' }), h('div', { className: 'dsa-sk-card' })),
-                h('div', { className: 'dsa-sk-block' }, skRows(6, ['88%', '96%', '72%']))
-              ),
-              h('div', { className: 'dsa-side' }, h('div', { className: 'dsa-sk-block' }, skRows(6, ['84%', '60%', '92%'])))
+        }, [props.onCancel]);
+        return h('div', { className: 'dsa-mask', onMouseDown: function (e) { if (e.target === e.currentTarget && props.onCancel) props.onCancel(); } },
+          h('div', { className: 'dsa-modal', role: 'dialog', 'aria-modal': 'true', tabIndex: -1, ref: boxRef, 'aria-label': props.title },
+            h('h2', null, props.title),
+            props.desc ? h('p', null, props.desc) : null,
+            props.error ? h('div', { className: 'dsa-error', role: 'alert' }, props.error) : null,
+            props.children,
+            h('div', { className: 'dsa-modal-foot' },
+              h(Btn, { variant: 'ghost', onClick: props.onCancel, disabled: props.busy }, t('cancel')),
+              props.onConfirm ? h(Btn, { variant: props.danger ? 'danger' : 'primary', onClick: props.onConfirm, disabled: props.busy }, props.confirmText || t('save')) : null
             )
-          );
-        }
-        /* ---------------- 无项目 ---------------- */
-        if (!snap || !snap.active) {
-          var picker = h(
-            'div',
-            { className: 'dsa-main' },
-            h(PreflightBanner, { preflight: preflight, busy: busy, onRecheck: doRecheck }),
-            h(
-              'div',
-              { className: 'dsa-card dsa-pad', style: { maxWidth: '640px', marginTop: '24px' } },
-              h('div', { className: 'dsa-empty' }, h('b', null, t('emptyTitle')), t('emptyHint')),
-              // 第一次打开的人不知道下一步该点哪个按钮：把动线按顺序摆出来，而不是让人猜
-              h(
-                'ol',
-                { className: 'dsa-steps' },
-                h('li', null, h('b', null, '先确认环境'), ' —— 技能包、Python、依赖；缺了让 AI 装，或点顶栏 ⚙ 手动指定'),
-                h('li', null, h('b', null, '再选一个项目目录'), ' —— 新建（空目录）或打开已有项目'),
-                h('li', null, h('b', null, '然后把资料挂进来'), ' —— 顶栏「材料」，资料留在原地，不复制')
-              ),
-              h(
-                'div',
-                { className: 'dsa-hint', style: { margin: '0 0 14px' } },
-                '你会得到：可审计的语料清单 · 分析宽表与统计表 · 600 dpi 图表包 · 成稿 docx · 机器质检报告。'              ),
-              error ? h('div', { className: 'dsa-error', role: 'alert', style: { margin: '0 0 12px' } }, error) : null,
-              h(
-                'div',
-                { className: 'dsa-form' },
-                h(
-                  'div',
-                  { className: 'dsa-split' },
-                  h(Btn, { variant: 'primary', onClick: function () { setDialog({ kind: 'create' }); } }, t('create')),
-                  h(Btn, { onClick: function () { setDialog({ kind: 'open' }); } }, t('open'))
-                ),
-                snap && snap.projects && snap.projects.length                  ? h(
-                      'div',
-                      null,
-                      h('div', { className: 'dsa-hint', style: { marginTop: '8px' } }, '最近项目'),
-                      snap.projects.map(function (p) {
-                        return h(
-                          'div',
-                          { key: p.path, className: 'dsa-inline', style: { marginTop: '6px' } },
-                          h(
-                            'button',
-                            {
-                              type: 'button',
-                              className: 'dsa-btn ghost',
-                              style: { textAlign: 'left', height: 'auto', padding: '4px 6px', maxWidth: '100%' },
-                              onClick: function () {
-                                action('/project/open', { dir: p.path });
-                              }
-                            },
-                            h('span', { className: 'dsa-mono', style: { fontSize: '11px' } }, p.path)
-                          ),
-                          p.exists ? null : h('span', { className: 'dsa-tag err' }, '文件不见了'),
-                          // 目录没了的项目在这里也要能清掉：否则它会一直卡在「最近项目」里点不开
-                          h(
-                            'button',
-                            {
-                              type: 'button',
-                              className: 'dsa-link',
-                              title: '从列表移除（不删磁盘文件）',
-                              onClick: function () { setDialog({ kind: 'forget', project: p }); }
-                            },
-                            '移除'                          )
-                        );
-                      })
-                    )                  : null              )
-            )
-          );
-          return h(
-            'div',
-            { className: 'dsa-root' },
-            header,
-            picker,
-            dialog ? renderDialog(dialog) : null          );
-        }
-        /* ---------------- 阶段栏 ---------------- */
-        var mat = (snap && snap.materials) || { sources: [], mounts: [], derived: [] };
-        var matMounts = mat.mounts || [];
-        var matBad = matMounts.filter(function (item) { return item.status !== 'ok'; }).length;
-        // 副标题要能塞进 52% 宽的 pill：挂载条数是用户要看的数，材料源个数只在不止一个时才提
-        var matMeta = matBad          ? '⚠ ' + matBad + ' 条失效'          : matMounts.length            ? matMounts.length + ' 条挂载' + ((mat.sources || []).length > 1 ? ' · ' + (mat.sources || []).length + ' 源' : '')            : '未挂载（点开管理）';
-        var railProjects = (snap && snap.projects) || [];
-        var rail = h(
-          'div',
-          { className: 'dsa-rail' },
-          // 项目区置顶：切换项目是这个面板最高频的「换舞台」动作，不该埋在菜单里
-          h(
-            'div',
-            { className: 'dsa-rail-sec' },
-            h(
-              'div',
-              { className: 'dsa-rail-h', style: { display: 'flex', alignItems: 'baseline' } },
-              '项目',
-              h('span', { className: 'dsa-count' }, String(railProjects.length))
-            ),
-            // 项目多了不能把下面的「资料 / 阶段」挤走：这个列表自己滚（CSS 里 min-height:0 + overflow-y:auto），
-            // 整个分区再限一个 max-height 兜底。原来只显示 6 个、剩下的藏进「还有 N 个…」，那是拿信息换空间。
-            h(
-              'div',
-              { className: 'dsa-proj-list' },
-              railProjects.map(function (p) {
-                var on = snap && snap.active && p.id === snap.active.id;
-                var label = p.name || p.path;
-                // 这个项目那条 DSH 会话：当前项目以 active.sessionId 为准，其余项目看台账/本地副本
-                var chatId = projectChatId(p) || (on && snap.active ? snap.active.sessionId || '' : '');
-                var chatBusy = Boolean(on && chatRunning);
-                // 现在屏幕上那条对话是哪个项目的：它那一行的入口标成「当前对话」，
-                // 不用去猜「我上次聊的是哪个项目」。
-                // 宿主还是旧进程（快照里没有 focus）时退回本地的 CURRENT_CHAT。
-                var focusSessionId = (snap && snap.focus && snap.focus.sessionId) || CURRENT_CHAT.id || '';
-                var isCurrentChat = Boolean(chatId && focusSessionId && chatId === focusSessionId);
-                // 行主体和「移除」是两个并列按钮：button 不能套 button，
-                // 套进去浏览器会把内层按钮踢出 DOM，移除键就永远点不到。
-                return h(
-                  'div',
-                  {
-                    key: p.path,
-                    className: 'dsa-proj' + (on ? ' sel' : '') + (p.exists === false ? ' orphan' : ''),
-                    title: p.path + (p.exists === false ? '（目录不见了）' : '')
-                  },
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'dsa-proj-main',
-                      'aria-current': on ? 'true' : undefined,
-                      onClick: function () {
-                        if (on) return;
-                        action('/project/open', { dir: p.path });
-                      }
-                    },
-                    h(
-                      'span',
-                      { className: 'dsa-proj-h' },
-                      h('span', { className: 'dsa-proj-av', 'aria-hidden': 'true' }, String(label).slice(0, 1)),
-                      h('span', { className: 'dsa-proj-name' }, label)
-                    ),
-                    h('span', { className: 'dsa-proj-path' }, p.exists === false ? p.path + ' · 目录不见了' : p.path)
-                  ),
-                  // 项目 = 目录 + 它的研究对话。这条常驻显示（不靠 hover 才出现）：
-                  // 用户来看项目列表，就是为了点进那条会话接着聊。
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className:
-                        'dsa-proj-chat' +                        (chatId ? ' bound' : '') +                        (isCurrentChat ? ' current' : '') +                        (chatBusy ? ' run' : '') +                        (p.exists === false ? ' gone' : ''),
-                      disabled: p.exists === false,
-                      title:
-                        p.exists === false                          ? t('projChatGoneHint')                          : isCurrentChat                            ? t('projChatCurrentHint').replace('{id}', chatId)                            : chatId                              ? t('projChatBoundHint').replace('{id}', chatId)                              : t('projChatNewHint'),
-                      'aria-label': t('projChat') + '：' + label,
-                      onClick: function (e) {
-                        if (e && e.stopPropagation) e.stopPropagation();
-                        void enterProjectChat(p);
-                      }
-                    },
-                    h('span', { className: 'dsa-chat-dot ' + (chatId ? (chatBusy ? 'run' : 'ok') : '') }),
-                    h('span', { className: 'dsa-proj-chat-tx' }, t('projChat')),
-                    h(
-                      'span',
-                      { className: 'dsa-proj-chat-state' },
-                      p.exists === false                        ? t('projChatDirGone')                        : chatId                          ? chatBusy                            ? t('projChatRunning')                            : isCurrentChat                              ? t('projChatCurrent')                              : t('projChatBound')                          : t('projChatNew')
-                    ),
-                    h('span', { className: 'dsa-proj-chat-go', 'aria-hidden': 'true' }, '→')
-                  ),
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'dsa-proj-del',
-                      title: '从列表移除（不删磁盘文件）',
-                      'aria-label': '从列表移除 ' + label,
-                      onClick: function (e) {
-                        if (e && e.stopPropagation) e.stopPropagation();
-                        setDialog({ kind: 'forget', project: p });
-                      }
-                    },
-                    '×'                  )
-                );
-              })
-            ),
-            h(
-              'div',
-              { className: 'dsa-proj-actions' },
-              h('button', { type: 'button', className: 'dsa-link', onClick: function () { setDialog({ kind: 'create' }); } }, '+ 新建'),
-              h('button', { type: 'button', className: 'dsa-link', onClick: function () { setDialog({ kind: 'open' }); } }, '打开…')
-            )
-          ),
-          // 资料 + 阶段放进同一个滚动容器：项目区占多高由它自己决定，这两块永远从同一处开始读
-          h(
-            'div',
-            { className: 'dsa-rail-body' },
-            h('div', { className: 'dsa-rail-h' }, '资料'),
-          h(
-            'button',
-            {
-              type: 'button',
-              className: 'dsa-stage ' + (matBad ? 'blocked' : ''),
-              title: '材料库：登记用户的资料目录，挂到 data/ 下（不复制文件）',
-              onClick: function () { setDialog({ kind: 'materials' }); }
-            },
-            h('div', { className: 'dsa-idx' }, '材'),
-            h(
-              'div',
-              { className: 'dsa-stage-main' },
-              h(
-                'div',
-                { className: 'dsa-stage-name' },
-                h('span', { className: 'dot ' + (matBad ? 'fail' : matMounts.length ? 'pass' : '') }),
-                '材料库'              ),
-              h('div', { className: 'dsa-stage-meta' }, matMeta)
-            )
-          ),
-          h('div', { className: 'dsa-rail-h' }, stages.length?'阶段 1–'+stages.length:'阶段暂不可用'),
-          stages.map(function (stage) {
-            var dotClass = stateDot(stage.status);
-            return h(
-              'button',
-              {
-                key: stage.id,
-                type: 'button',
-                className: 'dsa-stage ' + (stage.id === selected ? 'sel ' : '') + stage.status,
-                'aria-current': stage.id === selected ? 'step' : undefined,
-                onClick: function () { setSelected(stage.id); }
-              },
-              h('div', { className: 'dsa-idx' }, String(stage.index)),
-              h(
-                'div',
-                { className: 'dsa-stage-main' },
-                h(
-                  'div',
-                  { className: 'dsa-stage-name' },
-                  h('span', { className: 'dot ' + dotClass }),
-                  stage.name                ),
-                h('div', { className: 'dsa-stage-meta' }, stageWord(stage))
-              )
-            );
-            })
           )
         );
-        if(!current){
-          return h('div',{className:'dsa-root',ref:attachRoot,'data-dsa-width':width,'data-dsa-theme':theme},header,
-            h('div',{className:'dsa-body'},rail,h('main',{className:'dsa-main'},
-              h('h2',null,'技能工作流暂不可用'),
-              h('div',{className:'dsa-error',role:'alert'},snap.error||(snap.workflow&&snap.workflow.error)||'当前技能没有声明可用阶段，请检查工作流契约。'),
-              h('p',{className:'dsa-hint'},'检查技能目录、契约版本和依赖关系后刷新；项目资料与已有产物会保留。'),
-              Object.keys(snap.activeRuns||{}).length?h('div',{className:'dsa-section'},
-                h('h3',null,'仍在运行'),Object.keys(snap.activeRuns).map(function(stageId){return h('div',{className:'dsa-row',key:stageId},h('span',null,stageId),h(Btn,{disabled:busy,onClick:function(){action('/stage/cancel',{stageId:stageId});}},'停止运行'));})):null,
-              snap.gateChecking?h('div',{className:'dsa-row'},h('span',null,'技能体检仍在运行'),h(Btn,{disabled:busy,onClick:function(){action('/stage/cancel',{stageId:snap.gateChecking.stageId||''});}},'停止体检')):null,
-              h('div',{className:'dsa-row'},h(Btn,{onClick:function(){load();}},'重新读取'),h(Btn,{onClick:function(){setDialog({kind:'settings'});}},'检查设置')))),
-            dialog?renderDialog(dialog):null);
-        }
-        /* ---------------- 闸门 ---------------- */
-        var gateRank = { fail: 0, manual: 1, todo: 2, unjudged: 2, na: 8, pass: 9 };
-        var informationalGates = (current.gates || []).filter(function (gate) { return gate.level === 'info'; });
-        var orderedGates = (current.gates || []).filter(function (gate) { return gate.level !== 'info'; }).sort(function (a, b) {
-          return gateRank[gateFace(a, current.status).cls] - gateRank[gateFace(b, current.status).cls];
-        });
-        var openGates = orderedGates.filter(function (gate) { var cls=gateFace(gate, current.status).cls; return cls !== 'pass' && cls !== 'na'; });
-        var notApplicableGates = orderedGates.filter(function (gate) { return gateFace(gate, current.status).cls === 'na'; });
-        var passedGates = orderedGates.filter(function (gate) { return gateFace(gate, current.status).cls === 'pass'; });
-        var gateRowOf = function (gate) {
-          return h(GateRow, {
-            key: gate.id,
-            gate: gate,
-            stageStatus: current.status,
-            stageId: current.id,
-            onAdjudicate: function (target) { setDialog({ kind: 'adjudicate', stage: current, gate: target }); }
-          });
-        };
-        var gateList = h(
-          'div',
-          { className: 'dsa-card' },
-          openGates.length            ? openGates.map(gateRowOf)            : passedGates.length              ? null              : h('div', { className: 'dsa-empty' }, notApplicableGates.length ? '本阶段的要求均已说明不适用。' : '本阶段还没有可判的闸门'),
-          passedGates.length            ? h(
-                'details',
-                { className: 'dsa-fold' },
-                h('summary', null, '已通过 ' + passedGates.length + ' 项'),
-                passedGates.map(gateRowOf)
-              )            : null,
-          notApplicableGates.length ? h('details', {className:'dsa-fold'},h('summary',null,'不适用 '+notApplicableGates.length+' 项'),notApplicableGates.map(gateRowOf)) : null,
-          informationalGates.length ? h('details', {className:'dsa-fold'},h('summary',null,'运行来源说明'),informationalGates.map(gateRowOf)) : null
-        );
-        gateList = h('div',null,
-          h('div',{className:'dsa-inline',style:{gap:'8px',flexWrap:'wrap',marginBottom:'8px'}},
-            h('span',{className:'dsa-hint',title:snap.gateModeNotice||''},'判定来源：'+({legacy:'兼容核验 · 完整质量验收未确认',shadow:'影子验证',compare:'并列验证',skill:'技能体检'}[snap.gateMode||'legacy'])),
-            h(Btn,{variant:'ghost',disabled:busy||Boolean(gateChecking)||Boolean(snap.gateRecoveryNeeded),onClick:function(){action('/gates/control',{action:snap.gateMode&&snap.gateMode!=='legacy'?'inspect':'init'});}},gateChecking?'体检中…':busy?'处理中…':snap.gateMode&&snap.gateMode!=='legacy'?'重新体检':'配置技能体检'),
-            gateChecking?h(Btn,{variant:'ghost',onClick:function(){action('/stage/cancel',{stageId:gateChecking.stageId||current.id});}},'停止体检'):null,
-            snap.gateRecoveryNeeded?h(Btn,{variant:'ghost',disabled:busy,onClick:function(){action('/gates/control',{action:'recover'});}},'恢复中断体检'):null,
-            snap.gateMode==='compare'?h(Btn,{variant:'ghost',disabled:busy,onClick:function(){action('/gates/control',{action:'migrate',mode:'skill'});}},'使用技能判定'):null),
-          gateNote ? h('div',{className:'dsa-hint',role:'status'},gateNote) : null,
-          gateList,
-          current.gateComparison&&current.gateComparison.length?h('details',{className:'dsa-fold'},
-            h('summary',null,'技能体检对照 '+current.gateComparison.length+' 项'),
-            current.gateComparison.map(gateRowOf)):null);
-        /* ---------------- 复核区（第 10 阶段） ---------------- */
-        var recheckView = null;
-        if (current && hasPanel(current,'recheck')) {
-          var rc = recheck || { checks: [], issues: [], coverage: {}, chain: null, openErrors: 0, openOthers: 0 };
-          var chain = rc.chain;
-          var sortKey = function (key) {
-            var m = /^R(\d+)$/.exec(String(key));
-            return m ? Number(m[1]) : 999;
-          };
-          var coverageKeys = Object.keys(rc.coverage || {}).sort(function (a, b) { return sortKey(a) - sortKey(b); });
-          recheckView = h(
-            'div',
-            null,
-            h(
-              'div',
-              { className: 'dsa-inline', style: { margin: '2px 0 10px' } },
-              h(Btn, { variant: 'ghost', disabled: busy, onClick: function () { void loadRecheck(); } }, t('refresh')),
-              h('span', { className: 'dsa-hint' }, 'open error ' + String(rc.openErrors || 0) + ' · 其他 ' + String(rc.openOthers || 0))
-            ),
-            chain              ? h(
-                  'div',
-                  { className: 'dsa-card dsa-pad', style: { marginBottom: '10px' } },
-                  h(
-                    'div',
-                    { className: 'dsa-inline', style: { justifyContent: 'space-between' } },
-                    h('b', { style: { fontSize: '12px' } }, '重跑链 · ' + t(CHAIN_STATUS[chain.status] || 'chainRunning')),
-                    chain.status === 'running'                      ? h(Btn, { variant: 'ghost', disabled: busy, onClick: doCancelChain }, '取消重跑')                      : chain.status === 'waiting'                        ? h(
-                            'div',
-                            { className: 'dsa-inline', style: { gap: '6px' } },
-                            h(Btn, { variant: 'ghost', disabled: busy, onClick: function () { void doResumeChain(false); } }, '继续重跑'),
-                            h(Btn, { variant: 'ghost', disabled: busy, onClick: doCancelChain }, '取消重跑')
-                          )                        : h(Btn, { variant: 'ghost', disabled: busy, onClick: function () { void doResumeChain(false); } }, '继续重跑')
-                  ),
-                  h(
-                    'div',
-                    { className: 'dsa-hint dsa-mono', style: { marginTop: '4px' } },
-                    chain.steps.length                      ? chain.steps                          .map(function (s, i) {
-                            var mark = i < chain.index ? '✓' : i === chain.index && chain.status === 'running' ? '▶' : '·';
-                            return mark + ' ' + (i + 1) + '/' + chain.steps.length + ' ' + s;
-                          })
-                          .join('   ')                      : t('chainNoSteps')
-                  ),
-                  chain.note ? h('div', { className: 'dsa-hint', style: { marginTop: '3px' } }, chain.note) : null,
-                  chain.status === 'waiting' && Array.isArray(chain.blockers) && chain.blockers.length                    ? h(
-                        'div',
-                        { className: 'dsa-hint', style: { marginTop: '4px' } },
-                        '前置未过：' + chain.blockers.join('；'),
-                        h(
-                          Btn,
-                          {
-                            variant: 'ghost',
-                            disabled: busy,
-                            style: { marginLeft: '6px' },
-                            onClick: function () { void doResumeChain(true); }
-                          },
-                          '跳过闸门继续'                        )
-                      )                    : null,
-                  chain.error ? h('div', { className: 'dsa-error', style: { fontSize: '11px', marginTop: '4px' } }, chain.error) : null                )              : null,
-            notice ? h('div', { className: 'dsa-hint', style: { marginBottom: '8px' } }, notice) : null,
-            recheckError ? h('div', { className: 'dsa-error', style: { marginBottom: '8px' } }, recheckError) : null,
-            h(
-              'div',
-              { className: 'dsa-section' },
-              h('h3', null, '机器复算'),
-              h(
-                'span',
-                { className: 'count' },
-                String((rc.checks || []).length) + ' 项 · ' + String(rc.openErrors || 0) + ' error / ' + String(rc.openOthers || 0) + ' 其他'              )
-            ),
-            h(
-              'div',
-              { className: 'dsa-card' },
-              (rc.checks || []).map(function (c) {
-                return h(
-                  'div',
-                  {
-                    key: c.id,
-                    className: 'dsa-gate ' + gateFace(c, current.status).cls                  },
-                  h('span', { className: 'mark' }, c.status === 'pass' ? '✓' : c.status === 'fail' ? '✗' : '?'),
-                  h(
-                    'div',
-                    { className: 'dsa-gate-body' },
-                    h('div', { className: 'dsa-gate-label' }, c.id + ' · ' + c.label),
-                    h('div', { className: 'dsa-gate-detail' }, c.detail || ''),
-                    c.evidence                      ? h(
-                          'details',
-                          { className: 'dsa-fold-sub', style: { marginTop: '4px' } },
-                          h('summary', null, '证据'),
-                          h('pre', { className: 'dsa-code', style: { marginTop: '4px', whiteSpace: 'pre-wrap' } }, String(c.evidence))
-                        )                      : null                  )
-                );
-              })
-            ),
-            h('div', { className: 'dsa-section' }, h('h3', null, '问题清单'), h('span', { className: 'count' }, String((rc.issues || []).length) + ' 条')),
-            (rc.issues || []).length              ? (rc.issues || []).map(function (issue) {
-                  return h(
-                    'div',
-                    { key: issue.id, className: 'dsa-card dsa-pad', style: { marginBottom: '8px' } },
-                    h(
-                      'div',
-                      { className: 'dsa-issue-head' },
-                      h('b', { className: 'dsa-mono', style: { fontSize: '11.5px' } }, issue.id),
-                      h('span', { className: 'dsa-tag ' + (issue.severity === 'error' ? 'err' : '') }, t(SEVERITY_TEXT[issue.severity] || issue.severity)),
-                      h('span', { className: 'dsa-tag' }, t(ISSUE_STATUS[issue.status] || issue.status))
-                    ),
-                    h(
-                      'div',
-                      { className: 'dsa-hint dsa-mono', style: { fontSize: '11px', marginTop: '3px' } },
-                      issue.where + (issue.fix_kind ? ' · ' + t(FIX_KIND_TEXT[issue.fix_kind] || issue.fix_kind) : '')
-                    ),
-                    h('div', { style: { marginTop: '4px' } }, issue.claim),
-                    issue.evidence ? h('div', { className: 'dsa-hint', style: { marginTop: '3px' } }, String(issue.evidence).slice(0, 240)) : null,
-                    h(
-                      'div',
-                      { className: 'dsa-inline', style: { marginTop: '6px' } },
-                      issue.patch                        ? h(Btn, { variant: 'primary', disabled: busy, onClick: function () { setDialog({ kind: 'patch', issue: issue }); } }, '查看补丁并套用')                        : null,
-                      issue.status === 'open'                        ? h(Btn, { disabled: busy, onClick: function () { doIssue(issue.id, 'fixed'); } }, '标记已修')                        : h(Btn, { disabled: busy, onClick: function () { doIssue(issue.id, 'open'); } }, '重新打开'),
-                      h(Btn, { variant: 'ghost', disabled: busy, onClick: function () { doIssue(issue.id, 'wontfix'); } }, '不修')
-                    )
-                  );
-                })              : h(
-                  'div',
-                  { className: 'dsa-card dsa-pad' },
-                  h('div', { className: 'dsa-hint', style: { marginBottom: '6px' } }, '还没有 issues.jsonl：让 AI 按证据包写问题，或手动用 data_analysis_issue 记录。'),
-                  h(Btn, { variant: 'primary', disabled: busy, onClick: function () { doAskAI(current); } }, t('aiReview'))
-                ),
-            coverageKeys.length              ? h(
-                  'div',
-                  null,
-                  h('div', { className: 'dsa-section' }, h('h3', null, t('coverageTitle')), h('span', { className: 'count' }, 'R1–R12')),
-                  h(
-                    'div',
-                    { className: 'dsa-card dsa-pad' },
-                    h(
-                      'table',
-                      { className: 'dsa-table' },
-                      h(
-                        'tbody',
-                        null,
-                        coverageKeys.map(function (key) {
-                          var entry = rc.coverage[key] || {};
-                          var statusText = entry.status === 'checked' ? t('coverageChecked') : entry.status === 'unchecked' ? t('figUnjudged') : entry.status || '—';
-                          return h(
-                            'tr',
-                            { key: key },
-                            h('td', { className: 'dsa-mono', style: { width: '42px' } }, key),
-                            h('td', { style: { width: '64px' } }, statusText),
-                            h('td', { className: 'dsa-hint' }, entry.note || '')
-                          );
-                        })
-                      )
-                    )
-                  )
-                )              : null          );
-        }
-        /* ---------------- 产物 ---------------- */
-        var artifacts = snap.artifacts || {};
-        var artifactBlocks = [];
-        if(current.missingInputs&&current.missingInputs.length)artifactBlocks.push(h('div',{key:'workflow-inputs',className:'dsa-hint'},'运行前需补齐：'+current.missingInputs.join('、')));
-        var workflowActions=(snap.workflow&&snap.workflow.actions||[]).filter(function(item){return item.stage===current.id;});
-        if(workflowActions.length)artifactBlocks.push(h('details',{key:'workflow-actions',className:'dsa-fold'},h('summary',null,'阶段动作'),h('div',{className:'dsa-row'},workflowActions.map(function(item){return h(Btn,{key:item.id,disabled:busy,onClick:function(){action('/workflow/action',{actionId:item.id});}},item.label);} ))));
-        if(current.outputFiles&&current.outputFiles.length)artifactBlocks.push(h('details',{key:'workflow-outputs',className:'dsa-fold'},h('summary',null,'本阶段产物'),h('ul',null,current.outputFiles.map(function(file){return h('li',{key:file.path},file.exists?h('a',{href:artifactRawUrl(file.path,true),target:'_blank',rel:'noopener noreferrer'},file.path):h('span',null,file.path+' · 待生成'));}))));
-
-        // 产物按阶段归属：审计看审计链、编码看编码链，别把全项目的东西堆到每个阶段
-        var flowChains = (artifacts.flow || []).filter(function (chain) {
-          return (current.ui&&current.ui.artifactPrefixes||[]).some(function(prefix){return chain.file.indexOf(prefix)===0;});
-        });
-        if (flowChains.length) {
-          artifactBlocks.push(
-            h(
-              'div',
-              { key: 'flow' },
-              h('div', { className: 'dsa-section' }, h('h3', null, t('flow')), h('span', { className: 'count' }, flowChains.length + ' 条链')),
-              flowChains.map(function (chain) {
-                return h(
-                  'div',
-                  { key: chain.file, className: 'dsa-card dsa-pad', style: { marginBottom: '8px' } },
-                  h(
-                    'div',
-                    { className: 'dsa-hint dsa-mono', style: { marginBottom: '7px' } },
-                    chain.file + ' · ' + chain.source + (chain.monotonic ? ' · 单调' : ' · 有回升')
-                  ),
-                  h(
-                    'div',
-                    { className: 'dsa-flow' },
-                    chain.steps.map(function (step, idx) {
-                      var prev = idx ? chain.steps[idx - 1].n : null;
-                      var bad = prev !== null && step.n > prev;
-                      return h(
-                        'div',
-                        {
-                          key: step.stage + idx,
-                          className: 'dsa-flow-step' + (bad ? ' bad' : ''),
-                          title: step.note || undefined                        },
-                        h('div', { className: 's' }, step.stage),
-                        h('div', { className: 'n' }, String(step.n))
-                      );
-                    })
-                  )
-                );
-              })
-            )
-          );
-        }
-        if (artifacts.figures && artifacts.figures.total && hasPanel(current,'figures')) {
-          var figRows = artifacts.figures.rows || [];
-          var figSum = artifacts.figures.summary || {};
-          var shown = figsOpen ? figRows : figRows.slice(0, 10);
-          artifactBlocks.push(
-            h(
-              'div',
-              { key: 'figs' },
-              h(
-                'div',
-                { className: 'dsa-section' },
-                h('h3', null, t('figures')),
-                h('span', { className: 'count' }, artifacts.figures.total + ' ' + t('unitFigures') + ' · ' + artifacts.figures.file)
-              ),
-              h(
-                'div',
-                { className: 'dsa-agg' },
-                h('span', { className: 'dsa-badge pass' }, '✓ ' + t('figPass') + ' ' + (figSum.pass || 0)),
-                h('span', { className: 'dsa-badge fail' }, '✗ ' + t('figFail') + ' ' + (figSum.fail || 0)),
-                h('span', { className: 'dsa-badge unjudged' }, '? ' + t('figUnjudged') + ' ' + (figSum.unjudged || 0))
-              ),
-              figSum.fontUnjudged                ? h('div', { className: 'dsa-hint', style: { marginBottom: '7px' } }, t('figFontNote') + ' 本次 ' + figSum.fontUnjudged + ' 张缺 min_fontsize。')                : null,
-              h(
-                'div',
-                { className: 'dsa-card', style: { overflow: 'auto' } },
-                h(
-                  'table',
-                  { className: 'dsa-table' },
-                  h(
-                    'thead',
-                    null,
-                    h(
-                      'tr',
-                      null,
-                      h('th', null, 'ID'),
-                      h('th', null, '图型'),
-                      h('th', null, t('nLabel')),
-                      h('th', null, '状态')
-                    )
-                  ),
-                  h(
-                    'tbody',
-                    null,
-                    shown.map(function (row) {
-                      return h(
-                        'tr',
-                        { key: row.id },
-                        h('td', { className: 'dsa-mono', title: row.caption || row.question || '' }, row.id),
-                        h('td', { title: row.caption || row.question || '' }, row.chartType || '—'),
-                        h('td', { className: 'dsa-mono' }, row.nText || '—'),
-                        h(
-                          'td',
-                          null,
-                          (row.badges || []).map(function (badge) {
-                            var mark = badge.state === 'pass' ? '✓ ' : badge.state === 'fail' ? '✗ ' : '? ';
-                            return h(
-                              'span',
-                              {
-                                key: badge.key,
-                                className: 'dsa-badge ' + badge.state,
-                                title: badge.label + (badge.text ? '：' + badge.text : '')
-                              },
-                              mark + badge.label + (badge.text ? ' ' + badge.text : '')
-                            );
-                          })
-                        )
-                      );
-                    })
-                  )
-                )
-              ),
-              figRows.length > 10                ? h(
-                    'div',
-                    { style: { marginTop: '6px' } },
-                    h(Btn, { variant: 'ghost', onClick: function () { setFigsOpen(!figsOpen); } }, figsOpen ? t('collapse') : t('showAll') + ' · ' + figRows.length + ' 张')
-                  )                : null            )
-          );
-        }
-        if (artifacts.models && artifacts.models.length && hasPanel(current,'models')) {
-          artifactBlocks.push(
-            h(
-              'div',
-              { key: 'models' },
-              h('div', { className: 'dsa-section' }, h('h3', null, t('models')), h('span', { className: 'count' }, artifacts.models.length + ' 个')),
-              h(
-                'div',
-                { className: 'dsa-card dsa-pad' },
-                artifacts.models.map(function (m) {
-                  return h(
-                    'div',
-                    { key: m.id, className: 'dsa-inline', style: { justifyContent: 'space-between', padding: '3px 0' } },
-                    h('span', { className: 'dsa-mono' }, m.id),
-                    h(
-                      'span',
-                      { className: 'dsa-mono dsa-hint', title: m.fitN === null ? '缺 fit.csv：只能用 coef 表的 n' : 'N 取 fit.csv 的 n（n_dropna 不是 N）' },
-                      'N=' + (m.fitN === null || m.fitN === undefined ? (m.n === null ? '—' : String(m.n)) : String(m.fitN)) + ' · ' + m.rows + ' ' + t('coefficients')
-                    )
-                  );
-                }),
-                artifacts.flowChecks && artifacts.flowChecks.length                  ? h(
-                      'div',
-                      { className: 'dsa-hint', style: { marginTop: '6px' } },
-                      'flow_checks：' + artifacts.flowChecks.filter(function (c) { return c && c.match === false; }).length + ' 项不一致'                    )                  : null              )
-            )
-          );
-        }
-        if (artifacts.verify && hasPanel(current,'numbers')) {
-          var counts = artifacts.verify.counts || {};
-          var issues = artifacts.verify.issues || [];
-          artifactBlocks.push(
-            h(
-              'div',
-              { key: 'verify' },
-              h('div', { className: 'dsa-section' }, h('h3', null, t('verify')), h('span', { className: 'count' }, artifacts.verify.file + ' · ' + artifacts.verify.rows + ' 条')),
-              h(
-                'div',
-                { className: 'dsa-card dsa-pad' },
-                h(
-                  'div',
-                  { className: 'dsa-kv' },
-                  h('span', null, h('b', { style: { color: 'var(--dsa-err)' } }, String(counts.error || 0)), ' error'),
-                  h('span', null, h('b', { style: { color: 'var(--dsa-warn)' } }, String(counts.warning || 0)), ' warning'),
-                  h('span', null, h('b', null, String(counts.info || 0)), ' info'),
-                  counts.v05Error                    ? h(
-                        'span',
-                        { title: 'V-05：同一 n_scope 的模型 N 不一致。以 fit.csv / coef 的 n 为实际估计 N，n_dropna 是缺失剔除行数、不参与比较；差异需回查样本范围，不能改数字消警' },
-                        h('b', { style: { color: 'var(--dsa-ink3)' } }, String(counts.v05Error)),
-                        ' V-05 差异'                      )                    : null,
-                  counts.v05Unverifiable                    ? h(
-                        'span',
-                        { title: 'V-05：缺 n 或只有 n_dropna，无法核对；补实际估计样本 n 后重跑' },
-                        h('b', { style: { color: 'var(--dsa-ink3)' } }, String(counts.v05Unverifiable)),
-                        ' V-05 无法核对'                      )                    : null,
-                  counts.deferred                    ? h(
-                        'span',
-                        { title: 'verify_numbers 早于 1.0.1：旧版把 n_dropna 当 N，这次 V-05 结果不可信，用修复版重跑' },
-                        h('b', { style: { color: 'var(--dsa-ink3)' } }, String(counts.deferred)),
-                        ' V-05 旧版待重跑'                      )                    : null                ),
-                issues.length                  ? h(
-                      'div',
-                      { style: { marginTop: '8px' } },
-                      issues.map(function (row, idx) {
-                        var sev = String(row.severity || '').toLowerCase();
-                        var text = row.message || row.detail || row.note || row.where || row.file || row.title || '';
-                        return h(
-                          'div',
-                          { key: idx, className: 'dsa-check ' + (sev === 'error' ? 'fail' : sev === 'warning' ? 'warn' : 'unjudged') },
-                          h('span', { className: 'dsa-check-mark' }, sev === 'error' ? '✗' : sev === 'warning' ? '!' : '·'),
-                          h(
-                            'span',
-                            { className: 'dsa-check-body' },
-                            h('span', { className: 'dsa-check-label dsa-mono' }, String(row.check || 'issue')),
-                            h('span', { className: 'dsa-check-detail' }, ' — ' + String(text).slice(0, 180))
-                          )
-                        );
-                      })
-                    )                  : h('div', { className: 'dsa-hint', style: { marginTop: '6px' } }, '没有可展示的明细行（报告只有计数）')
-              )
-            )
-          );
-        }
-        if (artifacts.analysis && hasPanel(current,'analysis')) {
-          var a = artifacts.analysis;
-          artifactBlocks.push(
-            h(
-              'div',
-              { key: 'dataset' },
-              h('div', { className: 'dsa-section' }, h('h3', null, '分析宽表'), h('span', { className: 'count' }, a.file)),
-              h(
-                'div',
-                { className: 'dsa-card dsa-pad' },
-                h(
-                  'div',
-                  { className: 'dsa-kv' },
-                  h('span', null, h('b', null, String(a.rows)), ' 行'),
-                  h('span', null, h('b', null, String(a.columns)), ' 列'),
-                  a.inAnalysis === null                    ? h('span', { className: 'dsa-hint' }, '缺 in_analysis 列')                    : h('span', null, h('b', null, String(a.inAnalysis)), ' ' + t('inAnalysisLabel')),
-                  a.excluded ? h('span', null, h('b', null, String(a.excluded)), ' ' + t('excludedLabel')) : null                ),
-                h('div', { className: 'dsa-hint', style: { marginTop: '5px' } }, a.header.join(' · '))
-              )
-            )
-          );
-        }
-        if (hasPanel(current,'manuscriptSpec')) {
-          var man = artifacts.manuscript || 0;
-          artifactBlocks.push(
-            h(
-              'div',
-              { key: 'manuscript' },
-              h('div', { className: 'dsa-section' }, h('h3', null, '成稿'), h('span', { className: 'count' }, 'output/manuscript.docx')),
-              h(
-                'div',
-                { className: 'dsa-card dsa-pad dsa-kv' },
-                h('span', null, man ? sizeText(man) : '还没有 manuscript.docx'),
-                h('span', null, h('b', null, String(artifacts.tables || 0)), ' 个表格 CSV'),
-                h('span', { className: 'dsa-hint' }, '图表数、题注与数字溯源在终检里核对')
-              )
-            )
-          );
-        }
-        if (artifacts.qa && artifacts.qa.count && hasPanel(current,'qa')) {
-          artifactBlocks.push(
-            h(
-              'div',
-              { key: 'qa-reports' },
-              h('div', { className: 'dsa-section' }, h('h3', null, '终检报告'), h('span', { className: 'count' }, artifacts.qa.count + ' 份')),
-              h(
-                'div',
-                { className: 'dsa-card' },
-                h(
-                  'table',
-                  { className: 'dsa-table' },
-                  h(
-                    'tbody',
-                    null,
-                    (artifacts.qa.reports || []).map(function (report) {
-                      return h(
-                        'tr',
-                        { key: report.name },
-                        h('td', { className: 'dsa-mono' }, report.name),
-                        h('td', { className: 'dsa-mono', style: { color: isNaN(report.errors) || report.errors ? 'var(--dsa-err)' : 'var(--dsa-ok)' } }, (isNaN(report.errors) ? '?' : String(report.errors)) + ' error'),
-                        h('td', { className: 'dsa-mono', style: { color: 'var(--dsa-warn)' } }, String(report.warnings || 0) + ' warning'),
-                        h('td', { className: 'dsa-hint' }, report.mtimeMs ? fmtTime(new Date(report.mtimeMs).toISOString()) : '')
-                      );
-                    })
-                  )
-                )
-              )
-            )
-          );
-        }
-        /* ---------------- 中央区 ---------------- */
-        var stageRunning = Boolean(current && snap.activeRuns && snap.activeRuns[current.id]);
-        var stageRun = stageRunning ? snap.activeRuns[current.id] : null;
-        var hasScript = Boolean(current && current.script);
-        var pyName = (snap.config && snap.config.pythonPath) || 'python';
-        // 多步阶段（终检）不能只显示第一步：参数在每一步里，命令回显会把用户看糊涂
-        var stepScripts = (current && current.steps ? current.steps : []).filter(Boolean);
-        var cmdText = stepScripts.length > 1          ? stepScripts.map(function (s) { return pyName + ' ' + (typeof s==='string'?s:s.script); }).join('  →  ') + '（' + stepScripts.length + ' 步，参数见任务卡与运行日志）'          : pyName + ' ' + current.script + ' ' + (current.args || []).join(' ');
-        /* ---------------- 下一步 ---------------- */
-        // 面板最该回答的问题是「现在该干嘛」：用一条横幅把状态、卡点、动作说清楚
-        var runningStage = null;
-        var nextStage = null;
-        // 第 5 阶段是可选的：没有 research_registry.json 的老项目不该被它
-        // 永远占住「下一步」——点运行只会得到「缺 registry」的报错。
-        var hasResearchRegistry = !!(snap && snap.artifacts && snap.artifacts.research          && snap.artifacts.research.registry && snap.artifacts.research.registry.exists);
-        for (var ni = 0; ni < stages.length; ni += 1) {
-          if (stages[ni].status === 'running') runningStage = stages[ni];
-          if (!nextStage && stages[ni].status !== 'done' && stages[ni].status !== 'na'            && !stages[ni].hidden) nextStage = stages[ni];
-        }
-        var nextView = null;
-        if (runningStage) {
-          nextView = h(
-            'div',
-            { className: 'dsa-next run' },
-            h('span', { className: 'dsa-next-label' }, t('nextTitle')),
-            h(
-              'div',
-              { className: 'dsa-next-body' },
-              h('div', { className: 'dsa-next-line' }, t('nextRunning') + '：' + String(runningStage.index) + '. ' + runningStage.name),
-              h('div', { className: 'dsa-next-sub' }, '运行台的日志会实时刷新；跑完这里会变成阶段结果。')
-            ),
-            h(Btn, { variant: 'danger', disabled: busy, onClick: function () { doCancel(runningStage); } }, t('cancelRun'))
-          );
-        } else if (!nextStage && stages.length) {
-          nextView = h(
-            'div',
-            { className: 'dsa-next done' },
-            h('span', { className: 'dsa-next-label' }, t('nextTitle')),
-            h(
-              'div',
-              { className: 'dsa-next-body' },
-              h('div', { className: 'dsa-next-line' }, t('nextAllDoneText')),
-              h('div', { className: 'dsa-next-sub' }, snap.gateMode==='skill'&&!snap.deliveryReady?'阶段操作已完成；正式交付仍需满足当前证据与签收要求。':'所有阶段的闸门都已通过或已由人裁定。可以导出，或从右侧进入研究对话做最后复核。')
-            )
-          );
-        } else if (nextStage) {
-          var manualGate = null;
-          var errGate = null;
-          var firstUnknown = null;
-          var unknownCount = 0;
-          for (var gi = 0; gi < nextStage.gates.length; gi += 1) {
-            var item = nextStage.gates[gi];
-            if (item.level === 'info') continue;
-            if (!errGate && item.status === 'fail' && item.level === 'error') errGate = item;
-            if (item.status === 'unjudged' && item.manual && !manualGate) manualGate = item;
-            if (item.status === 'unjudged' && !item.manual) {
-              unknownCount += 1;
-              if (!firstUnknown) firstUnknown = item;
-            }
-          }
-          var tone = nextStage.status;
-          var isHere = nextStage.id === selected;
-          var line = String(nextStage.index) + '. ' + nextStage.name + ' · ' + stageWord(nextStage);
-          var sub = '';
-          var primary = null;
-          if (nextStage.status === 'blocked') {
-            sub = (errGate ? errGate.label + '：' + errGate.detail + '。' : '') + '后面的步骤先跑不了。';
-            primary = isHere              ? h(Btn, { variant: 'ghost', onClick: function () { setSelected(nextStage.id); } }, '看哪条没过')              : h(Btn, { variant: 'ghost', onClick: function () { setSelected(nextStage.id); } }, '去查看');
-          } else if (nextStage.status === 'review') {
-            if (manualGate) {
-              sub = manualGate.label + '：' + (manualGate.detail || '需要你看一眼再决定') + '。';
-              primary = isHere                ? h(
-                    Btn,
-                    {
-                      variant: 'ghost',
-                      onClick: function () { setDialog({ kind: 'adjudicate', stage: nextStage, gate: manualGate }); }
-                    },
-                    '现在拍板'                  )                : h(Btn, { variant: 'ghost', onClick: function () { setSelected(nextStage.id); } }, '去拍板');
-            } else {
-              sub = (firstUnknown ? unknownCount + ' 项还没查，先看「' + firstUnknown.label + '」' : '闸门没有全过') + '。';
-              primary = h(Btn, { variant: 'ghost', onClick: function () { setSelected(nextStage.id); } }, isHere ? '看闸门' : '去查看');
-            }
-          } else {
-            sub = nextStage.script ? '有登记脚本，可以直接跑。' : '这一阶段没有脚本，交给 AI 或人来做。';
-            if (isHere) {
-              primary = nextStage.script                ? h(
-                    Btn,
-                    { variant: 'ghost', disabled: busy, onClick: function () { doRun(nextStage); } },
-                    (nextStage.lastRun ? '重跑' : '运行') + ' ' + nextStage.short                  )                : h(AiMenu, {
-                    primary: false,
-                    busy: busy,
-                    onDraft: (nextStage.ui&&nextStage.ui.draftTask)                      ? function () { setDialog({ kind: 'draft', task: (nextStage.ui&&nextStage.ui.draftTask) }); }                      : null,
-                    onChat: function () { doAskAI(nextStage); },
-                    onReview: reviewNow                  });
-            } else {
-              primary = h(Btn, { variant: 'ghost', onClick: function () { setSelected(nextStage.id); } }, '去这里');
-            }
-          }
-          nextView = h(
-            'div',
-            { className: 'dsa-next ' + tone },
-            h('span', { className: 'dsa-next-label' }, '下一步'),
-            h(
-              'div',
-              { className: 'dsa-next-body' },
-              h('div', { className: 'dsa-next-line' }, line),
-              h('div', { className: 'dsa-next-sub' }, sub)
-            ),
-            primary          );
-        }
-        var manualOpen = null;
-        for (var mgi = 0; mgi < openGates.length; mgi += 1) {
-          if (gateFace(openGates[mgi], current.status).cls === 'manual') { manualOpen = openGates[mgi]; break; }
-        }
-        // 文稿阶段没有 manuscript.json 时「运行」必然报 spec not found：
-        // 这时别让它当实心主按钮（同屏只该有一个主动作——生成骨架）
-        var manSpec = snap && snap.artifacts ? snap.artifacts.manuscriptSpec : null;
-        var needSpec = (hasPanel(current,'manuscriptSpec') && (!manSpec || !manSpec.exists)) || (current.missingInputs||[]).length>0;
-        var headerPrimary = stageRunning          ? h(Btn, { variant: 'danger', disabled: busy, onClick: function () { doCancel(current); } }, '停止')          : manualOpen            ? h(
-                Btn,
-                {
-                  variant: 'primary',
-                  disabled: busy,
-                  title: manualOpen.label,
-                  onClick: function () { setDialog({ kind: 'adjudicate', stage: current, gate: manualOpen }); }
-                },
-                '去拍板'              )            : hasScript              ? h(
-                  Btn,
-                  {
-                    variant: needSpec ? undefined : 'primary',
-                    disabled: busy,
-                    title: needSpec ? '先补齐本阶段要求的输入文件' : current.script,
-                    onClick: function () { doRun(current); }
-                  },
-                  current.lastRun ? '重跑' : '运行'                )              : null;
-        // KPI 条：五个数一眼看完「有多少料、走到哪、卡在哪」。数字等宽，和右栏日志同一套
-        var corpusInfo = (snap && snap.artifacts && snap.artifacts.corpus) || {};
-        var corpusTotal = Number(corpusInfo.validFiles || corpusInfo.totalFiles || 0) || 0;
-        var corpusBytes = Number((corpusInfo.fingerprint && corpusInfo.fingerprint.bytes) || 0) || 0;
-        var sizeNum = corpusBytes          ? corpusBytes >= 1048576            ? (corpusBytes / 1048576).toFixed(1)            : corpusBytes >= 1024              ? String(Math.round(corpusBytes / 1024))              : String(corpusBytes)          : '—';
-        var sizeUnit = corpusBytes ? (corpusBytes >= 1048576 ? 'MB' : corpusBytes >= 1024 ? 'KB' : 'B') : '';
-        var stageSummary = (snap && snap.summary) || {};
-        var gateTotals = (snap && snap.totals) || {};
-        var kpiOf = function (key, label, value, unit, hi) {
-          return h(
-            'div',
-            { key: key, className: 'dsa-kpi' + (hi ? ' hi' : '') },
-            h('div', { className: 'k' }, label),
-            h('div', { className: 'v' }, String(value), unit ? h('small', null, unit) : null)
-          );
-        };
-        var kpiStrip = h(
-          'div',
-          { className: 'dsa-kpis' },
-          kpiOf('corpus', '有效语料', corpusTotal || '—', corpusTotal ? '份' : '', true),
-          kpiOf('size', '总体积', sizeNum, sizeUnit, false),
-          kpiOf('done', '阶段完成', (stageSummary.done || 0) + '/' + (stages.length || 10), '', false),
-          kpiOf('review', '待裁定', stageSummary.review || 0, '项', false),
-          kpiOf('fail', '闸门未过', gateTotals.fail || 0, '项', false)
-        );
-        // 手稿骨架：文稿阶段的输入文件脚本造不出来，给它一条明确的入口，别让人猜
-        // 契约卡：项目级信息（数据集/模型/产物/结论），与当前选中阶段无关，所以放在 KPI 下面
-        var registryCard = h(RegistryCard, {
-          registry: snap && snap.registry,
-          // 旧宿主没有 registry 这个键：先说清楚要重启，别让卡片静默消失
-          stale: Boolean(snap && snap.ok && snap.registry === undefined),
-          busy: regBusy,
-          onOpen: function () { setDialog({ kind: 'artifacts' }); },
-          onAdopt: function () { doAdopt(false); }
-        });
-        var manuscriptBlock = null;
-        if (current && hasPanel(current,'manuscriptSpec')) {
-          var spec = snap && snap.artifacts ? snap.artifacts.manuscriptSpec : null;
-          var specNum = function (value) {
-            var number = Number(value);
-            return Number.isFinite(number) ? String(number) : '0';
-          };
-          if (!spec) {
-            // client 插件能热更新、宿主不能：字段都没有时说明服务端还是旧版，别谎报「文件不存在」
-            manuscriptBlock = h(
-              'div',
-              { style: { marginTop: '14px' } },
-              h('div', { className: 'dsa-section' }, h('h3', null, '手稿骨架')),
-              h(
-                'div',
-                { className: 'dsa-card dsa-pad', style: { marginTop: '8px' } },
-                h('div', { className: 'dsa-hint' }, '宿主还没有提供手稿骨架的接口——重启 DSH 后再打开这里。')
-              )
-            );
-          } else {
-            var specTitle = !spec.exists              ? '还没有 manuscript.json'              : spec.error                ? 'manuscript.json 跑不了'                : spec.invalidBlocks                  ? '结构有问题：' + specNum(spec.invalidBlocks) + ' 块会让文稿阶段直接报错'                  : spec.figuresMissing                    ? '已就绪，但缺 ' + specNum(spec.figuresMissing) + ' 张图（文稿阶段会失败）'                    : 'manuscript.json 已就绪';
-            var specParts = [];
-            if (spec.exists && !spec.error) {
-              specParts.push('块 ' + specNum(spec.blocks));
-              specParts.push('图 ' + specNum(spec.figures));
-              specParts.push('表 ' + specNum(spec.tables));
-              if (spec.placeholders) specParts.push('待补 ' + specNum(spec.placeholders) + ' 段');
-              if (spec.invalidBlocks) specParts.push('结构不对 ' + specNum(spec.invalidBlocks) + ' 块');
-            }
-            var manDisabled = !!manBusy || !!busy || stageRunning;
-            manuscriptBlock = h(
-              'div',
-              { style: { marginTop: '14px' } },
-              h('div', { className: 'dsa-section' }, h('h3', null, '手稿骨架')),
-              h(
-                'div',
-                { className: 'dsa-card dsa-pad', style: { marginTop: '8px' } },
-                h(
-                  'div',
-                  { className: 'dsa-inline', style: { justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' } },
-                  h(
-                    'div',
-                    { style: { minWidth: '0' } },
-                    h('div', { style: { fontSize: '12.5px', fontWeight: 600 } }, specTitle),
-                    h(
-                      'div',
-                      { className: 'dsa-hint', style: { marginTop: '3px' } },
-                      spec.exists && spec.error                        ? (spec.errorKind === 'structure' ? '跑不了：' : '解析失败：') + spec.error                        : specParts.length                          ? specParts.join(' · ')                          : '这一阶段吃项目根的 manuscript.json；工作台只按图表清单拼结构，正文留「待补」，不编数字。'                    )
-                  ),
-                  h(
-                    'div',
-                    { className: 'dsa-inline', style: { flex: '0 0 auto', gap: '8px' } },
-                    h(
-                      Btn,
-                      {
-                        variant: spec.exists ? 'default' : 'primary',
-                        disabled: manDisabled,
-                        title: stageRunning ? '先停掉正在跑的文稿阶段' : spec.exists ? '按图表清单重排骨架（会覆盖现有正文）' : '按图表清单生成骨架',
-                        onClick: function () {
-                          if (spec.exists) {
-                            setManAsk(true);
-                            return;
-                          }
-                          doScaffold(false);
-                        }
-                      },
-                      manBusy === 'scaffold' ? '生成中…' : spec.exists ? '重排骨架' : '生成手稿骨架'                    ),
-                    spec.exists                      ? h(
-                          Btn,
-                          { variant: 'primary', disabled: manDisabled, title: '把改稿说明投进研究对话', onClick: doBrief },
-                          manBusy === 'brief' ? '投递中…' : '让 AI 写成正文'                        )                      : null                  )
-                ),
-                spec.exists && manAsk                  ? h(
-                      'div',
-                      { className: 'dsa-ask', style: { marginTop: '9px' } },
-                      h(
-                        'span',
-                        { className: 'dsa-ask-t' },
-                        '重排会用图表清单重新拼一遍骨架，现有的 ' +                          (spec.placeholders ? specNum(spec.placeholders) + ' 段待补和已写正文' : '正文') +                          ' 都会被覆盖；原文件会先备份成 manuscript.json.bak-…。'                      ),
-                      h(
-                        Btn,
-                        { variant: 'danger', disabled: manDisabled, onClick: function () { doScaffold(true); } },
-                        '确认重排'                      ),
-                      h(Btn, { disabled: manDisabled, onClick: function () { setManAsk(false); } }, '取消')
-                    )                  : null,
-                spec.exists && spec.placeholders && !manAsk                  ? h(
-                      'div',
-                      { className: 'dsa-hint', style: { marginTop: '7px' } },
-                      '正文还没写：「待补」段落要按改稿说明补成真正段落，写进去的每个数字都要能追到 output/models/ 或 output/dataset/analysis.csv。'                    )                  : spec.exists && !spec.placeholders && !spec.error && !manAsk                    ? h(
-                        'div',
-                        { className: 'dsa-hint', style: { marginTop: '7px' } },
-                        '正文都写好了：改完 manuscript.json 必须重跑文稿阶段（生成 output/manuscript.docx），否则交付的还是上一版成稿。'                      )                    : null,
-                manNote                  ? h('div', { className: 'dsa-hint', role: 'status', 'aria-live': 'polite', style: { marginTop: '7px' } }, manNote)                  : null              )
-            );
-          }
-        }
-        var main = h(
-          'div',
-          { className: 'dsa-main' },
-          h(PreflightBanner, { preflight: preflight, busy: busy, onRecheck: doRecheck }),
-          h('div', { className: 'dsa-row dsa-hero', style: { justifyContent: 'space-between', alignItems: 'flex-start' } },
-            h(
-              'div',
-              { style: { minWidth: 0 } },
-              h(
-                'div',
-                { className: 'dsa-inline', style: { gap: '8px' } },
-                h('h1', { className: 'dsa-h1' }, String(current.index) + '. ' + current.name),
-                h(
-                  'span',
-                  {
-                    className: 'dsa-chip ' + (current.status === 'done' ? 'ok' : current.status === 'blocked' ? 'err' : current.status === 'review' ? 'warn' : current.status === 'na' ? 'quiet' : ''),
-                    title: '阶段状态（按闸门与产物判定）'                  },
-                  stageWord(current)
-                )
-              ),
-              h('p', { className: 'dsa-sub' }, current.purpose),
-              current.lastRun                ? h(
-                    'div',
-                    // 原来是 -6px：想让它贴住上一行，结果两行字压在一起（窄屏/紧凑档都能看出来）
-                    { className: 'dsa-hint', style: { margin: '4px 0 0' } },
-                    '最近一次运行 ' + (RUN_WORD[current.lastRun.status] || current.lastRun.status)
-                      + ' · ' + fmtTime(current.lastRun.endedAt || current.lastRun.startedAt)
-                      + (current.lastRun.endedAt ? ' · ' + fmtSpan(current.lastRun.startedAt, current.lastRun.endedAt) : '')
-                      + ' · 退出码 ' + (current.lastRun.exitCode === null || current.lastRun.exitCode === undefined ? '—' : current.lastRun.exitCode)
-                  )                : null            ),
-            h(
-              'div',
-              { className: 'dsa-row' },
-              headerPrimary,
-              h(AiMenu, {
-                busy: busy,
-                primary: !hasScript && !stageRunning,
-                onDraft: (current.ui&&current.ui.draftTask)                  ? function () { setDialog({ kind: 'draft', task: (current.ui&&current.ui.draftTask) }); }                  : null,
-                onChat: hasPanel(current,'recheck') ? null : function () { doAskAI(current); },
-                onReview: function () { if (hasPanel(current,'recheck')) doAskAI(current); else reviewNow(); }
-              })
-            )
-          ),
-          kpiStrip,
-          registryCard,
-          regNote ? h('div', { className: 'dsa-hint', role: 'status' }, regNote) : null,
-          manuscriptBlock,
-          nextView,
-          error ? h('div', { className: 'dsa-error', role: 'alert', style: { margin: '10px 0' } }, error) : null,
-          hasScript            ? h(
-                'details',
-                { className: 'dsa-fold dsa-fold-quiet' },
-                h('summary', null, '执行细节 · 命令'),
-                h(
-                  'div',
-                  { className: 'dsa-fold-body' },
-                  h(
-                    'div',
-                    { className: 'dsa-inline', style: { justifyContent: 'space-between', margin: '0 0 6px' } },
-                    h('span', { className: 'dsa-hint' }, '在工作台外执行也行，闸门只认产物'),
-                    h(
-                      'button',
-                      {
-                        type: 'button',
-                        className: 'dsa-chat-btn',
-                        onClick: function () {
-                          try {
-                            if (navigator.clipboard && navigator.clipboard.writeText) {
-                              void navigator.clipboard.writeText(cmdText);
-                              setCmdCopied(true);
-                              setTimeout(function () { setCmdCopied(false); }, 1500);
-                            }
-                          } catch (e) { void e; }
-                        }
-                      },
-                      cmdCopied ? t('copied') : t('copyCmd')
-                    )
-                  ),
-                  h('div', { className: 'dsa-code' }, cmdText)
-                )
-              )            : h('div', { className: 'dsa-hint', style: { margin: '8px 0 0' } }, t('noScript')),
-          h(
-            'div',
-            { className: 'dsa-section' },
-            h('h3', null, '判读'),
-            // 全部通过时这一行不再复述「已通过 N 项」——折叠行里已经写了，同一句话出现两遍只是噪音
-            openGates.length              ? h('span', { className: 'count' }, openGates.length + ' 项待处理 · 已通过 ' + passedGates.length + ' 项')              : null          ),
-          gateList,
-          recheckView,
-          artifactBlocks.length            ? h('div', { className: 'dsa-section' }, h('h3', null, t('artifacts')))            : null,
-          artifactBlocks        );
-        /* ---------------- 运行台 ---------------- */
-        var runs = (snap.runs || []).slice();
-        var stageShort = function (id) {
-          var match = (snap.stages || []).filter(function (s) { return s.id === id; })[0];
-          return match ? match.short : '';
-        };
-        var side = h(
-          'div',
-          // 宽屏右栏本来就该常驻：抽屉的开关按钮在宽屏是隐藏的，如果这里也按 drawer 关闭，
-          // 运行记录与日志就永远打不开了。窄屏才由 drawer 决定（那里有按钮，默认收起不挡内容）。
-          { className: 'dsa-side' + (drawer || width === 'wide' ? '' : ' hide') },
-          h(
-            'div',
-            { className: 'dsa-side-h' },
-            h('b', null, t('logs')),
-            h('span', { className: 'dsa-spacer' }),
-            runId ? h('span', { className: 'dsa-hint dsa-mono', style: { fontSize: '11px' } }, runId) : null,
-            h(Btn, { variant: 'ghost', onClick: function () { setDrawer(false); } }, t('closeDrawer'))
-          ),
-          h(
-            'details',
-            { className: 'dsa-chat-card', style: { margin: '10px 12px 2px' } },
-            h(
-              'summary',
-              null,
-              h('span', { className: 'dsa-chat-dot ' + (projectSession ? (chatRunning ? 'run' : 'ok') : '') }),
-              h('b', { style: { fontSize: '12.5px', fontWeight: 600 } }, t('chatCardTitle')),
-              h(
-                'span',
-                { className: 'dsa-hint', style: { marginLeft: 'auto' } },
-                projectSession ? (chatRunning ? t('chatRunning') : '已绑定') : '未绑定'              )
-            ),
-            h(
-              'div',
-              { className: 'dsa-chat-more' },
-              projectSession                ? h('div', { className: 'dsa-chat-id', title: projectSession }, projectSession)                : h('div', { className: 'dsa-hint' }, t('chatNone')),
-              chatSnippet ? h('div', { className: 'dsa-hint' }, '最近：' + chatSnippet) : null,
-              h(
-                'div',
-                { className: 'dsa-inline' },
-                h(
-                  Btn,
-                  { variant: 'ghost', disabled: busy, onClick: function () { doOpenChat(); } },
-                  projectSession ? t('openChat') : t('startChat')
-                ),
-                h(
-                  Btn,
-                  { variant: 'primary', disabled: busy || !current, onClick: function () { doAskAI(current); } },
-                  '把这一步交给 AI'                )
-              ),
-              chatError ? h('div', { className: 'dsa-error', role: 'alert', style: { fontSize: '12px' } }, chatError) : null,
-              chatError && projectSession                ? h(
-                    'button',
-                    { type: 'button', className: 'dsa-chat-btn', onClick: function () { doResetChat(); } },
-                    t('retryChat')
-                  )                : null            )
-          ),
-          h(
-            'div',
-            { className: 'dsa-runs' },
-            runs.length              ? runs.map(function (run) {
-                  var stageMatch = (snap.stages || []).filter(function (s) { return s.id === run.stageId; })[0];
-                  return h(
-                    'button',
-                    {
-                      key: run.id,
-                      type: 'button',
-                      className: 'dsa-run' + (run.id === runId ? ' sel' : ''),
-                      title: run.id + ' · ' + run.stageId,
-                      onClick: function () { setRunId(run.id); }
-                    },
-                    h('span', { className: 'sid' }, stageMatch ? stageMatch.short : run.stageId),
-                    h('span', { className: 'st ' + run.status }, RUN_WORD[run.status] || run.status),
-                    h('span', { className: 'tm' }, fmtTime(run.startedAt)),
-                    h('span', { className: 'ex' }, run.exitCode === null || run.exitCode === undefined ? '—' : String(run.exitCode))
-                  );
-                })              : h('div', { className: 'dsa-empty' }, t('noRuns'))
-          ),
-          runId && logData.run            ? h(
-                'div',
-                { className: 'dsa-run-h' },
-                h(
-                  'div',
-                  { className: 'dsa-kv' },
-                  h('span', null, t('stageOf') + ' ' + (stageShort(logData.run.stageId) || logData.run.stageId)),
-                  h('span', null, RUN_WORD[logData.run.status] || logData.run.status),
-                  h('span', null, t('runExit') + ' ' + (logData.run.exitCode === null || logData.run.exitCode === undefined ? '—' : logData.run.exitCode)),
-                  h('span', null, fmtTime(logData.run.startedAt) + (logData.run.endedAt ? ' · ' + fmtSpan(logData.run.startedAt, logData.run.endedAt) : ''))
-                ),
-                Array.isArray(logData.run.command) && logData.run.command.length                  ? h(
-                      'div',
-                      { className: 'dsa-mono', style: { marginTop: '4px', wordBreak: 'break-all', color: 'var(--dsa-ink3)' }, title: logData.run.logFile || '' },
-                      logData.run.command.join(' ')
-                    )                  : null              )            : null,
-          h(
-            'div',
-            { className: 'dsa-log', ref: logRef },
-            runId              ? logData.id === runId && logData.lines.length                ? logData.lines.map(function (line, i) {
-                    var cls = /error|traceback|失败|错误/i.test(line)                      ? 'ln-err'                      : /\bwarn(ing)?\b|警告/i.test(line) ? 'ln-warn' : '';
-                    return h('div', { key: i, className: cls }, line || ' ');
-                  })                : t('logEmpty')              : t('logEmpty')
-          )
-        );
-        return h(
-          'div',
-          { className: 'dsa-root', ref: attachRoot, 'data-dsa-width': width, 'data-dsa-theme': theme, 'data-drawer': drawer || width === 'wide' ? 'open' : 'closed' },
-          header,
-          // 读屏用户看不到状态色块：把「当前阶段 + 运行状态 + 错误」放进一个礼貌播报区
-          h(
-            'div',
-            { className: 'dsa-sr-only', role: 'status', 'aria-live': 'polite' },
-            (current && current.name ? current.name + '：' : '') + (stageWord(runningStage || nextStage || current) || '') + (error ? '；' + error : '')
-          ),
-          drawer && width !== 'wide'            ? h('div', { className: 'dsa-scrim', onClick: function () { setDrawer(false); } })            : null,
-          envBlockedNow            ? h(EnvGate, {
-                preflight: preflight,
-                busy: envBusy,
-                note: envNote,
-                onAi: doAiInstall,
-                onSettings: function () { setDialog({ kind: 'settings' }); },
-                onRecheck: doRecheck              })            : h('div', { className: 'dsa-body' }, rail, main, side),
-          dialog ? renderDialog(dialog) : null        );
-        /* ---------------- 弹窗 ---------------- */
-        function renderDialog(d) {
-          if (d.kind === 'create') {
-            return h(CreateDialog, {
-              busy: busy,
-              error: error,
-              onCancel: function () { setDialog(null); },
-              onConfirm: function (dir, name) {
-                action('/project/create', { dir: dir, name: name }).then(function (json) {
-                  if (json && json.ok) setDialog(null);
-                });
-              }
-            });
-          }
-          if (d.kind === 'open') {
-            return h(OpenDialog, {
-              busy: busy,
-              error: error,
-              recent: (snap && snap.projects) || [],
-              onCancel: function () { setDialog(null); },
-              onConfirm: function (dir) {
-                action('/project/open', { dir: dir }).then(function (json) {
-                  if (json && json.ok) setDialog(null);
-                });
-              }
-            });
-          }
-          if (d.kind === 'draft') {
-            var memoProject=snap&&snap.active?snap.active.id:'';
-            return h(DraftDialog, {
-              key:memoProject,
-              projectId:memoProject,
-              memo: draftMemo[memoProject]||{},
-              tasks:snap&&snap.workflow?snap.workflow.draftTasks||[]:[],
-              initialTask: d.task || '',
-              onMemo: function (taskId, text, meta) {
-                setDraftMemo(function (prev) {
-                  var next = {};
-                  for (var k in (prev || {})) next[k] = prev[k];
-                  var group=Object.assign({},next[memoProject]||{});
-                  group[taskId] = { text: text, meta: meta };
-                  next[memoProject]=group;
-                  return next;
-                });
-              },
-              onCancel: function () { setDialog(null); },
-              onSaved: function (json) {
-                if (json && json.state) commitState(json.state);
-              }
-            });
-          }
-          if (d.kind === 'settings') {
-            return h(SettingsDialog, {
-              busy: busy,
-              aiBusy: envBusy,
-              error: error,
-              skill: snap && snap.skill,
-              preflight: preflight,
-              config: snap && snap.config,
-              onRecheck: doRecheck,
-              onAi: doAiInstall,
-              onCancel: function () { setDialog(null); },
-              onConfirm: function (patch) {
-                action('/config', { patch: patch }).then(function (json) {
-                  if (json && json.ok) {
-                    setDialog(null);
-                    // 改了技能包目录/Python 命令，旧自检结论立即过期：马上重查一次
-                    void doRecheck();
-                  }
-                });
-              }
-            });
-          }
-          if (d.kind === 'materials') {
-            return h(MaterialsDialog, {
-              // 平台来自快照，弹窗自己拉的那份还没回来时也能用对的措辞
-              platform: (snap && snap.materials && snap.materials.platform) || '',
-              // 「交给会话」要投进这个项目的研究对话：路径与已绑定会话都从快照来
-              projectPath: (snap && snap.active && snap.active.path) || '',
-              sessionId: (snap && snap.active && snap.active.sessionId) || '',
-              // 挂载/识图都会影响闸门：处理完让面板重新取一次快照，别等下一轮轮询
-              onChanged: function () { void load(true); },
-              onCancel: function () { setDialog(null); }
-            });
-          }
-          if (d.kind === 'artifacts') {
-            return h(ArtifactsDialog, {
-              stale: Boolean(snap && snap.ok && snap.registry === undefined),
-              onCancel: function () { setDialog(null); }
-            });
-          }
-          if (d.kind === 'adjudicate') {
-            return h(AdjudicateDialog, {
-              busy: busy,
-              error: error,
-              stage: d.stage,
-              gate: d.gate,
-              onCancel: function () { setDialog(null); },
-              onConfirm: function (status, note) {
-                doAdjudicate({ stageId: d.stage.id, gateId: d.gate.id, status: status, note: note });
-              }
-            });
-          }
-          if (d.kind === 'patch') {
-            return h(PatchDialog, {
-              busy: busy,
-              error: error,
-              issue: d.issue,
-              onCancel: function () { setDialog(null); },
-              onConfirm: function () { doApply(d.issue.id); }
-            });
-          }
-          if (d.kind === 'forget') {
-            return h(ForgetDialog, {
-              busy: busy,
-              error: error,
-              project: d.project,
-              onCancel: function () { setDialog(null); },
-              onConfirm: function (id) {
-                action('/project/forget', { id: id }).then(function (json) {
-                  if (!json || !json.ok) return;
-                  setDialog(null);
-                  // 移除的是当前项目时，选中的阶段也一起归零：否则还停在一个已经不存在的项目里
-                  setSelected(null);
-                });
-              }
-            });
-          }
-          return null;
-        }
       }
-      /* ------------------------------------------------------------------ *
-       * 弹窗实现
-       * ------------------------------------------------------------------ */
-      /* 路径输入 + 「选择…」：点按钮弹系统原生的文件夹选择框，选完把绝对路径填回输入框。         选择器不可用时把原因写在字段下面，绝不静默失败，也不假装已经选好。 */
       function DirField(props) {
         var busyState = useState(false);
         var busy = busyState[0];
@@ -4433,420 +392,118 @@
             setNote((err && err.message) || String(err));
           });
         };
-        return h(
-          'div',
-          { className: 'dsa-field', style: props.style },
-          h('label', null, props.label),
-          h(
-            'div',
-            { className: 'dsa-input-row' },
+        return h('div', { className: 'dsa-field' },
+          h('label', { htmlFor: props.id || undefined }, props.label),
+          h('div', { className: 'dsa-input-row' },
             h('input', {
+              id: props.id || undefined,
               className: 'dsa-input',
               value: props.value,
               placeholder: props.placeholder,
               disabled: props.disabled,
-              onChange: function (e) { setNote(''); props.onChange(e.target.value); }
+              onChange: function (e) { setNote(''); props.onChange(e.target.value); },
             }),
-            h(Btn, { onClick: choose, disabled: busy || props.disabled, title: t('pickTitle') }, busy ? t('picking') : t('pick'))
+            h(Btn, { onClick: choose, disabled: busy || props.disabled, title: t('pickTitle') },
+              h(FolderIcon, null),
+              h('span', null, busy ? t('picking') : t('pick'))
+            )
           ),
-          note ? h('div', { className: 'dsa-field-note' }, note) : null        );
-      }
-      function CreateDialog(props) {
-        var dirState = useState('');
-        var dir = dirState[0];
-        var setDir = dirState[1];
-        var nameState = useState('');
-        var name = nameState[0];
-        var setName = nameState[1];
-        return h(
-          Modal,
-          {
-            title: t('create'),
-            desc: t('createHint'),
-            busy: props.busy,
-            error: props.error,
-            confirmText: t('create'),
-            confirmDisabled: !dir.trim(),
-            onCancel: props.onCancel,
-            onConfirm: function () { props.onConfirm(cleanPath(dir), name.trim()); }
-          },
-          h(
-            'div',
-            { className: 'dsa-form' },
-            h(DirField, {
-              label: t('dirLabel'),
-              value: dir,
-              placeholder: t('dirPh'),
-              onChange: setDir            }),
-            h(
-              'div',
-              { className: 'dsa-field' },
-              h('label', null, t('nameLabel')),
-              h('input', { className: 'dsa-input', value: name, placeholder: t('namePh'), onChange: function (e) { setName(e.target.value); } })
-            )
-          )
+          note ? h('div', { className: 'dsa-hint' }, note) : null
         );
       }
-      function OpenDialog(props) {
-        var dirState = useState('');
-        var dir = dirState[0];
-        var setDir = dirState[1];
-        return h(
-          Modal,
-          {
-            title: t('open'),
-            desc: t('openHint'),
-            busy: props.busy,
-            error: props.error,
-            confirmText: t('open'),
-            confirmDisabled: !dir.trim(),
-            onCancel: props.onCancel,
-            onConfirm: function () { props.onConfirm(cleanPath(dir)); }
-          },
-          h(
-            'div',
-            { className: 'dsa-form' },
-            h(DirField, {
-              label: t('dirLabel'),
-              value: dir,
-              placeholder: t('dirPh'),
-              onChange: setDir            }),
-            props.recent && props.recent.length              ? h(
-                  'div',
-                  { className: 'dsa-field' },
-                  h('label', null, '最近'),
-                  props.recent.slice(0, 6).map(function (p) {
-                    return h(
-                      'button',
-                      {
-                        key: p.path,
-                        type: 'button',
-                        className: 'dsa-btn ghost',
-                        style: { textAlign: 'left', padding: '3px 6px', height: 'auto' },
-                        onClick: function () { setDir(p.path); }
-                      },
-                      h('span', { className: 'dsa-mono', style: { fontSize: '11px' } }, p.path)
-                    );
-                  })
-                )              : null          )
-        );
-      }
-      function ForgetDialog(props) {
-        var project = props.project || {};
-        var ackState = useState(false);
-        var ack = ackState[0];
-        var setAck = ackState[1];
-        return h(
-          Modal,
-          {
-            title: '移除项目',
-            desc: '只从工作台的项目列表里移除登记，磁盘上的文件一个都不会删。',
-            busy: props.busy,
-            error: props.error,
-            confirmText: '移除',
-            confirmVariant: 'danger',
-            // 二次确认：勾上这一句才让按钮可用，避免手快点掉一个项目
-            confirmDisabled: !ack,
-            onCancel: props.onCancel,
-            onConfirm: function () { props.onConfirm(project.id); }
-          },
-          h(
-            'div',
-            { className: 'dsa-form' },
-            h(
-              'div',
-              { className: 'dsa-field' },
-              h('label', null, '项目'),
-              h('div', { className: 'dsa-forget-name' }, project.name || project.path || '（未命名）'),
-              h('div', { className: 'dsa-forget-path' }, project.path || '')
-            ),
-            h(
-              'div',
-              { className: 'dsa-forget-facts' },
-              h('div', null, '会一起清掉：这个项目的运行记录、人工裁定、复核链。'),
-              h('div', null, '不会动：项目目录、data/、output/、scripts/，以及材料源本身。')
-            ),
-            h(
-              'label',
-              { className: 'dsa-ack' },
-              h('input', {
-                type: 'checkbox',
-                checked: ack,
-                onChange: function (e) { setAck(Boolean(e.target.checked)); }
-              }),
-              h('span', null, '我明白这是移除登记，文件还在原来的目录里')
-            )
-          )
-        );
-      }
-      function DraftDialog(props) {
-        var fallbackTasks = props.tasks || [];
-        var catalogState = useState({ loading: true, ok: false, providers: [], tasks: fallbackTasks, default: null, error: '' });
-        var catalog = catalogState[0];
-        var setCatalog = catalogState[1];
-        // 从面板「让 AI 起草」进来时直接落到对应任务，不用再手动选一次
-        var firstTask = props.initialTask || (fallbackTasks[0]&&fallbackTasks[0].id) || '';
-        var taskState = useState(firstTask);
-        var taskId = taskState[0];
-        var setTaskId = taskState[1];
-        var instructionState = useState('');
-        var instruction = instructionState[0];
-        var setInstruction = instructionState[1];
-        var outState = useState((props.memo && props.memo[firstTask] && props.memo[firstTask].text) || '');
-        var out = outState[0];
-        var setOut = outState[1];
-        var metaState = useState((props.memo && props.memo[firstTask] && props.memo[firstTask].meta) || null);
-        var meta = metaState[0];
-        var setMeta = metaState[1];
-        var errState = useState('');
-        var err = errState[0];
-        var setErr = errState[1];
-        var busyState = useState(false);
-        var busy = busyState[0];
-        var setBusy = busyState[1];
-        var savedState = useState('');
-        var saved = savedState[0];
-        var setSaved = savedState[1];
-        useEffect(function () {
-          request('GET', '/assistant/models')
-            .then(function (json) {
-              if (!json) return;
-              setCatalog({
-                loading: false,
-                ok: Boolean(json.ok),
-                providers: json.providers || [],
-                tasks: Array.isArray(json.tasks) ? json.tasks : [],
-                default: json.default || null,
-                error: json.error || ''              });
-            })
-            .catch(function (e) {
-              setCatalog({ loading: false, ok: false, providers: [], tasks: fallbackTasks, default: null, error: String((e && e.message) || e) });
-            });
-        }, []);
-        var current = null;
-        for (var i = 0; i < catalog.tasks.length; i += 1) {
-          if (catalog.tasks[i].id === taskId) current = catalog.tasks[i];
-        }
-        if (!current) current = catalog.tasks[0] || {id:'',label:catalog.loading?'正在读取技能任务…':'当前技能没有可用的起草任务',file:''};
-        // 切任务时优先恢复这个任务上一次的生成结果；没有才清空
-        useEffect(function () {
-          var m = (props.memo && props.memo[taskId]) || null;
-          setOut(m ? m.text || '' : '');
-          setMeta(m ? m.meta || null : null);
-          setErr('');
-          setSaved('');
-        }, [taskId]);
-        // 生成一次就把结果留在面板层，关闭弹窗不丢
-        useEffect(function () {
-          if (!out) return;
-          if (props.onMemo) props.onMemo(taskId, out, meta);
-        }, [out, meta]);
-        var route = catalog.default || null;
-        var modelLine = '模型：读取中…';
-        if (!catalog.loading) {
-          if (!catalog.ok) modelLine = t('modelUnavailable') + (catalog.error ? ' · ' + catalog.error : '');
-          else if (route && route.provider && route.model) {
-            modelLine = '模型：' + (route.source === 'custom' ? '自定义 · ' : '跟随 DSH 默认 · ') + route.provider + ' / ' + route.model;
-          } else if (route && route.error) {
-            modelLine = t('modelUnavailable') + ' · ' + route.error;
-          }
-        }
-        function generate() {
-          setBusy(true);
-          setErr('');
-          setSaved('');
-          request('POST', '/assistant/draft', { taskId: current.id, instruction: instruction.trim(),projectId:props.projectId })
-            .then(function (json) {
-              if (json && json.ok) {
-                setOut(json.text || '');
-                setMeta(json);
-              } else {
-                setErr((json && json.error) || t('actionFail'));
-              }
-              return json;
-            })
-            .catch(function (e) {
-              setErr(String((e && e.message) || e));
-            })
-            .then(function () {
-              setBusy(false);
-            });
-        }
-        function copyOut() {
+      function cleanPath(value) {
+        var text = String(value || '').trim();
+        if (/^file:\/\/\//i.test(text)) {
           try {
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-              void navigator.clipboard.writeText(out);
-              setSaved(t('copy') + ' ✓');
-            }
-          } catch (e) {
-            void e;
+            text = decodeURIComponent(text.replace(/^file:\/\/\//i, ''));
+            if (/^[a-zA-Z]:/.test(text) === false && text.charAt(0) === '/') text = text.slice(1);
+            text = text.replace(/\//g, '\\');
+          } catch (error) {
+            /* 保持原样 */
           }
         }
-        function writeOut() {
-          setBusy(true);
-          setErr('');
-          request('POST', '/assistant/save', { taskId: current.id, text: out,projectId:meta&&meta.projectId||props.projectId })
-            .then(function (json) {
-              if (json && json.ok) {
-                setSaved(t('draftSaved') + '：' + json.file);
-                if (props.onSaved) props.onSaved(json);
-              } else {
-                setErr((json && json.error) || t('actionFail'));
+        return text;
+      }
+
+      /* ------------------------------------------------------------------ *
+       * 文件树（递归 <details>，code 与「全部」共用）
+       * ------------------------------------------------------------------ */
+      function buildTree(entries) {
+        var nodes = Object.create(null);
+        nodes[''] = [];
+        (entries || []).forEach(function (entry) {
+          var rel = String(entry.rel || '');
+          var cut = rel.lastIndexOf('/');
+          var parent = cut > 0 ? rel.slice(0, cut) : '';
+          if (!nodes[parent]) nodes[parent] = [];
+          nodes[parent].push(entry);
+          if (entry.kind === 'dir' && !nodes[rel]) nodes[rel] = [];
+        });
+        return nodes;
+      }
+      function FileTree(props) {
+        var nodes = useMemo(function () { return buildTree(props.entries); }, [props.entries]);
+        var active = props.active || '';
+        var renderLevel = function (parent, depth) {
+          if (depth > 8) return null;
+          var items = nodes[parent] || [];
+          if (!items.length) return null;
+          return h('ul', { className: 'dsa-tree' },
+            items.map(function (entry) {
+              if (entry.kind === 'dir') {
+                return h('li', { key: entry.rel, className: 'dsa-tree-dir' },
+                  h('details', { open: depth < 1 },
+                    h('summary', null, entry.name),
+                    renderLevel(entry.rel, depth + 1)
+                  )
+                );
               }
-              return json;
+              return h('li', { key: entry.rel, className: 'dsa-tree-file' },
+                h('button', {
+                  type: 'button',
+                  className: 'dsa-tree-item' + (active === entry.rel ? ' sel' : ''),
+                  title: entry.rel,
+                  onClick: function () { if (props.onPick) props.onPick(entry.rel); },
+                }, cardLabel(entry))
+              );
             })
-            .catch(function (e) {
-              setErr(String((e && e.message) || e));
-            })
-            .then(function () {
-              setBusy(false);
-            });
-        }
-        return h(
-          Modal,
-          {
-            title: t('draftTitle'),
-            desc: t('draftHint'),
-            error: err,
-            onCancel: props.onCancel          },
-          h(
-            'div',
-            { className: 'dsa-form' },
-            h('div', { className: 'dsa-model-line' }, modelLine),
-            h(
-              'div',
-              { className: 'dsa-field' },
-              h('label', null, t('draftTask')),
-              h(
-                'select',
-                {
-                  className: 'dsa-input',
-                  value: taskId,
-                  onChange: function (e) { setTaskId(e.target.value); setSaved(''); }
-                },
-                catalog.tasks.map(function (task) {
-                  return h('option', { key: task.id, value: task.id }, task.label + ' → ' + task.file);
-                })
-              )
-            ),
-            h(
-              'div',
-              { className: 'dsa-field' },
-              h('label', null, t('draftInstruction')),
-              h('textarea', {
-                className: 'dsa-input',
-                style: { height: '56px', padding: '6px 9px', resize: 'vertical' },
-                value: instruction,
-                placeholder: t('draftInstructionPh'),
-                onChange: function (e) { setInstruction(e.target.value); }
-              })
-            ),
-            h(
-              'div',
-              { className: 'dsa-inline' },
-              h(Btn, { variant: 'primary', disabled: busy || !catalog.ok || !current.id, onClick: generate }, busy ? t('generating') : t('generate')),
-              h(Btn, { variant: 'ghost', disabled: busy || !out, onClick: copyOut }, t('copy')),
-              h(Btn, { variant: 'ghost', disabled: busy || !out || !current.id, onClick: writeOut, title: current.file }, t('write')),
-              saved ? h('span', { className: 'dsa-hint' }, saved) : null            ),
-            h('pre', { className: 'dsa-draft-out' }, out || t('draftEmpty')),
-            meta              ? h(
-                  'div',
-                  { className: 'dsa-draft-meta' },
-                  h('span', null, meta.provider + ' / ' + meta.model),
-                  meta.usage ? h('span', null, 'in ' + meta.usage.inputTokens + ' · out ' + meta.usage.outputTokens) : null,
-                  h('span', null, (meta.elapsedMs / 1000).toFixed(1) + 's'),
-                  meta.missing && meta.missing.length ? h('span', null, '未提供：' + meta.missing.join('、')) : null                )              : null          )
+          );
+        };
+        var rootNodes = (nodes[''] || []).slice();
+        if (!rootNodes.length) return h('div', { className: 'dsa-hint' }, t('treeEmpty'));
+        return h('div', { className: 'dsa-tree-wrap' },
+          rootNodes.map(function (entry) {
+            if (entry.kind === 'dir') {
+              return h('details', { key: entry.rel, className: 'dsa-tree-root', open: true },
+                h('summary', null, entry.name),
+                renderLevel(entry.rel, 1)
+              );
+            }
+            return h('button', {
+              key: entry.rel,
+              type: 'button',
+              className: 'dsa-tree-item' + (active === entry.rel ? ' sel' : ''),
+              onClick: function () { if (props.onPick) props.onPick(entry.rel); },
+            }, cardLabel(entry));
+          })
         );
       }
+
       /* ------------------------------------------------------------------ *
-       * 产物中心（v2）
-       * 面板以前只能看数字：46 张 600dpi 的图、5 张表、5.6MB 的 docx 一个都打不开。
-       * 这里把 output/ 当成可浏览的产物库：缩略图（服务端生成）、CSV 表格、文档下载。
+       * 通用查看器
        * ------------------------------------------------------------------ */
       var ARTIFACT_TABS = [
-        { id: 'figures', label: '图', test: function (entry) { return /^\.(png|jpe?g|webp|gif|tiff?|hei[cf])$/.test(entry.ext); } },
-        { id: 'tables', label: '表', test: function (entry) { return entry.ext === '.csv' || entry.ext === '.tsv'; } },
-        {
-          id: 'docs',
-          label: '文档',
-          test: function (entry) {
-            return ['.docx', '.pdf', '.md', '.txt', '.json', '.jsonl', '.html', '.log'].indexOf(entry.ext) >= 0;
-          }
-        },
-        { id: 'all', label: '全部', test: function () { return true; } }
+        { id: 'figures', label: 'tabFigures', test: function (entry) { return /^\.(png|jpe?g|webp|gif|bmp|avif|tiff?|hei[cf])$/i.test(entry.ext); } },
+        { id: 'tables', label: 'tabTables', test: function (entry) { return entry.ext === '.csv' || entry.ext === '.tsv'; } },
+        { id: 'docs', label: 'tabDocs', test: function (entry) { return ['.docx', '.pdf', '.md', '.txt', '.json', '.jsonl', '.html', '.log'].indexOf(entry.ext) >= 0; } },
+        { id: 'all', label: 'tabAll', test: function () { return true; } },
+        { id: 'code', label: 'tabCode', test: function (entry) { return String(entry.rel).indexOf('scripts/') === 0 && CODE_EXTS.test(entry.ext); } },
       ];
-      /**
-       * 宿主没重启时，新接口会回「未知接口 …」或裸 404：这时候要把话说清楚，
-       * 而不是把后端那句「未知接口」原样甩给用户（client 能热更新、宿主不能）。
-       */
-      function hostHint(message, feature) {
-        var text = String((message && message.message) || message || '').trim();
-        if (/未知接口|\bHTTP 404\b|not found/i.test(text)) {
-          return feature + '需要新版宿主：面板已更新，但 DSH 主进程还在跑旧代码。重启 DSH 后再打开这里（client 的改动不用重启，宿主的必须重）。';
-        }
-        return text || (feature + '读取失败');
-      }
-      function artifactRawUrl(rel, download) {
-        return API + '/artifacts/raw?path=' + encodeURIComponent(rel) + (download ? '&download=1' : '');
-      }
-      function artifactThumbUrl(rel, width) {
-        return API + '/artifacts/thumb?path=' + encodeURIComponent(rel) + '&w=' + (width || 320);
-      }
-      // 浏览器能直接显示的图片格式；TIFF / HEIC 之类一律由服务端转成 PNG 再给前端
-      var VIEWABLE_IMAGE = /^\.(png|jpe?g|webp|gif|bmp|avif)$/i;
-      function extOf(rel) {
-        var hit = String(rel || '').match(/\.[^./\\]+$/);
-        return hit ? hit[0].toLowerCase() : '';
-      }
-      function artifactPreviewUrl(rel, ext) {
-        var kind = String(ext || extOf(rel));
-        return VIEWABLE_IMAGE.test(kind) ? artifactRawUrl(rel, false) : artifactThumbUrl(rel, 2400);
-      }
-      // 能直接给浏览器打开的地址：PDF 走 raw（内嵌阅读器/新窗口都靠它），图按上面的规则
-      function artifactViewUrl(rel) {
-        return extOf(rel) === '.pdf' ? artifactRawUrl(rel, false) : artifactPreviewUrl(rel);
-      }
-      // 浏览器不直接显示、也不该单独占一张卡片的印刷原稿：有同名可预览图时收进那张卡
-      var HIDDEN_TWIN_EXT = /^\.(tiff?|hei[cf])$/i;
-      function artifactStem(rel) {
-        return String(rel || '').replace(/\.[^./\\]+$/, '');
-      }
-      /**
-       * 同目录同主名的 TIFF/HEIC 是 PNG 的印刷稿，不是另一张图。
-       * 网格里藏掉，点开 PNG 时在下载旁边给「下载 TIFF」。
-       * 没有同名可预览图时仍单独成卡（否则那张原稿就没入口了）。
-       */
-      function artifactTwins(files) {
-        var list = files || [];
-        var byStem = {};
-        list.forEach(function (entry) {
-          var stem = artifactStem(entry.rel);
-          var bucket = byStem[stem] || (byStem[stem] = []);
-          bucket.push(entry);
-        });
-        var hide = {};
-        var twinOf = {};
-        Object.keys(byStem).forEach(function (stem) {
-          var bucket = byStem[stem];
-          // 同名 PNG 自己都读不出来（超过 32MB 等）时就别藏它的原稿，否则两份都没入口
-          var preview = bucket.filter(function (entry) {
-            return VIEWABLE_IMAGE.test(entry.ext) && entry.viewable !== false;
-          })[0];
-          if (!preview) return;
-          bucket.forEach(function (entry) {
-            if (!HIDDEN_TWIN_EXT.test(entry.ext) || entry.rel === preview.rel) return;
-            hide[entry.rel] = true;
-            var current = twinOf[preview.rel];
-            // 同主名同时有 .tif 和 .tiff 时，优先完整的 .tiff
-            if (!current || extOf(entry.rel) === '.tiff') twinOf[preview.rel] = entry.rel;
-          });
-        });
-        return { hide: hide, twinOf: twinOf };
-      }
-      function ArtifactsDialog(props) {
-        var treeState = useState({ loading: true, ok: false, entries: [], error: '', totalFiles: 0, totalBytes: 0, truncated: false });
-        var tree = treeState[0];
-        var setTree = treeState[1];
+
+      function ArtifactViewer(props) {
+        var wsId = props.workspaceId || '';
+        var entries = props.entries || [];
+        var prefix = props.prefix || '';
         var tabState = useState('figures');
         var tab = tabState[0];
         var setTab = tabState[1];
@@ -4856,79 +513,90 @@
         var detailState = useState({ loading: false, ok: false, error: '', data: null });
         var detail = detailState[0];
         var setDetail = detailState[1];
+        var queryState = useState('');
+        var query = queryState[0];
+        var setQuery = queryState[1];
         var aliveRef = useRef(true);
+        var lightboxRef = useRef(null);
+        var detailSeqRef = useRef(0);
         useEffect(function () {
           aliveRef.current = true;
           return function () { aliveRef.current = false; };
         }, []);
-        var load = function () {
-          return request('GET', '/artifacts/tree').then(function (json) {
-            if (!aliveRef.current) return;
-            if (!json || !json.ok) {
-              setTree({ loading: false, ok: false, entries: [], error: hostHint((json && json.error) || '读不到产物目录', '产物中心'), totalFiles: 0, totalBytes: 0, truncated: false });
-              return;
-            }
-            setTree({
-              loading: false,
-              ok: true,
-              error: '',
-              entries: Array.isArray(json.entries) ? json.entries : [],
-              totalFiles: Number(json.totalFiles) || 0,
-              totalBytes: Number(json.totalBytes) || 0,
-              truncated: json.truncated === true            });
-          }).catch(function (error) {
-            if (!aliveRef.current) return;
-            setTree({ loading: false, ok: false, entries: [], error: hostHint(error, '产物中心'), totalFiles: 0, totalBytes: 0, truncated: false });
-          });
-        };
+        // 切工作区就收起预览，避免标题是新的、内容还是旧的
         useEffect(function () {
-          // 旧宿主没有这条路由：直接给结论，不发一个注定 404 的请求
-          if (props.stale) return;
-          void load();
-        }, []);
-        // 点任何产物都在弹层里看：图给大图、表给整张表、文本给全文、PDF 给内嵌阅读器
-        var open = function (rel) {
-          setSel(rel);
-          var ext = extOf(rel);
-          if (/^\.(png|jpe?g|webp|gif|bmp|avif|tiff?|hei[cf])$/i.test(ext)) {
-            // 图不需要 /artifacts/file：预览地址直接能显示（TIFF 由服务端转 PNG）
-            setDetail({ loading: false, ok: true, error: '', data: { kind: 'image', rel: rel } });
-            return;
-          }
-          setDetail({ loading: true, ok: false, error: '', data: null });
-          request('GET', '/artifacts/file?path=' + encodeURIComponent(rel) + '&limit=200').then(function (json) {
-            if (!aliveRef.current) return;
-            if (!json || !json.ok) {
-              setDetail({ loading: false, ok: false, error: hostHint((json && json.error) || '读不出来', '产物中心'), data: null });
-              return;
-            }
-            setDetail({ loading: false, ok: true, error: '', data: json });
-          }).catch(function (error) {
-            if (!aliveRef.current) return;
-            setDetail({ loading: false, ok: false, error: String((error && error.message) || error), data: null });
-          });
-        };
-        var files = (tree.entries || []).filter(function (entry) { return entry.kind === 'file'; });
-        var twins = artifactTwins(files);
-        var shown = files.filter(function (entry) { return !twins.hide[entry.rel]; });
-        var hiddenCount = files.length - shown.length;
-        var hiddenBytes = files.reduce(function (sum, entry) {
-          return twins.hide[entry.rel] ? sum + (Number(entry.size) || 0) : sum;
-        }, 0);
+          detailSeqRef.current += 1;
+          setSel('');
+          setQuery('');
+          setDetail({ loading: false, ok: false, error: '', data: null });
+        }, [wsId]);
+
+        var files = entries.filter(function (entry) { return entry.kind === 'file'; });
+        var scoped = prefix
+          ? files.filter(function (entry) { return entry.rel === prefix || entry.rel.indexOf(prefix + '/') === 0; })
+          : files;
+        var twins = artifactTwins(scoped);
+        var shown = scoped.filter(function (entry) { return !twins.hide[entry.rel]; });
         var activeTab = ARTIFACT_TABS.filter(function (item) { return item.id === tab; })[0] || ARTIFACT_TABS[0];
-        var visible = shown.filter(activeTab.test).sort(function (a, b) { return String(a.rel).localeCompare(String(b.rel)); });
-        // 弹层里能左右翻的只有图；顺序与网格一致。成对的 TIFF 不进翻页，否则 ←/→ 会翻到同一张图
-        var imageList = visible          .filter(function (entry) { return entry.image === true || /^\.(png|jpe?g|webp|gif|tiff?|hei[cf])$/.test(entry.ext); })
+        var q = String(query || '').trim().toLowerCase();
+        var matchesQuery = function (entry) {
+          if (!q) return true;
+          return String(entry.rel || '').toLowerCase().indexOf(q) >= 0
+            || String(entry.title || '').toLowerCase().indexOf(q) >= 0;
+        };
+        var visible = shown.filter(activeTab.test).filter(matchesQuery).sort(function (a, b) { return String(a.rel).localeCompare(String(b.rel)); });
+        var visibleBytes = visible.reduce(function (sum, entry) { return sum + (Number(entry.size) || 0); }, 0);
+        var imageList = visible
+          .filter(function (entry) { return entry.image === true || /^\.(png|jpe?g|webp|gif|tiff?|hei[cf])$/i.test(entry.ext); })
+          .filter(function (entry) { return VIEWABLE_IMAGE.test(entry.ext) || HIDDEN_TWIN_EXT.test(entry.ext); })
           .map(function (entry) { return entry.rel; });
+        var selEntry = sel ? entries.filter(function (entry) { return entry.rel === sel; })[0] : null;
+        var selVersion = selEntry ? selEntry.mtimeMs : '';
         var twinRel = twins.twinOf[sel] || '';
         var viewIsImage = sel && imageList.indexOf(sel) >= 0;
         var selIndex = viewIsImage ? imageList.indexOf(sel) : -1;
-        var stepBig = function (delta) {
+        var step = function (delta) {
           if (!imageList.length) return;
           var next = selIndex < 0 ? 0 : (selIndex + delta + imageList.length) % imageList.length;
           open(imageList[next]);
         };
-        // 弹层开着时接管键盘：Esc 只关这一层（Modal 的 Esc 用 .dsa-lightbox 让路），左右翻图
+
+        var open = function (rel) {
+          var seq = detailSeqRef.current + 1;
+          detailSeqRef.current = seq;
+          var ext = extOf(rel);
+          var entry = entries.filter(function (item) { return item.rel === rel; })[0];
+          setSel(rel);
+          if (entry && entry.viewable === false) {
+            setDetail({ loading: false, ok: false, error: t('unviewable'), data: null });
+            return;
+          }
+          if (/^\.(png|jpe?g|webp|gif|bmp|avif|tiff?|hei[cf])$/i.test(ext)) {
+            setDetail({ loading: false, ok: true, error: '', data: { kind: 'image', rel: rel } });
+            return;
+          }
+          setDetail({ loading: true, ok: false, error: '', data: null });
+          request('GET', '/artifacts/file' + artifactQuery(rel, wsId) + '&limit=200').then(function (json) {
+            if (!aliveRef.current || seq !== detailSeqRef.current) return;
+            if (!json || !json.ok || (json.rel && json.rel !== rel)) {
+              setDetail({ loading: false, ok: false, error: (json && json.error) || t('loadFail'), data: null });
+              return;
+            }
+            setDetail({ loading: false, ok: true, error: '', data: json });
+          }).catch(function (error) {
+            if (!aliveRef.current || seq !== detailSeqRef.current) return;
+            setDetail({ loading: false, ok: false, error: String((error && error.message) || error), data: null });
+          });
+        };
+
+        useEffect(function () {
+          if (!sel) return;
+          var node = lightboxRef.current;
+          if (node && typeof node.focus === 'function') {
+            try { node.focus(); } catch (error) { /* ignore */ }
+          }
+        }, [sel]);
+
         useEffect(function () {
           if (!sel || typeof window === 'undefined' || !window.addEventListener) return;
           function onKey(event) {
@@ -4937,130 +605,50 @@
               setSel('');
             } else if (event.key === 'ArrowLeft' && viewIsImage) {
               event.preventDefault();
-              stepBig(-1);
+              step(-1);
             } else if (event.key === 'ArrowRight' && viewIsImage) {
               event.preventDefault();
-              stepBig(1);
+              step(1);
+            } else if (event.key === 'Tab' && typeof document !== 'undefined') {
+              var root = document.querySelector('.dsa-lightbox');
+              if (!root) return;
+              var nodes = [].slice.call(root.querySelectorAll('button,[href],[tabindex]:not([tabindex="-1"])'))
+                .filter(function (el) { return !el.disabled && el.offsetParent !== null; });
+              if (!nodes.length) return;
+              var first = nodes[0];
+              var last = nodes[nodes.length - 1];
+              if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last.focus();
+              } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus();
+              }
             }
           }
           window.addEventListener('keydown', onKey);
           return function () { window.removeEventListener('keydown', onKey); };
-        }, [sel, imageList.join('|')]);
-        var body = props.stale          ? // 直接由 props 判，不走 state：不会先闪一下「正在读」再变成错误
-            h('div', { className: 'dsa-error', role: 'alert' }, hostHint('未知接口', '产物中心'))          : tree.loading          ? h('div', { className: 'dsa-hint' }, '正在读 output/…')          : !tree.ok            ? h(
-                'div',
-                { className: 'dsa-error', role: 'alert' },
-                h('div', null, tree.error || '读不到产物目录'),
-                h(
-                  'div',
-                  { style: { marginTop: '8px' } },
-                  h(
-                    Btn,
-                    {
-                      onClick: function () {
-                        setTree({ loading: true, ok: false, entries: [], error: '', totalFiles: 0, totalBytes: 0, truncated: false });
-                        void load();
-                      }
-                    },
-                    '重试'                  )
-                )
-              )            : !shown.length              ? h('div', { className: 'dsa-hint' }, 'output/ 里还没有产物：先把阶段跑起来。')              : h(
-                  'div',
-                  null,
-                  h(
-                    'div',
-                    { className: 'dsa-art-bar' },
-                    h(
-                      'div',
-                      { className: 'dsa-tabs', role: 'tablist' },
-                      ARTIFACT_TABS.map(function (item, index) {
-                        var count = shown.filter(item.test).length;
-                        return h(
-                          'button',
-                          {
-                            key: item.id,
-                            type: 'button',
-                            role: 'tab',
-                            'aria-selected': tab === item.id ? 'true' : 'false',
-                            tabIndex: tab === item.id ? 0 : -1,
-                            className: 'dsa-tab' + (tab === item.id ? ' sel' : ''),
-                            onClick: function () { setTab(item.id); },
-                            onKeyDown: function (event) {
-                              var key = event && event.key;
-                              if (key !== 'ArrowLeft' && key !== 'ArrowRight' && key !== 'Home' && key !== 'End') return;
-                              event.preventDefault();
-                              var next = key === 'Home' ? 0                                : key === 'End' ? ARTIFACT_TABS.length - 1                                  : (index + (key === 'ArrowRight' ? 1 : -1) + ARTIFACT_TABS.length) % ARTIFACT_TABS.length;
-                              var target = ARTIFACT_TABS[next];
-                              setTab(target.id);
-                              var node = event.currentTarget && event.currentTarget.parentNode                                && event.currentTarget.parentNode.children                                && event.currentTarget.parentNode.children[next];
-                              try { if (node && node.focus) node.focus(); } catch (error) { /* ignore */ }
-                            }
-                          },
-                          item.label + ' ' + count                        );
-                      })
-                    ),
-                    h('span', { className: 'dsa-spacer' }),
-                    h(
-                      'span',
-                      { className: 'dsa-hint', title: hiddenCount ? '另有 ' + hiddenCount + ' 个同名 TIFF/HEIC 收在对应图片的「下载」里，不单独计数' : '' },
-                      (tree.truncated ? '≥ ' : '') + Math.max(0, tree.totalFiles - hiddenCount) + ' 个文件 · ' + sizeText(Math.max(0, tree.totalBytes - hiddenBytes))
-                    )
-                  ),
-                  h(
-                    'div',
-                    { className: 'dsa-art-grid' },
-                    visible.slice(0, 120).map(function (entry) {
-                      // 服务端已经判过扩展名与大小上限：这里跟着它，不要自己再猜
-                      var isImage = entry.image === true || /^\.(png|jpe?g|webp|gif|tiff?|hei[cf])$/.test(entry.ext);
-                      var canPreview = entry.viewable !== false;
-                      return h(
-                        'button',
-                        {
-                          key: entry.rel,
-                          type: 'button',
-                          className: 'dsa-art-card' + (sel === entry.rel ? ' sel' : ''),
-                          title: entry.rel,
-                          onClick: function () { open(entry.rel); }
-                        },
-                        isImage && canPreview                          ? h('img', {
-                              className: 'dsa-art-thumb',
-                              src: artifactThumbUrl(entry.rel, 320),
-                              alt: entry.name,
-                              loading: 'lazy',
-                              // 缩略图失败只退回一次原图：原图也被服务端拒（>32MB）时不再重试
-                              onError: function (event) {
-                                var img = event && event.target;
-                                if (!img || img.getAttribute('data-fallback') === '1') {
-                                  if (img) { img.onerror = null; img.style.visibility = 'hidden'; }
-                                  return;
-                                }
-                                img.setAttribute('data-fallback', '1');
-                                // 回退也用「能显示的」那个地址：TIFF 的 raw 浏览器一样打不开
-                                img.src = artifactPreviewUrl(entry.rel, entry.ext);
-                              }
-                            })                          : h('span', { className: 'dsa-art-ext' }, (entry.ext || '?').replace('.', '').toUpperCase() || '?'),
-                        h('span', { className: 'dsa-art-name' }, entry.name),
-                        h('span', { className: 'dsa-art-meta' }, sizeText(entry.size))
-                      );
-                    })
-                  ),
-                  visible.length > 120                    ? h('div', { className: 'dsa-hint' }, '只显示前 120 个（这一类共 ' + visible.length + ' 个）。要找具体某个文件，让 AI 用 data_analysis_artifacts 按路径读，或直接看上面的相对路径。')                    : null                );
-        // 弹层内容：图给大图、表给整张表、文本给全文、PDF 内嵌阅读器、Word 给下载
+        }, [sel, imageList.join('|'), wsId]);
+
         var overlayBody = null;
-        if (detail.loading) {
-          overlayBody = h('div', { className: 'dsa-hint' }, '读取中…');
-        } else if (!detail.ok) {
-          overlayBody = h('div', { className: 'dsa-error', role: 'alert' }, detail.error || '读不出来');
-        } else if (detail.data && detail.data.kind === 'image') {
-          overlayBody = h('img', { className: 'dsa-lightbox-img', src: artifactPreviewUrl(sel), alt: sel });
+        if (detail.loading) overlayBody = h('div', { className: 'dsa-hint' }, t('loading'));
+        else if (!detail.ok) overlayBody = h('div', { className: 'dsa-error', role: 'alert' }, detail.error || t('loadFail'));
+        else if (detail.data && detail.data.kind === 'image') {
+          if (VIEWABLE_IMAGE.test(extOf(sel))) {
+            overlayBody = h('div', { className: 'dsa-lightbox-stage' },
+              h('img', { className: 'dsa-lightbox-img', src: artifactRawUrl(sel, false, wsId, selVersion), alt: sel })
+            );
+          } else {
+            overlayBody = h('div', { className: 'dsa-empty' },
+              h('b', null, extOf(sel).replace('.', '').toUpperCase()),
+              h('p', null, t('imageUnsupported')),
+              h('a', { className: 'dsa-link', href: artifactRawUrl(sel, true, wsId) }, t('download'))
+            );
+          }
         } else if (detail.data && detail.data.kind === 'table') {
-          overlayBody = h(
-            'div',
-            { className: 'dsa-art-tablewrap dsa-art-tablewrap-lg' },
-            h('div', { className: 'dsa-hint' }, detail.data.totalRows + ' 行 × ' + detail.data.header.length + ' 列' + (detail.data.truncated ? '（只显示前 200 行；完整体点下载）' : '')),
-            h(
-              'table',
-              { className: 'dsa-art-table' },
+          overlayBody = h('div', { className: 'dsa-tablewrap dsa-tablewrap-lg' },
+            h('div', { className: 'dsa-hint' }, detail.data.totalRows + ' ' + t('tableRows') + ' × ' + detail.data.header.length + ' ' + t('tableCols') + (detail.data.truncated ? '（' + t('tableTruncated') + '）' : '')),
+            h('table', { className: 'dsa-table' },
               h('thead', null, h('tr', null, detail.data.header.map(function (name) { return h('th', { key: name }, name); }))),
               h('tbody', null, detail.data.rows.map(function (row, index) {
                 return h('tr', { key: index }, row.map(function (cell, cellIndex) { return h('td', { key: cellIndex }, String(cell)); }));
@@ -5068,774 +656,1012 @@
             )
           );
         } else if (detail.data && (detail.data.kind === 'text' || detail.data.kind === 'json')) {
-          overlayBody = h('pre', { className: 'dsa-art-pre dsa-art-pre-lg' }, String(detail.data.text || '').slice(0, 20000));
+          overlayBody = h('pre', { className: 'dsa-pre dsa-pre-lg' }, String(detail.data.text || '').slice(0, 200000));
         } else if (detail.data && detail.data.kind === 'pdf') {
-          overlayBody = h('iframe', { className: 'dsa-lightbox-pdf', src: artifactViewUrl(sel), title: sel });
-        } else {
-          overlayBody = h(
-            'div',
-            { className: 'dsa-hint' },
-            '这是 Word 文档，浏览器不内嵌显示：点「下载」用 Word / WPS 打开，或在产物中心里看同名的图表。'          );
+          overlayBody = h('iframe', { className: 'dsa-lightbox-pdf', src: artifactRawUrl(sel, false, wsId, selVersion), title: sel });
+        } else if (detail.data && detail.data.kind === 'document') {
+          overlayBody = h('div', { className: 'dsa-empty' },
+            h('b', null, 'DOCX'),
+            h('p', null, t('docHint')),
+            h('a', { className: 'dsa-link', href: artifactRawUrl(sel, true, wsId) }, t('download'))
+          );
         }
-        var lightbox = sel          ? h(
-              'div',
-              {
-                className: 'dsa-lightbox',
-                role: 'dialog',
-                'aria-modal': 'true',
-                'aria-label': '预览：' + sel,
-                onClick: function (event) {
-                  if (event.target === event.currentTarget) setSel('');
-                }
-              },
-              h(
-                'div',
-                { className: 'dsa-lightbox-card' + (viewIsImage ? '' : ' wide') },
-                h(
-                  'div',
-                  { className: 'dsa-lightbox-bar' },
-                  h('b', { className: 'dsa-lightbox-name', title: sel }, sel),
-                  h('span', { className: 'dsa-spacer' }),
-                  viewIsImage && imageList.length > 1                    ? h('span', { className: 'dsa-hint' }, selIndex + 1 + ' / ' + imageList.length)                    : null,
-                  h('a', { className: 'dsa-link', href: artifactViewUrl(sel), target: '_blank', rel: 'noreferrer' }, '新窗口打开'),
-                  h(
-                    'a',
-                    { className: 'dsa-link', href: artifactRawUrl(sel, true) },
-                    viewIsImage && twinRel                      ? '下载 ' + (extOf(sel).replace('.', '').toUpperCase() || '原图')                      : '下载'                  ),
-                  viewIsImage && twinRel                    ? h(
-                        'a',
-                        {
-                          className: 'dsa-link',
-                          href: artifactRawUrl(twinRel, true),
-                          title: twinRel                        },
-                        '下载 ' + extOf(twinRel).replace('.', '').toUpperCase()
-                      )                    : null,
-                  h(Btn, { onClick: function () { setSel(''); }, title: '关闭（Esc）' }, '关闭')
-                ),
-                overlayBody,
-                viewIsImage && !VIEWABLE_IMAGE.test(extOf(sel))                  ? h('div', { className: 'dsa-hint' }, extOf(sel).replace('.', '').toUpperCase() + ' 浏览器不直接显示，这里看的是转码预览（最长边 2400px）；原图点「下载」。')                  : null,
-                viewIsImage && imageList.length > 1                  ? h(
-                      'div',
-                      { className: 'dsa-lightbox-navs' },
-                      h('button', { type: 'button', className: 'dsa-lightbox-nav prev', 'aria-label': '上一张（←）', onClick: function () { stepBig(-1); } }, '‹'),
-                      h('button', { type: 'button', className: 'dsa-lightbox-nav next', 'aria-label': '下一张（→）', onClick: function () { stepBig(1); } }, '›')
-                    )                  : null              )
-            )          : null;
-        return h(
-          Modal,
-          {
-            title: '产物中心',
-            desc: 'output/ 里的图、表与文档。点任意一项就地弹层查看（图可 ←/→ 翻页，Esc 关闭）；同名 TIFF 不单独占一张卡，点开 PNG 后可在旁边下载。只读，不改文件。',
-            onCancel: props.onCancel,
-            maskClose: true          },
-          h('div', null, body, lightbox)
-        );
-      }
-      /* ------------------------------------------------------------------ *
-       * 契约卡（数据集 / 模型 / 产物 / 结论）
-       * ------------------------------------------------------------------ */
-      function RegistryCard(props) {
-        var reg = props.registry;
-        if (!reg) {
-          // 旧宿主 / 还没重启：不留空白，说清楚这块是什么、怎么出现
-          return props.stale            ? h(
-                'div',
-                { className: 'dsa-card dsa-pad' },
-                h('div', { className: 'dsa-hint' }, '契约卡需要新版宿主：面板已经是新的，DSH 主进程还在跑旧代码。重启 DSH 后这里会显示数据集 / 模型 / 产物 / 结论的登记情况。')
-              )            : null;
-        }
-        var counts = reg.counts || {};
-        var issues = (reg.issues || []).filter(function (item) { return item && item.message; }).slice(0, 3);
-        var pill = function (label, value, tone) {
-          return h('span', { className: 'dsa-reg-pill' + (tone ? ' ' + tone : '') }, h('b', null, String(value == null ? 0 : value)), label);
-        };
-        var datasets = reg.datasets || [];
-        var models = reg.models || [];
-        var sweep = reg.sweep || null;
-        return h(
-          'div',
-          { className: 'dsa-section dsa-reg-section' },
-          h('h3', null, '契约与产物'),
-          h(
-            'div',
-            { className: 'dsa-card dsa-pad dsa-reg-card' },
-            h(
-              'div',
-              { className: 'dsa-reg-row' },
-              pill('数据集', counts.datasets, datasets.length ? '' : 'muted'),
-              pill('模型', counts.models),
-              pill('产物', counts.artifacts),
-              pill('结论', counts.claims),
-              counts.errors ? h(Chip, { tone: 'err', title: (issues[0] && issues[0].message) || '' }, '注册错误 ' + counts.errors) : null,
-              counts.warnings ? h(Chip, { tone: 'warn' }, '待核 ' + counts.warnings) : null,
+
+        var lightbox = sel ? h('div', {
+          className: 'dsa-lightbox',
+          role: 'dialog',
+          'aria-modal': 'true',
+          'aria-label': t('preview') + '：' + sel,
+          onClick: function (event) { if (event.target === event.currentTarget) setSel(''); },
+        },
+          h('div', { className: 'dsa-lightbox-card' + (viewIsImage ? '' : ' wide'), ref: lightboxRef, tabIndex: -1 },
+            h('div', { className: 'dsa-lightbox-bar' },
+              h('b', { className: 'dsa-lightbox-name', title: sel }, selEntry ? cardLabel(selEntry) : sel),
               h('span', { className: 'dsa-spacer' }),
-              h(Btn, { variant: 'ghost', onClick: props.onOpen }, '产物中心'),
-              reg.legacy                ? h(Btn, { variant: 'primary', disabled: props.busy, onClick: props.onAdopt }, props.busy ? '采纳中…' : '采纳现有产物')                : null            ),
-            reg.legacy              ? h(
-                  'div',
-                  { className: 'dsa-hint' },
-                  '还没有 v2 契约：点「采纳现有产物」按现状生成 datasets / models / artifacts 三份注册表。'                  + '推断出来的条目会标「待确认」，闸门在你确认或补齐之前只会判「判不了」，不会假绿。'                )              : h(
-                  'div',
-                  { className: 'dsa-reg-lists' },
-                  h(
-                    'div',
-                    { className: 'dsa-reg-list' },
-                    h('div', { className: 'dsa-reg-h' }, '数据集'),
-                    datasets.length                      ? datasets.slice(0, 4).map(function (item) {
-                          return h(
-                            'div',
-                            { key: item.id, className: 'dsa-reg-item' },
-                            h('b', null, item.id),
-                            ' · ' + (item.rows || 0) + ' 行 / ' + (item.columns || 0) + ' 列'                              + (item.inAnalysis != null ? ' · 纳入 ' + item.inAnalysis : '')
-                              + (item.confirmed ? '' : ' · 待确认')
-                          );
-                        })                      : h('div', { className: 'dsa-hint' }, '没有登记数据集')
-                  ),
-                  h(
-                    'div',
-                    { className: 'dsa-reg-list' },
-                    h('div', { className: 'dsa-reg-h' }, '模型'),
-                    models.length                      ? models.slice(0, 4).map(function (item) {
-                          return h(
-                            'div',
-                            { key: item.id, className: 'dsa-reg-item' },
-                            h('b', null, item.id),
-                            ' · ' + (item.estimator || '?') + (item.outcome ? ' → ' + item.outcome : '') + ' · N=' + (item.n == null ? '?' : item.n)
-                          );
-                        })                      : h('div', { className: 'dsa-hint' }, '没有登记模型')
-                  ),
-                  h(
-                    'div',
-                    { className: 'dsa-reg-list' },
-                    h('div', { className: 'dsa-reg-h' }, '普查'),
-                    sweep                      ? h('div', { className: 'dsa-reg-item' }, (sweep.outcomes || 0) + ' 个结局 · ' + (sweep.estimated || 0) + ' 个族已估 · ' + (sweep.undecided || 0) + ' 个未表态')                      : h('div', { className: 'dsa-hint' }, '还没跑模型族普查（让 AI 调 data_analysis_sweep）')
-                  )
-                ),
-            issues.length              ? h(
-                  'div',
-                  { className: 'dsa-reg-issues', role: 'status' },
-                  issues.map(function (item, index) {
-                    return h('div', { key: index }, (item.severity === 'warn' ? '· ' : '✗ ') + (item.message || '').slice(0, 160));
-                  })
-                )              : null          )
-        );
-      }
-      function SettingsDialog(props) {
-        var rootState = useState((props.config && props.config.skillRoot) || '');
-        var root = rootState[0];
-        var setRoot = rootState[1];
-        var pyState = useState((props.config && props.config.pythonPath) || 'python');
-        var py = pyState[0];
-        var setPy = pyState[1];
-        var modeState = useState((props.config && props.config.modelMode) || 'follow');
-        var mode = modeState[0];
-        var setMode = modeState[1];
-        var providerState = useState((props.config && props.config.modelProvider) || '');
-        var provider = providerState[0];
-        var setProvider = providerState[1];
-        var modelIdState = useState((props.config && props.config.modelId) || '');
-        var modelId = modelIdState[0];
-        var setModelId = modelIdState[1];
-        var catState = useState(null);
-        var cat = catState[0];
-        var setCat = catState[1];
-        useEffect(function () {
-          request('GET', '/assistant/models')
-            .then(function (json) { if (json) setCat(json); })
-            .catch(function () {});
-        }, []);
-        var providers = (cat && cat.providers) || [];
-        var current = null;
-        for (var i = 0; i < providers.length; i += 1) {
-          if (providers[i].id === provider) current = providers[i];
-        }
-        var models = (current && current.models) || [];
-        var defaultRoute = cat && cat.default;
-        return h(
-          Modal,
-          {
-            title: t('settings'),
-            desc: t('envHint'),
-            busy: props.busy,
-            error: props.error,
-            confirmText: t('save'),
-            onCancel: props.onCancel,
-            onConfirm: function () {
-              props.onConfirm({
-                skillRoot: root.trim(),
-                pythonPath: py.trim(),
-                modelMode: mode,
-                modelProvider: mode === 'custom' ? provider : '',
-                modelId: mode === 'custom' ? modelId : ''              });
+              viewIsImage && imageList.length > 1 ? h('span', { className: 'dsa-hint' }, (selIndex + 1) + ' / ' + imageList.length) : null,
+              h('a', { className: 'dsa-link', href: artifactRawUrl(sel, false, wsId, selVersion), target: '_blank', rel: 'noreferrer' }, t('openNew')),
+              h('a', { className: 'dsa-link', href: artifactRawUrl(sel, true, wsId), download: selEntry ? downloadLabel(selEntry) : undefined }, t('download')),
+              twinRel ? h('a', { className: 'dsa-link', href: artifactRawUrl(twinRel, true, wsId), title: twinRel },
+                t('download') + ' ' + extOf(twinRel).replace('.', '').toUpperCase()) : null,
+              h(Btn, { variant: 'ghost', onClick: function () { setSel(''); } }, t('close'))
+            ),
+            overlayBody,
+            viewIsImage && imageList.length > 1 ? h('div', { className: 'dsa-lightbox-navs' },
+              h('button', { type: 'button', className: 'dsa-lightbox-nav prev', 'aria-label': t('prev'), onClick: function () { step(-1); } }, '‹'),
+              h('button', { type: 'button', className: 'dsa-lightbox-nav next', 'aria-label': t('next'), onClick: function () { step(1); } }, '›')
+            ) : null
+          )
+        ) : null;
+
+        var codeTab = tab === 'code';
+        var treeEntries = entries;
+        if (codeTab) {
+          var codeFiles = entries.filter(function (entry) {
+            return entry.kind === 'file' && (entry.rel === 'scripts' || String(entry.rel).indexOf('scripts/') === 0) && CODE_EXTS.test(entry.ext);
+          });
+          var codeDirs = { scripts: true };
+          codeFiles.forEach(function (entry) {
+            var parent = String(entry.rel);
+            while (parent.indexOf('/') > 0) {
+              parent = parent.slice(0, parent.lastIndexOf('/'));
+              codeDirs[parent] = true;
             }
+          });
+          treeEntries = entries.filter(function (entry) {
+            return entry.kind === 'file' ? codeFiles.indexOf(entry) >= 0 : codeDirs[entry.rel] === true;
+          });
+        }
+        var grid = visible.slice(0, 200).map(function (entry) {
+          var isImage = entry.image === true || /^\.(png|jpe?g|webp|gif|tiff?|hei[cf])$/i.test(entry.ext);
+          var canPreview = entry.viewable !== false && VIEWABLE_IMAGE.test(entry.ext);
+          return h('button', {
+            key: entry.rel,
+            type: 'button',
+            className: 'dsa-card' + (sel === entry.rel ? ' sel' : ''),
+            title: entry.rel,
+            onClick: function () { open(entry.rel); },
           },
-          h(
-            'div',
-            { className: 'dsa-form' },
-            h(DirField, {
-              label: t('skillRoot'),
-              value: root,
-              placeholder: 'F:\\...\\SPSS-Style-Charting-Skill',
-              onChange: setRoot            }),
-            h(
-              'div',
-              { className: 'dsa-field' },
-              h('label', null, t('pythonPath')),
-              h('input', { className: 'dsa-input', value: py, placeholder: 'python', onChange: function (e) { setPy(e.target.value); } })
-            ),
-            h(
-              'div',
-              { className: 'dsa-field' },
-              h('label', null, t('draftModel')),
-              h(
-                'select',
-                { className: 'dsa-input', value: mode, onChange: function (e) { setMode(e.target.value); } },
-                h('option', { value: 'follow' }, t('modelFollow')),
-                h('option', { value: 'custom' }, t('modelCustom'))
-              ),
-              defaultRoute && defaultRoute.provider && defaultRoute.model                ? h('div', { className: 'dsa-model-line' }, 'DSH 默认：' + defaultRoute.provider + ' / ' + defaultRoute.model)                : h('div', { className: 'dsa-hint' }, defaultRoute && defaultRoute.error ? defaultRoute.error : 'DSH 未配置默认模型'),
-              mode === 'custom'                ? h(
-                    'div',
-                    { className: 'dsa-split', style: { marginTop: '6px' } },
-                    h(
-                      'div',
-                      { className: 'dsa-field' },
-                      h('label', null, t('modelProvider')),
-                      h(
-                        'select',
-                        {
-                          className: 'dsa-input',
-                          value: provider,
-                          onChange: function (e) { setProvider(e.target.value); setModelId(''); }
-                        },
-                        h('option', { value: '' }, '—'),
-                        providers.map(function (item) {
-                          return h('option', { key: item.id, value: item.id }, item.name || item.id);
-                        })
-                      )
-                    ),
-                    h(
-                      'div',
-                      { className: 'dsa-field' },
-                      h('label', null, t('modelName')),
-                      h(
-                        'select',
-                        { className: 'dsa-input', value: modelId, onChange: function (e) { setModelId(e.target.value); } },
-                        h('option', { value: '' }, '—'),
-                        models.map(function (item) {
-                          return h('option', { key: item.id, value: item.id }, item.name || item.id);
-                        })
-                      )
-                    )
-                  )                : null,
-              cat && cat.ok === false && cat.error ? h('div', { className: 'dsa-hint' }, t('modelsFail') + '：' + cat.error) : null            ),
-        h(
-              'div',
-              { className: 'dsa-field' },
-              h('label', null, t('preflight')),
-              h(PreflightList, { preflight: props.preflight }),
-              h(
-                'div',
-                { className: 'dsa-inline', style: { marginTop: '6px' } },
-                // 这两颗是「出路」，不是页脚链接：主路（找 AI 装）用实心，次路（自己再看一眼）用带框按钮，
-                // 之前两颗都是 ghost（透明底透明边灰字），在设置页里看着就是一行文字。
-                props.onAi                  ? h(
-                      Btn,
-                      { variant: 'primary', disabled: props.busy || props.aiBusy, onClick: props.onAi },
-                      props.aiBusy ? '正在开临时会话…' : '让 AI 装好环境'                    )                  : null,
-                h(Btn, { disabled: props.busy || props.aiBusy, onClick: props.onRecheck }, t('recheck')),
-                props.preflight && props.preflight.checkedAt                  ? h('span', { className: 'dsa-hint' }, t('checkedAt') + ' ' + props.preflight.checkedAt.replace('T', ' ').slice(0, 19))                  : null              )
-            ),
-            props.skill              ? h(
-                  'div',
-                  { className: props.skill.ok ? 'dsa-ok-note' : 'dsa-error' },
-                  props.skill.ok                    ? t('skillOk') + '：' + props.skill.version + ' · ' + props.skill.scripts.length + ' 脚本 · ' + props.skill.packageDir                    : t('skillMissing') + '：' + (props.skill.reason || '')
-                )              : null          )
+            canPreview ? h('img', { className: 'dsa-card-thumb', src: artifactRawUrl(entry.rel, false, wsId, entry.mtimeMs), alt: cardLabel(entry), loading: 'lazy' })
+              : h('span', { className: 'dsa-card-ext' }, (entry.ext || '?').replace('.', '').toUpperCase() || '?'),
+            h('span', { className: 'dsa-card-name' }, cardLabel(entry)),
+            h('span', { className: 'dsa-card-meta' }, sizeText(entry.size))
+          );
+        });
+
+        var bar = h('div', { className: 'dsa-vbar' },
+          h('div', { className: 'dsa-tabs', role: 'tablist' },
+            ARTIFACT_TABS.map(function (item, index) {
+              var count = shown.filter(item.test).filter(matchesQuery).length;
+              var selected = tab === item.id;
+              return h('button', {
+                key: item.id,
+                id: 'dsa-tab-' + item.id,
+                type: 'button',
+                role: 'tab',
+                'aria-selected': selected ? 'true' : 'false',
+                'aria-controls': 'dsa-tabpanel',
+                tabIndex: selected ? 0 : -1,
+                className: 'dsa-tab' + (selected ? ' sel' : ''),
+                onClick: function () { setTab(item.id); },
+                onKeyDown: function (event) {
+                  var keys = ['ArrowLeft', 'ArrowRight', 'Home', 'End'];
+                  if (keys.indexOf(event.key) < 0) return;
+                  event.preventDefault();
+                  var next = event.key === 'Home' ? 0
+                    : event.key === 'End' ? ARTIFACT_TABS.length - 1
+                      : (index + (event.key === 'ArrowRight' ? 1 : -1) + ARTIFACT_TABS.length) % ARTIFACT_TABS.length;
+                  setTab(ARTIFACT_TABS[next].id);
+                  var parent = event.currentTarget && event.currentTarget.parentNode;
+                  var node = parent && parent.children[next];
+                  if (node && node.focus) node.focus();
+                },
+              },
+                h('span', null, t(item.label)),
+                h('span', { className: 'dsa-tab-count' }, count)
+              );
+            })
+          ),
+          h('div', { className: 'dsa-search' },
+            h(SearchIcon, null),
+            h('input', {
+              className: 'dsa-search-input',
+              type: 'text',
+              value: query,
+              placeholder: t('filterFiles'),
+              'aria-label': t('filterFiles'),
+              onChange: function (event) { setQuery(event.target.value); },
+            }),
+            query ? h('button', {
+              type: 'button',
+              className: 'dsa-search-clear',
+              title: t('clearFilter'),
+              'aria-label': t('clearFilter'),
+              onClick: function () { setQuery(''); },
+            }, h(CloseIcon, null)) : null
+          ),
+          h('span', { className: 'dsa-spacer' }),
+          prefix ? h('span', { className: 'dsa-filter' },
+            h('span', null, t('filter') + ' ' + prefix),
+            h('button', { type: 'button', className: 'dsa-link', title: t('clearFilter'), 'aria-label': t('clearFilter'), onClick: props.onClearPrefix }, t('clearFilter'))
+          ) : null,
+          h('span', { className: 'dsa-meta' },
+            h('span', null, (props.truncated ? '≥ ' : '') + visible.length + ' ' + t('fileCount')),
+            visibleBytes ? h('span', null, sizeText(visibleBytes)) : null
+          )
+        );
+
+        var body;
+        if (props.loading) body = h('div', { className: 'dsa-empty' }, h('p', { className: 'dsa-hint' }, t('loading')));
+        else if (props.error) body = h('div', { className: 'dsa-error', role: 'alert' }, props.error);
+        else if (!visible.length) {
+          var emptyHint = prefix ? t('emptyPrefix') : codeTab ? t('scriptsHint') : tab === 'all' ? t('treeHint') : t('emptyTab');
+          body = h('div', { className: 'dsa-empty' },
+            h('span', { className: 'dsa-empty-icon' }, h(FolderIcon, { size: 32 })),
+            files.length ? null : h('b', null, t('noProgress')),
+            h('p', null, emptyHint)
+          );
+        }
+        else {
+          body = h('div', { className: 'dsa-grid' }, grid);
+          if (visible.length > 200) body = h('div', null, body, h('div', { className: 'dsa-hint' }, t('tooMany').replace('%n', visible.length)));
+        }
+
+        var panelProps = { role: 'tabpanel', id: 'dsa-tabpanel', 'aria-labelledby': 'dsa-tab-' + tab };
+        var panelBody = function () {
+          return h('div', Object.assign({ className: 'dsa-viewer-body' }, panelProps), body);
+        };
+
+        return h('div', { className: 'dsa-viewer' },
+          bar,
+          codeTab || tab === 'all' ? h('div', { className: 'dsa-viewer-split' },
+            h('div', { className: 'dsa-tree-pane' }, h(FileTree, { entries: treeEntries, active: sel, onPick: open })),
+            panelBody()
+          ) : panelBody(),
+          lightbox
         );
       }
+
       /* ------------------------------------------------------------------ *
-       * 材料库
+       * 目录进度
        * ------------------------------------------------------------------ */
-      var MOUNT_WORD = {
-        ok: '有效',
-        'not-link': '不是工作台建的挂载',
-        'missing-link': '挂载不见了',
-        retargeted: '指向被改过',
-        'missing-target': '目标不在了'      };
-      function splitEntries(text) {
-        return String(text || '')
-          .split(/[\n,，;；]+/)
-          .map(function (item) { return item.trim(); })
-          .filter(Boolean);
+      function ProgressRail(props) {
+        var progress = props.progress || [];
+        return h('div', { className: 'dsa-prog' },
+          h('div', { className: 'dsa-rail-h' }, h('span', null, t('progress'))),
+          !progress.length ? h('div', { className: 'dsa-prog-empty' }, t('noProgress')) : null,
+          progress.map(function (item) {
+            var active = props.prefix === item.dir;
+            return h('button', {
+              key: item.dir,
+              type: 'button',
+              className: 'dsa-prog-item' + (active ? ' sel' : ''),
+              title: item.dir,
+              'aria-pressed': active ? 'true' : undefined,
+              onClick: function () { props.onPick(active ? '' : item.dir); },
+            },
+              h('span', { className: 'dsa-prog-name' }, item.name),
+              h('span', { className: 'dsa-prog-meta' },
+                h('span', null, item.fileCount + ' ' + t('fileCount')),
+                h('span', null, t('at') + ' ' + agoText(item.latestMtime))
+              )
+            );
+          })
+        );
       }
-      /**
-       * 材料库：用户的资料放在自己的目录里，工作台只记地址。
-       * 挂到 data/ 下是目录联接（Windows）或镜像目录（macOS/Linux），一个字节都不复制；所以这里能删的只有挂载，删不掉原件。
-       */
-      /**
-       * 用户粘进来的路径要收拾一下：资源管理器「复制路径」带引号，浏览器地址栏是 file:///，
-       * 手滑还会带尾随空格或反斜杠。不收拾就在 Windows 上建出一个名字带引号的目录。
-       */
-      function cleanPath(value) {
-        var text = String(value == null ? '' : value).trim();
-        if (!text) return '';
-        // 成对引号（中英文都有）
-        if (/^["'“”‘’].*["'“”‘’]$/.test(text)) text = text.slice(1, -1).trim();        if (/^file:\/\//i.test(text)) {          try {            text = decodeURI(text.replace(/^file:\/\/\/?/i, function (all) {              return all.endsWith(':///') ? '' : '/';
-            }));
-          } catch (error) {
-            /* 解不了就按原样 */
-          }
-        }
-        // Windows：/ 也能认；去掉尾随分隔符（盘符根保留）
-        if (/^[A-Za-z]:/.test(text)) text = text.replace(/\//g, '\\');
-        if (text.length > 1 && !/^[A-Za-z]:[\\/]$/.test(text)) text = text.replace(/[\\/]+$/, '');
-        return text;
+
+      /* ------------------------------------------------------------------ *
+       * 工作区左栏
+       * ------------------------------------------------------------------ */
+      function WorkspaceRail(props) {
+        var workspaces = props.workspaces || [];
+        return h('div', { className: 'dsa-rail-scroll' },
+          h('div', { className: 'dsa-rail-h' }, h('span', null, t('workspaces'))),
+          h('div', { className: 'dsa-ws-list' },
+            workspaces.map(function (item) {
+              var active = props.activeId === item.id;
+              var missing = item.missing === true;
+              return h('div', { key: item.id, className: 'dsa-ws-row' + (active ? ' sel' : '') + (missing ? ' missing' : '') },
+                h('button', {
+                  type: 'button',
+                  className: 'dsa-ws',
+                  title: item.root,
+                  'aria-current': active ? 'true' : undefined,
+                  onClick: function () { props.onSelect(item.id); },
+                },
+                  h('span', { className: 'dsa-ws-line' },
+                    active ? h('span', { className: 'dsa-dot' }) : null,
+                    h('span', { className: 'dsa-ws-name' }, item.name || item.root),
+                    h('span', { className: 'dsa-ws-count' }, missing ? t('dirMissing') : (Number(item.fileCount) || 0) + ' ' + t('fileCount'))
+                  ),
+                  h('span', { className: 'dsa-ws-path' }, item.root)
+                ),
+                h('button', {
+                  type: 'button',
+                  className: 'dsa-ws-remove',
+                  title: t('remove'),
+                  'aria-label': '移除登记',
+                  onClick: function (e) { e.stopPropagation(); props.onForget(item); },
+                }, t('remove'))
+              );
+            })
+          ),
+          h(ProgressRail, { progress: props.progress, prefix: props.prefix, onPick: props.onPickPrefix })
+        );
       }
-      /** 是不是 macOS / Linux 口径：快照里的平台先算数，弹窗自己拉的数据兜底 */
-      function macOSMode(data, platform) {
-        if (platform) return platform !== 'win32';
-        return Boolean(data && data.isWindows === false);
-      }
-      function MaterialsDialog(props) {
-        var dataState = useState(null);
-        var data = dataState[0];
-        var setData = dataState[1];
+
+      /* ------------------------------------------------------------------ *
+       * 对话框
+       * ------------------------------------------------------------------ */
+      function BindDialog(props) {
+        var dirState = useState('');
+        var dir = dirState[0];
+        var setDir = dirState[1];
+        var nameState = useState('');
+        var name = nameState[0];
+        var setName = nameState[1];
         var busyState = useState(false);
         var busy = busyState[0];
         var setBusy = busyState[1];
         var errState = useState('');
         var error = errState[0];
         var setError = errState[1];
-        var noteState = useState('');
-        var note = noteState[0];
-        var setNote = noteState[1];
-        var addState = useState('');
-        var addPath = addState[0];
-        var setAddPath = addState[1];
-        var labelState = useState('');
-        var addLabel = labelState[0];
-        var setAddLabel = labelState[1];
-        var entriesState = useState({});
-        var entries = entriesState[0];
-        var setEntries = entriesState[1];
-        var handingState = useState(false);
-        var handing = handingState[0];
-        var setHanding = handingState[1];
-        // 破坏性动作走弹窗内确认条：window.confirm 是宿主原生对话框，样式不可控、
-        // 在 Electron 里还可能被 webview 吞掉；这里和「移除项目」的二次确认口径保持一致
-        var askState = useState(null);
-        var ask = askState[0];
-        var setAsk = askState[1];
-        var confirmThen = function (text, run) {
-          setAsk({ text: text, run: run });
+        var submit = function () {
+          if (busy) return;
+          if (!String(dir).trim()) {
+            setError(t('dirRequired'));
+            return;
+          }
+          setBusy(true);
+          setError('');
+          request('POST', '/workspace', { dir: cleanPath(dir), name: name, sessionId: props.sessionId || '' }).then(function (json) {
+            setBusy(false);
+            if (!json || !json.ok) {
+              setError((json && json.error) || '绑定失败');
+              return;
+            }
+            if (props.onDone) props.onDone(json);
+          }).catch(function (err) {
+            setBusy(false);
+            setError(String((err && err.message) || err));
+          });
         };
-        // 投递是异步的：弹窗关了就不该再 setState / 把人拽进对话
+        return h(Modal, {
+          title: t('bindTitle'),
+          desc: t('bindHint'),
+          error: error,
+          busy: busy,
+          confirmText: busy ? t('saving') : t('bindConfirm'),
+          onCancel: props.onCancel,
+          onConfirm: submit,
+        },
+          h('div', { className: 'dsa-form' },
+            h(DirField, { id: 'dsa-bind-dir', label: t('bindDir'), value: dir, placeholder: t('bindDirPh'), disabled: busy, onChange: setDir }),
+            h('div', { className: 'dsa-field' },
+              h('label', { htmlFor: 'dsa-bind-name' }, t('bindName')),
+              h('input', { id: 'dsa-bind-name', className: 'dsa-input', value: name, placeholder: t('bindNamePh'), disabled: busy, onChange: function (e) { setName(e.target.value); } })
+            )
+          )
+        );
+      }
+      function SettingsDialog(props) {
+        var dirState = useState((props.config && props.config.dataDir) || '');
+        var dataDir = dirState[0];
+        var setDataDir = dirState[1];
+        var busyState = useState(false);
+        var busy = busyState[0];
+        var setBusy = busyState[1];
+        var errState = useState('');
+        var error = errState[0];
+        var setError = errState[1];
+        var submit = function () {
+          if (busy) return;
+          setBusy(true);
+          setError('');
+          request('POST', '/config', { dataDir: String(dataDir || '').trim() }).then(function (json) {
+            setBusy(false);
+            if (!json || !json.ok) {
+              setError((json && json.error) || '保存失败');
+              return;
+            }
+            if (props.onDone) props.onDone(json);
+          }).catch(function (err) {
+            setBusy(false);
+            setError(String((err && err.message) || err));
+          });
+        };
+        return h(Modal, {
+          title: t('settingsTitle'),
+          desc: t('dataDirHint'),
+          error: error,
+          busy: busy,
+          confirmText: busy ? t('saving') : t('save'),
+          onCancel: props.onCancel,
+          onConfirm: submit,
+        },
+          h('div', { className: 'dsa-form' },
+            h('div', { className: 'dsa-field' },
+              h('label', { htmlFor: 'dsa-data-dir' }, t('dataDirLabel')),
+              h('input', { id: 'dsa-data-dir', className: 'dsa-input', value: dataDir, placeholder: '<profile>/data-analysis', disabled: busy, onChange: function (e) { setDataDir(e.target.value); } })
+            )
+          )
+        );
+      }
+      function ForgetDialog(props) {
+        var busyState = useState(false);
+        var busy = busyState[0];
+        var setBusy = busyState[1];
+        var errState = useState('');
+        var error = errState[0];
+        var setError = errState[1];
+        var submit = function () {
+          if (busy) return;
+          setBusy(true);
+          setError('');
+          request('POST', '/workspace/forget', { id: props.workspace.id }).then(function (json) {
+            setBusy(false);
+            if (!json || !json.ok) {
+              setError((json && json.error) || '移除失败');
+              return;
+            }
+            if (props.onDone) props.onDone(json);
+          }).catch(function (err) {
+            setBusy(false);
+            setError(String((err && err.message) || err));
+          });
+        };
+        return h(Modal, {
+          title: t('forgetTitle'),
+          desc: t('forgetHint'),
+          error: error,
+          busy: busy,
+          danger: true,
+          confirmText: busy ? t('saving') : t('forgetConfirm'),
+          onCancel: props.onCancel,
+          onConfirm: submit,
+        },
+          h('div', { className: 'dsa-kv' },
+            h('span', null, props.workspace.name || props.workspace.root),
+            h('span', { className: 'dsa-mono' }, props.workspace.root)
+          )
+        );
+      }
+
+      /* ------------------------------------------------------------------ *
+       * 面板
+       * ------------------------------------------------------------------ */
+      function Panel(props) {
+        var stateTuple = useState(STATE_CACHE.state);
+        var snap = stateTuple[0];
+        var setSnap = stateTuple[1];
+        var treeTuple = useState(STATE_CACHE.tree);
+        var tree = treeTuple[0];
+        var setTree = treeTuple[1];
+        var selectedState = useState('');
+        var selectedId = selectedState[0];
+        var setSelectedId = selectedState[1];
+        var prefixState = useState('');
+        var prefix = prefixState[0];
+        var setPrefix = prefixState[1];
+        var dialogState = useState(null);
+        var dialog = dialogState[0];
+        var setDialog = dialogState[1];
+        var loadingState = useState(!STATE_CACHE.state);
+        var loading = loadingState[0];
+        var setLoading = loadingState[1];
+        var refreshingState = useState(false);
+        var refreshing = refreshingState[0];
+        var setRefreshing = refreshingState[1];
+        var errState = useState('');
+        var error = errState[0];
+        var setError = errState[1];
+        var widthState = useState('wide');
+        var width = widthState[0];
+        var setWidth = widthState[1];
+        var themeState = useState('light');
+        var theme = themeState[0];
+        var setTheme = themeState[1];
+        var railOpenState = useState(false);
+        var railOpen = railOpenState[0];
+        var setRailOpen = railOpenState[1];
+
         var aliveRef = useRef(true);
+        var seqRef = useRef(0);
+        var manualRef = useRef(false);
+        var followSeqRef = useRef(0);
+        var rootRef = useRef(null);
+        var roRef = useRef(null);
+        var snapRef = useRef(null);
+        var selectedRef = useRef('');
+        snapRef.current = snap;
+        selectedRef.current = selectedId;
+
+        var sessionId = String((props && props.sessionId) || CURRENT_CHAT.id || '');
+
+        var load = useCallback(function (wsId) {
+          var seq = seqRef.current + 1;
+          seqRef.current = seq;
+          if (!snapRef.current) setLoading(true);
+          var wanted = wsId === undefined ? selectedRef.current : wsId;
+          var qs = wanted ? '?workspaceId=' + encodeURIComponent(wanted) : '';
+          var stateReq = request('GET', '/state' + qs);
+          var treeReq = request('GET', '/artifacts/tree' + qs);
+          return Promise.all([stateReq, treeReq]).then(function (values) {
+            if (!aliveRef.current || seq !== seqRef.current) return null;
+            var nextState = values[0];
+            var nextTree = values[1];
+            if (nextState && nextState.ok) {
+              var state = nextState.state || {};
+              setSnap(state);
+              snapRef.current = state;
+              var activeId = state.active ? state.active.id : '';
+              if (selectedRef.current !== activeId) {
+                selectedRef.current = activeId;
+                setSelectedId(activeId);
+              }
+              var useTree = nextTree && nextTree.ok ? nextTree : state.tree && state.tree.ok ? state.tree : null;
+              STATE_CACHE.state = state;
+              STATE_CACHE.tree = useTree;
+              setTree(useTree);
+              setError('');
+            } else {
+              setError((nextState && nextState.error) || t('loadFail'));
+            }
+            return nextState;
+          }).catch(function (err) {
+            if (!aliveRef.current || seq !== seqRef.current) return null;
+            setError(String((err && err.message) || err));
+            return null;
+          }).then(function (value) {
+            if (aliveRef.current && seq === seqRef.current) setLoading(false);
+            return value;
+          });
+        }, []);
+
         useEffect(function () {
           aliveRef.current = true;
           return function () {
             aliveRef.current = false;
           };
         }, []);
-        var refresh = function () {
-          return request('GET', '/materials').then(function (json) {
-            if (json && json.ok !== false) setData(json);
-            return json;
-          });
-        };
+
+        // 首屏 + 可见性轮询：4s 一次；hidden 暂停，回到前台立即补一次
         useEffect(function () {
-          void refresh();
-          // 识图在后台跑：弹窗开着时每 4 秒刷一次进度
-          var timer = setInterval(function () { void refresh(); }, 4000);
-          return function () { clearInterval(timer); };
+          void load();
+          var timer = setInterval(function () {
+            if (!pageVisible()) return;
+            void load();
+          }, POLL_MS);
+          function onVisibility() {
+            if (pageVisible()) void load();
+          }
+          if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+            document.addEventListener('visibilitychange', onVisibility);
+          }
+          return function () {
+            clearInterval(timer);
+            if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
+              document.removeEventListener('visibilitychange', onVisibility);
+            }
+          };
+        }, [load]);
+
+        // 换会话 = 重新允许跟随（用户手动点过的工作区在本次会话里不再被拽回）
+        useEffect(function () {
+          manualRef.current = false;
+        }, [sessionId]);
+
+        // 跟着对话走：每轮都核对宿主里这条会话的绑定；模型改绑后也能跟上
+        useEffect(function () {
+          if (!sessionId || manualRef.current) return;
+          var seq = followSeqRef.current + 1;
+          followSeqRef.current = seq;
+          request('GET', '/session/project?sessionId=' + encodeURIComponent(sessionId)).then(function (json) {
+            if (seq !== followSeqRef.current || !aliveRef.current) return;
+            if (!json || !json.ok || !json.workspace) return;
+            var id = json.workspace.id;
+            if (selectedRef.current === id) return;
+            selectedRef.current = id;
+            setSelectedId(id);
+            setPrefix('');
+            void load(id);
+          }).catch(function () {
+            /* 跟不过去就停在当前选择，不打断浏览 */
+          });
+        }, [sessionId, load, snap]);
+
+        var measureRoot = useCallback(function () {
+          var el = rootRef.current;
+          if (!el) return;
+          var w = el.clientWidth || 0;
+          var next = w <= 760 ? 'narrow' : w <= 1040 ? 'compact' : 'wide';
+          setWidth(function (prev) { return prev === next ? prev : next; });
         }, []);
-        var call = function (path, body) {
-          setBusy(true);
-          setError('');
-          setNote('');
-          return request('POST', path, body || {}).then(function (json) {
-            setBusy(false);
-            if (!json || !json.ok) {
-              setError((json && json.error) || '操作失败');
-              return json;
+        var attachRoot = useCallback(function (node) {
+          rootRef.current = node;
+          if (!node) return;
+          if (roRef.current) {
+            try {
+              roRef.current.observe(node);
+            } catch (error) {
+              /* ignore */
             }
-            if (json.note) setNote(json.note);
-            if (props.onChanged) props.onChanged();
-            return refresh().then(function () { return json; });
-          }, function (err) {
-            setBusy(false);
-            setError(String((err && err.message) || err));
-            return null;
-          });
-        };
-        var sources = (data && data.sources) || [];
-        var mounts = (data && data.mounts) || [];
-        var derived = (data && data.derived) || [];
-        var vision = (data && data.vision) || null;
-        // 交给会话：拿工作台生成的交办文案（挂载路径 + 只读约束 + 产物约定），投进研究对话
-        var handoff = function () {
-          setHanding(true);
-          setError('');
-          setNote('');
-          return request('GET', '/materials/card').then(function (card) {
-            if (!card || !card.ok) throw new Error((card && card.error) || '材料任务卡生成失败');
-            // 弹窗已经关掉就别再把人拽进对话：投递本身照常完成
-            return deliverText(card.text, props.projectPath, props.sessionId, function () { return aliveRef.current; });
-          }).then(function (res) {
-            if (!aliveRef.current) return res;
-            setHanding(false);
-            // 绑定失败在原生的对话框里是红字（那边会把会话弄丢），这里不能降级成灰色提示
-            if (res && res.warning) setError(res.warning);
-            if (res && res.ok && !res.warning) setNote('已经把挂载清单和约束投进研究对话。');
-            // 会话可能刚被创建/绑定：让面板重新取一次快照，否则下一次投卡会再建一条会话
-            if (props.onChanged) props.onChanged();
-            return res;
-          }, function (err) {
-            if (aliveRef.current) {
-              setHanding(false);
-              setError(String((err && err.message) || err));
-            }
-            return null;
-          });
-        };
-        var addRow = h(
-          'div',
-          { className: 'dsa-card', style: { padding: '10px 12px', marginBottom: '10px' } },
-          h('div', { className: 'dsa-row', style: { gap: '8px', alignItems: 'flex-end', flexWrap: 'wrap' } },
-            h(DirField, {
-              label: '材料目录（绝对路径）',
-              value: addPath,
-              placeholder: 'F:\\资料\\刑事判决书',
-              style: { flex: '3 1 320px', margin: 0 },
-              disabled: busy,
-              onChange: setAddPath            }),
-            h('div', { className: 'dsa-field', style: { flex: '1 1 120px', margin: 0 } },
-              h('label', null, '名称（可选）'),
-              h('input', {
-                className: 'dsa-input',
-                value: addLabel,
-                placeholder: '刑事判决书',
-                onChange: function (e) { setAddLabel(e.target.value); }
-              })
-            ),
-            h(Btn, {
-              variant: 'primary',
-              disabled: busy || !addPath.trim(),
-              onClick: function () {
-                void call('/materials/add', { path: cleanPath(addPath), label: addLabel.trim() }).then(function (json) {
-                  if (json && json.ok) {
-                    setAddPath('');
-                    setAddLabel('');
-                    setNote('已登记；这一步不复制任何文件');
-                  }
-                });
+          }
+          measureRoot();
+          setTimeout(measureRoot, 0);
+        }, [measureRoot]);
+        useEffect(function () {
+          var onResize = function () { measureRoot(); };
+          window.addEventListener('resize', onResize);
+          if (typeof window.ResizeObserver !== 'undefined') {
+            roRef.current = new window.ResizeObserver(function () { measureRoot(); });
+            if (rootRef.current) roRef.current.observe(rootRef.current);
+          }
+          return function () {
+            window.removeEventListener('resize', onResize);
+            if (roRef.current) {
+              try {
+                roRef.current.disconnect();
+              } catch (error) {
+                /* ignore */
               }
-            }, '登记')
-          ),
-          h('div', { className: 'dsa-hint', style: { marginTop: '6px' } },
-            '登记只记地址：回执会把目录里的文件按「直读 / 识图 / 待转换 / 不支持」分成四类报数，四类相加就是这个目录的总数。')
-        );
-        var sourceRows = sources.length          ? sources.map(function (src) {
-              var scan = src.scan;
-              var usedText = src.usedBy.length                ? '已挂到：' + src.usedBy.map(function (u) { return u.project + ' → data/' + u.as; }).join('、')                : '还没有项目挂载它';
-              return h(
-                'div',
-                { key: src.id, className: 'dsa-card', style: { padding: '10px 12px', marginBottom: '8px' } },
-                h('div', { className: 'dsa-inline', style: { justifyContent: 'space-between', gap: '8px', alignItems: 'flex-start' } },
-                  h('div', { style: { minWidth: 0 } },
-                    h('div', { className: 'dsa-inline', style: { gap: '8px' } },
-                      h('b', null, src.label),
-                      h('span', { className: 'dsa-hint' },
-                        scan ? scan.files + ' 份 · ' + scan.bytesText : '还没扫描'),
-                      src.exists ? null : h('span', { className: 'dsa-tag err' }, '目录不在了')
-                    ),
-                    h('div', { className: 'dsa-mono', style: { fontSize: '11px', color: 'var(--dsa-ink3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: src.path }, src.path)
-                  ),
-                  h('div', { className: 'dsa-inline', style: { gap: '6px' } },
-                    h(Btn, { variant: 'ghost', disabled: busy, onClick: function () { void call('/materials/scan', { id: src.id }); } }, '重新登记'),
-                    h(Btn, {
-                      variant: 'ghost',
-                      disabled: busy,
-                      onClick: function () {
-                        var used = src.usedBy.length;
-                        var question = used                          ? '这个目录还被 ' + used + ' 个项目挂着，仍然要从材料库删掉吗？（磁盘上的文件不会动，会先把这些挂载摘掉）'                          : '从材料库删掉「' + src.label + '」？（磁盘上的文件不会动）';
-                        confirmThen(question, function () {
-                          void call('/materials/remove', { id: src.id, force: Boolean(used) });
-                        });
-                      }
-                    }, '删除')
-                  )
-                ),
-                src.receipt ? h('div', { className: 'dsa-hint', style: { marginTop: '6px' } }, src.receipt) : null,
-                h('div', { className: 'dsa-hint', style: { marginTop: '2px' } }, usedText),
-                h('div', { className: 'dsa-inline', style: { marginTop: '8px', gap: '8px' } },
-                  h('input', {
-                    className: 'dsa-input',
-                    style: { flex: '1 1 auto' },
-                    placeholder: '只挂其中几个子目录，逗号分隔；留空 = 整个目录',
-                    value: entries[src.id] || '',
-                    onChange: function (e) {
-                      var value = e.target.value;
-                      setEntries(function (prev) {
-                        var next = {};
-                        for (var key in prev) next[key] = prev[key];
-                        next[src.id] = value;
-                        return next;
-                      });
-                    }
-                  }),
-                  h(Btn, {
-                    variant: 'primary',
-                    disabled: busy || !src.exists,
-                    onClick: function () {
-                      void call('/materials/mount', {
-                        sourceId: src.id,
-                        entries: splitEntries(entries[src.id]),
-                        as: ''                      });
-                    }
-                  }, '挂到当前项目')
-                )
-              );
-            })          : h('div', { className: 'dsa-empty' }, '材料库是空的：先在上面登记一个目录');
-        var mountRows = mounts.length          ? mounts.map(function (mount) {
-              var bad = mount.status !== 'ok';
-              return h(
-                'div',
-                { key: mount.id, style: { padding: '8px 0', borderTop: '1px solid var(--dsa-line)' } },
-                h('div', { className: 'dsa-inline', style: { justifyContent: 'space-between', gap: '8px', alignItems: 'flex-start' } },
-                  h('div', { style: { minWidth: 0 } },
-                    h('div', { className: 'dsa-inline', style: { gap: '6px' } },
-                      h('span', { className: 'dsa-tag ' + (bad ? 'err' : ''), title: mount.detail || '' }, bad ? '✗' : '✓'),
-                      h('b', { className: 'dsa-mono' }, 'data/' + mount.as),
-                      mount.mode === 'mirror' ? h('span', { className: 'dsa-hint' }, '镜像（逐文件软链）') : null                    ),
-                    h('div', { className: 'dsa-mono', style: { fontSize: '11px', color: 'var(--dsa-ink3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: mount.target },
-                      mount.target + '（' + (MOUNT_WORD[mount.status] || mount.status) + '）'),
-                    mount.detail ? h('div', { className: 'dsa-hint' }, mount.detail) : null                  ),
-                  h('div', { className: 'dsa-inline', style: { gap: '6px' } },
-                    h(Btn, {
-                      variant: 'ghost',
-                      disabled: busy,
-                      onClick: function () {
-                        confirmThen('把 data/' + mount.as + ' 的挂载摘掉？（材料原件不动）', function () {
-                          void call('/materials/unmount', { as: mount.as });
-                        });
-                      }
-                    }, '摘下'),
-                    h(Btn, {
-                      variant: 'ghost',
-                      disabled: busy,
-                      onClick: function () {
-                        // as 定位副本目录名，entries 只在副本名与源里路径不同名时为空
-                        var body = { sourceId: mount.sourceId, entries: mount.entry ? [mount.entry] : [], as: mount.as, apply: false };
-                        void call('/materials/migrate', body).then(function (json) {
-                          if (!json || !json.ok) return;
-                          if (!json.safe) {
-                            setError('逐份比对没通过，已停止、没有删任何文件；看报告里是哪几份');
-                            return;
-                          }
-                          confirmThen('逐份 md5 全部一致。把 data/' + mount.as + ' 里的副本删掉、换成挂载？', function () {
-                            void call('/materials/migrate', { sourceId: mount.sourceId, entries: body.entries, as: mount.as, apply: true });
-                          });
-                        });
-                      }
-                    }, '副本换挂载')
-                  )
-                )
-              );
-            })          : null;
-        var visionSummary = vision && vision.summary;
-        // 识图不再是面板上的「一键跑」：跑不跑、跑哪些页由会话按任务决定（工具 data_analysis_vision）。
-        // 面板只留两件事——看得见进度、人来点头（human_verified 必须是人给的，不能让模型自己盖章）。
-        var visionBlock = h(
-          'div',
-          { className: 'dsa-card', style: { padding: '10px 12px', marginTop: '10px' } },
-          h('div', { className: 'dsa-inline', style: { justifyContent: 'space-between', gap: '8px' } },
-            h('b', null, '扫描件识图'),
-            h('span', { className: 'dsa-hint' },
-              vision && vision.running ? '正在跑…' : '空闲')
-          ),
-          h('div', { className: 'dsa-hint', style: { marginTop: '4px' } },
-            '审计判为 image_only 的 PDF 与图片才需要它。识图由工作台直连多模态模型逐页转写，' +            '产物写进派生目录并挂回 data/；未经人工核对的识别稿，数字溯源闸门只会判「判不了」。'),
-          visionSummary && visionSummary.rows            ? h('div', { className: 'dsa-hint', style: { marginTop: '4px' } },
-                '已识别 ' + visionSummary.pagesOk + ' 页 / ' + visionSummary.files + ' 份 · 失败 ' + visionSummary.pagesFailed + ' 页 · 人工已核 ' + visionSummary.pagesVerified + ' 页')            : null,
-          h('div', { className: 'dsa-inline', style: { marginTop: '8px', gap: '8px', flexWrap: 'wrap' } },
-            vision && vision.running              ? h(Btn, { variant: 'ghost', disabled: busy, onClick: function () { void call('/materials/vision/cancel', {}); } }, '停止')              : null,
-            visionSummary && visionSummary.pagesOk              ? h(Btn, {
-                  variant: 'ghost',
-                  disabled: busy,
-                  onClick: function () {
-                    confirmThen('确认这些识别稿你已经逐页对照过原件了？打勾之后 qa-vision 才可能通过。', function () {
-                      void call('/materials/vision/verify', { all: true });
-                    });
-                  }
-                }, '标记已核对')              : null,
-            h('span', { className: 'dsa-hint' }, '要识别就直接跟 AI 说，或者用 data_analysis_vision 工具。')
-          )
-        );
-        var handoffBlock = h(
-          'div',
-          { className: 'dsa-card', style: { padding: '10px 12px', marginTop: '10px' } },
-          h('div', { className: 'dsa-inline', style: { justifyContent: 'space-between', gap: '8px' } },
-            h('b', null, '交给会话处理'),
-            h('span', { className: 'dsa-hint' }, handing ? '正在投递…' : '只读挂载')
-          ),
-          h('div', { className: 'dsa-hint', style: { marginTop: '4px' } },
-            '资料已经挂在 data/ 下，全程只读。怎么解析、要不要识图、doc 要不要转，交给 DSH 会话按任务决定；' +            '工作台只管两件事：不许改原件，识别稿写进派生目录并记账。'),
-          h('div', { className: 'dsa-inline', style: { marginTop: '8px', gap: '8px', flexWrap: 'wrap' } },
-            h(Btn, {
-              variant: 'primary',
-              disabled: busy || handing || !mounts.length,
-              onClick: function () { void handoff(); }
-            }, '让 AI 处理这些材料'),            !mounts.length ? h('span', { className: 'dsa-hint' }, '先挂一个材料目录') : null          )
-        );
-        var derivedLine = derived.length          ? h('div', { className: 'dsa-hint', style: { marginTop: '8px' } },
-              '派生稿：' + derived.map(function (item) { return item.mountName + '（' + item.files + ' 份）'; }).join('、'))          : null;
-        return h(
-          Modal,
-          { title: '材料库', onCancel: props.onCancel, maskClose: true, desc: macOSMode(data, props.platform)            ? '材料留在你自己的目录里，工作台只记地址；挂到项目 data/ 下是「镜像目录」（真实目录 + 逐文件软链），不复制文件。'            : '材料留在你自己的目录里，工作台只记地址；挂到项目 data/ 下是目录联接（macOS/Linux 为镜像目录），不复制文件。' },
-          error ? h('div', { className: 'dsa-error', style: { marginBottom: '10px' } }, error) : null,
-          note ? h('div', { className: 'dsa-hint', style: { marginBottom: '10px' } }, note) : null,
-          ask            ? h('div', { className: 'dsa-ask' },
-              h('span', { className: 'dsa-ask-t' }, ask.text),
+            }
+          };
+        }, [measureRoot]);
+
+        // 跟随宿主主题：读 html 的 color-scheme / body 背景亮度，再退回系统偏好
+        useEffect(function () {
+          if (typeof document === 'undefined' || typeof window === 'undefined') return undefined;
+          function detect() {
+            var dark = null;
+            try {
+              var scheme = String(window.getComputedStyle(document.documentElement).colorScheme || '').toLowerCase();
+              if (scheme) dark = scheme.indexOf('dark') >= 0;
+            } catch (error) {
+              /* fall through */
+            }
+            if (dark === null) {
+              var bg = '';
+              try {
+                bg = window.getComputedStyle(document.body).backgroundColor || '';
+              } catch (error) {
+                /* fall through */
+              }
+              var parts = (/rgba?\(([^)]+)\)/.exec(bg) || [])[1];
+              var rgb = parts ? parts.split(',').map(Number) : null;
+              if (rgb && (rgb.length < 4 || rgb[3] > 0.05)) {
+                dark = (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]) / 255 < 0.5;
+              } else {
+                dark = Boolean(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+              }
+            }
+            setTheme(dark ? 'dark' : 'light');
+          }
+          detect();
+          var mo = null;
+          if (window.MutationObserver) {
+            mo = new window.MutationObserver(detect);
+            mo.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style', 'data-theme', 'data-color-scheme'] });
+          }
+          var mq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+          if (mq && mq.addEventListener) mq.addEventListener('change', detect);
+          return function () {
+            if (mo) mo.disconnect();
+            if (mq && mq.removeEventListener) mq.removeEventListener('change', detect);
+          };
+        }, []);
+
+        var selectWorkspace = function (id) {
+          if (!id) return;
+          manualRef.current = true;
+          selectedRef.current = id;
+          setSelectedId(id);
+          setPrefix('');
+          setRailOpen(false);
+          void load(id);
+          request('POST', '/workspace', { id: id }).catch(function () {
+            /* 选择失败时保持当前视图 */
+          });
+        };
+        var refresh = function () {
+          setRefreshing(true);
+          Promise.resolve(load()).then(function () {
+            if (aliveRef.current) setRefreshing(false);
+          }, function () {
+            if (aliveRef.current) setRefreshing(false);
+          });
+        };
+        var onBindDone = function (json) {
+          setDialog(null);
+          manualRef.current = false;
+          var id = json.workspace ? json.workspace.id : (json.state && json.state.active ? json.state.active.id : '');
+          if (json.state) {
+            STATE_CACHE.state = json.state;
+            STATE_CACHE.tree = json.state.tree || null;
+            setSnap(json.state);
+            setTree(json.state.tree || null);
+            selectedRef.current = id;
+            setSelectedId(id);
+            setPrefix('');
+          }
+          void load(id);
+        };
+        var onSettingsDone = function (json) {
+          setDialog(null);
+          manualRef.current = false;
+          var id = json.state && json.state.active ? json.state.active.id : '';
+          if (json.state) {
+            STATE_CACHE.state = json.state;
+            STATE_CACHE.tree = json.state.tree || null;
+            setSnap(json.state);
+            setTree(json.state.tree || null);
+            selectedRef.current = id;
+            setSelectedId(id);
+            setPrefix('');
+          }
+          void load(id);
+        };
+        var onForgetDone = function () {
+          setDialog(null);
+          selectedRef.current = '';
+          setSelectedId('');
+          setPrefix('');
+          void load('');
+        };
+
+        var workspaces = (snap && snap.workspaces) || [];
+        var active = snap && snap.active;
+        var activeError = (snap && snap.activeError) || '';
+        var progress = (snap && snap.progress) || [];
+        var treeEntries = (tree && tree.ok && tree.entries) || [];
+        var treeError = tree && tree.ok === false ? (tree.error || t('treeMissing')) : '';
+
+        var content;
+        if (!snap && loading) {
+          content = h('div', { className: 'dsa-canvas' },
+            h('div', { className: 'dsa-empty' },
+              h('span', { className: 'dsa-empty-icon' }, h(GridIcon, { size: 32 })),
+              h('p', { className: 'dsa-hint' }, t('loading'))
+            )
+          );
+        } else if (!snap && error) {
+          content = h('div', { className: 'dsa-canvas' },
+            h('div', { className: 'dsa-empty' },
+              h('b', null, t('loadFail')),
+              h('p', null, error),
+              h(Btn, { onClick: refresh }, h(RefreshIcon, null), h('span', null, t('retry')))
+            )
+          );
+        } else if (!active) {
+          content = h('div', { className: 'dsa-canvas' },
+            h('div', { className: 'dsa-empty dsa-welcome' },
+              h('span', { className: 'dsa-empty-icon' }, h(FolderIcon, { size: 32 })),
+              h('b', null, activeError ? t('workspaceUnavailable') : t('noWorkspaceTitle')),
+              h('p', null, activeError || t('noWorkspaceHint')),
               h(Btn, {
                 variant: 'primary',
-                disabled: busy,
-                onClick: function () {
-                  var run = ask.run;
-                  setAsk(null);
-                  if (run) run();
-                }
-              }, '确认'),
-              h(Btn, { variant: 'ghost', onClick: function () { setAsk(null); } }, '取消')
-            )            : null,
-          h('div', { style: { maxHeight: '58vh', overflowY: 'auto', paddingRight: '2px' } },
-            addRow,
-            h('div', { className: 'dsa-rail-h', style: { padding: '6px 0' } }, '材料源'),
-            sourceRows,
-            h('div', { className: 'dsa-rail-h', style: { padding: '12px 0 6px' } }, '当前项目 data/ 下的挂载'),
-            h('div', { className: 'dsa-hint', style: { marginBottom: '4px' } },
-              macOSMode(data, props.platform)                ? 'macOS/Linux 上没有目录联接，工作台建的是「镜像目录」：真实目录里逐个文件软链，源目录增删文件后点「修复」同步。'                : 'Windows 上建的是目录联接（junction）：data/ 下的目录直接指向材料目录，不占空间。'),
-            mountRows || h('div', { className: 'dsa-empty' }, '还没有挂载任何材料目录'),
-            derivedLine,
-            visionBlock,
-            handoffBlock          )
-        );
-      }
-      function AdjudicateDialog(props) {
-        var noteState = useState('');
-        var note = noteState[0];
-        var setNote = noteState[1];
-        function decide(status) {
-          props.onConfirm(status, note.trim());
-        }
-        // 弹窗开着的时候项目被切走/闸门没了：不崩，也不许对着别的项目拍板
-        if (!props.gate || !props.stage) {
-          return h(
-            Modal,
-            { title: t('adjudicateTitle'), desc: '', error: props.error, onCancel: props.onCancel },
-            h('p', null, '这条闸门已经不在当前项目里了（切了项目，或者产物被删）。关掉这个窗口，重新点一次「去拍板」。'),
-            h('div', { className: 'dsa-inline' }, h(Btn, { variant: 'ghost', onClick: props.onCancel }, t('close')))
+                onClick: function () { setDialog({ kind: 'bind' }); },
+              }, h(PlusIcon, null), h('span', null, t('bind')))
+            )
+          );
+        } else {
+          content = h('div', { className: 'dsa-canvas' },
+            activeError ? h('div', { className: 'dsa-error' }, activeError) : null,
+            h(ArtifactViewer, {
+              workspaceId: selectedId || (active && active.id) || '',
+              entries: treeEntries,
+              loading: loading && !treeEntries.length,
+              error: treeError,
+              truncated: tree && tree.truncated === true,
+              totalBytes: tree && tree.totalBytes,
+              prefix: prefix,
+              onClearPrefix: function () { setPrefix(''); },
+            })
           );
         }
-        return h(
-          Modal,
-          {
-            title: t('adjudicateTitle') + ' · ' + props.gate.label,
-            desc: t('adjudicateHint'),
-            error: props.error,
-            onCancel: props.onCancel          },
-          h(
-            'div',
-            { className: 'dsa-form' },
-            h(
-              'div',
-              { className: 'dsa-card dsa-pad', style: { marginBottom: '4px' } },
-              h('div', { style: { fontSize: '13px', lineHeight: 1.55 } }, props.gate.detail || '这条闸门需要你判断。'),
-              props.gate.source                ? h('div', { className: 'dsa-hint dsa-mono', style: { marginTop: '5px' } }, String(props.gate.source))                : null,
-              h(
-                'div',
-                { className: 'dsa-hint', style: { marginTop: '6px' } },
-                '阶段：' + props.stage.name                  + (props.stage.lastRun                    ? ' · 最近运行 ' + (RUN_WORD[props.stage.lastRun.status] || props.stage.lastRun.status)
-                      + '（退出码 ' + (props.stage.lastRun.exitCode === null ? '—' : props.stage.lastRun.exitCode) + '）'                    : ' · 还没有运行记录')
-              )
-            ),
-            h(
-              'div',
-              { className: 'dsa-field' },
-              h('label', null, t('note')),
-              h('textarea', {
-                className: 'dsa-input',
-                style: { height: '68px', padding: '6px 9px', resize: 'vertical' },
-                value: note,
-                placeholder: '为什么通过或不通过；写进记录，之后能追溯',
-                onChange: function (e) { setNote(e.target.value); }
-              })
-            ),
-            h(
-              'div',
-              { className: 'dsa-inline' },
-              h(Btn, { variant: 'primary', disabled: props.busy, onClick: function () { decide('pass'); } }, '确认通过'),
-              h(Btn, { variant: 'danger', disabled: props.busy, onClick: function () { decide('fail'); } }, '打回重做'),
-              h(Btn, { variant: 'ghost', disabled: props.busy, onClick: function () { decide('unjudged'); } }, t('clear'))
-            )
+
+        var header = h('div', { className: 'dsa-top' },
+          h('div', { className: 'dsa-brand' },
+            h('span', { className: 'dsa-logo' }, h(GridIcon, { size: 18 })),
+            h('b', null, t('title'))
+          ),
+          width !== 'wide' ? h(Btn, {
+            className: 'dsa-rail-toggle',
+            variant: 'ghost',
+            title: t('workspaces'),
+            ariaLabel: t('workspaces'),
+            ariaExpanded: railOpen,
+            onClick: function () { setRailOpen(!railOpen); },
+          }, h(MenuIcon, null), h('span', { className: 'dsa-btn-label' }, t('workspaces'))) : null,
+          h('span', { className: 'dsa-spacer' }),
+          active ? h(Chip, { title: active.root }, h('span', { className: 'dsa-dot' }), h('span', { className: 'dsa-chip-name' }, active.name)) : null,
+          error && snap ? h(Chip, { tone: 'err', title: error }, t('loadFail')) : null,
+          h(Btn, { onClick: refresh, disabled: loading && !snap, title: t('refresh') }, h(RefreshIcon, { spin: refreshing }), h('span', { className: 'dsa-btn-label' }, t('refresh'))),
+          h(Btn, { variant: 'primary', onClick: function () { setDialog({ kind: 'bind' }); }, title: t('bind') }, h(PlusIcon, null), h('span', { className: 'dsa-btn-label' }, t('bind'))),
+          h(Btn, { variant: 'ghost', onClick: function () { setDialog({ kind: 'settings' }); }, title: t('settings'), ariaLabel: t('settings') }, h(SlidersIcon, null), h('span', { className: 'dsa-btn-label' }, t('settings')))
+        );
+
+        var rail = h('div', { className: 'dsa-rail' },
+          h(WorkspaceRail, {
+            workspaces: workspaces,
+            activeId: selectedId || (active && active.id) || '',
+            progress: progress,
+            prefix: prefix,
+            onSelect: selectWorkspace,
+            onForget: function (item) { setDialog({ kind: 'forget', workspace: item }); },
+            onPickPrefix: function (value) { setPrefix(value); },
+          })
+        );
+        var railBackdrop = width === 'narrow' && railOpen
+          ? h('div', { className: 'dsa-rail-backdrop', onClick: function () { setRailOpen(false); } })
+          : null;
+
+        var dialogs = null;
+        if (dialog && dialog.kind === 'bind') {
+          dialogs = h(BindDialog, { sessionId: sessionId, onCancel: function () { setDialog(null); }, onDone: onBindDone });
+        } else if (dialog && dialog.kind === 'settings') {
+          dialogs = h(SettingsDialog, { config: snap && snap.config, onCancel: function () { setDialog(null); }, onDone: onSettingsDone });
+        } else if (dialog && dialog.kind === 'forget') {
+          dialogs = h(ForgetDialog, { workspace: dialog.workspace, onCancel: function () { setDialog(null); }, onDone: onForgetDone });
+        }
+
+        return h('div', {
+          className: 'dsa-root',
+          ref: attachRoot,
+          'data-dsa-width': width,
+          'data-dsa-theme': theme,
+        },
+          header,
+          h('div', { className: 'dsa-body' },
+            railBackdrop,
+            width === 'narrow' && !railOpen ? null : rail,
+            h('div', { className: 'dsa-main' }, content, dialogs)
           )
         );
       }
+
       /* ------------------------------------------------------------------ *
-       * 套用补丁前的确认
-       *
-       * 补丁会覆盖项目里的文件：不能点一下就落盘。先把目标、基线、备份策略与
-       * 内容前 24 行摊开，人确认后才 POST /recheck/apply。
-       * ------------------------------------------------------------------ */
-      function PatchDialog(props) {
-        var issue = props.issue || {};
-        var patch = issue.patch || {};
-        var content = String(patch.content || '');
-        var preview = content.split('\n').slice(0, 24).join('\n');
-        return h(
-          Modal,
-          {
-            title: t('patchTitle') + ' · ' + (issue.id || ''),
-            desc: issue.claim || '',
-            busy: props.busy,
-            error: props.error,
-            confirmText: t('patchApply'),
-            onCancel: props.onCancel,
-            onConfirm: props.onConfirm          },
-          h(
-            'div',
-            { className: 'dsa-form' },
-            h(
-              'div',
-              { className: 'dsa-kv' },
-              h('span', null, t('patchTarget') + '：' + (patch.path || '?')),
-              h('span', null, t('patchBase') + ' ' + (String(patch.baseHash || '').slice(0, 16) || '—'))
-            ),
-            h('div', { className: 'dsa-hint' }, t('patchBackup')),
-            h('div', { className: 'dsa-hint' }, t('patchChanged')),
-            h('pre', { className: 'dsa-patch-pre' }, preview || '（补丁内容为空）')
-          )
-        );
-      }
-      /* ------------------------------------------------------------------ *
-       * 图标与装配
+       * 原生对话里的入口
        * ------------------------------------------------------------------ */
       function WorkbenchIcon() {
-        return h(
-          'svg',
-          {
-            viewBox: '0 0 20 20',
-            width: 18,
-            height: 18,
-            fill: 'none',
-            stroke: 'currentColor',
-            strokeWidth: 1.5,
-            strokeLinecap: 'round',
-            strokeLinejoin: 'round',
-            'aria-hidden': 'true'          },
-          h('path', { d: 'M3 3h14l-5 6v5.2l-4 1.8V9L3 3z' })
+        return h('svg', {
+          viewBox: '0 0 20 20', width: 18, height: 18, fill: 'none', stroke: 'currentColor',
+          strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true',
+        }, h('path', { d: 'M3 3.5h5.5v5H3zM11.5 3.5H17v5h-5.5zM3 11.5h5.5v5H3zM11.5 11.5H17v5h-5.5z' }));
+      }
+      function OpenWorkbenchAction(props) {
+        var sessionId = (props && props.sessionId) || '';
+        useEffect(function () {
+          if (sessionId) CURRENT_CHAT.id = sessionId;
+        }, [sessionId]);
+        return h('span', { className: 'dsa-cmp' },
+          h('button', {
+            type: 'button',
+            className: 'dsa-chat-btn',
+            onClick: function () {
+              if (sessionId) CURRENT_CHAT.id = sessionId;
+              openViewerPanel();
+            },
+          }, h('span', { className: 'dsa-chat-glyph' }, h(GridIcon, { size: 14 })), ' ' + t('title'))
         );
       }
+
+      /* ------------------------------------------------------------------ *
+       * 样式
+       * ------------------------------------------------------------------ */
+      var CSS = [
+        '.dsa-root{',
+        '  --dsa-bg:#f5f6f8;--dsa-band:#fbfbfc;--dsa-panel:#fff;--dsa-card2:#f5f6f8;',
+        '  --dsa-ink:#171b22;--dsa-ink2:#5d6573;--dsa-ink3:#666f7d;',
+        '  --dsa-line:rgba(23,27,34,.09);--dsa-line2:rgba(23,27,34,.16);',
+        '  --dsa-accent:#2a5cf6;--dsa-accent2:#1f4bd8;--dsa-soft:#edf1ff;',
+        '  --dsa-danger:#b3382f;--dsa-danger-soft:#fdf1ef;',
+        '  --dsa-r-lg:14px;--dsa-r-md:10px;--dsa-r-sm:6px;',
+        '  --dsa-fs-s:12px;--dsa-fs-m:13px;--dsa-fs-l:15px;',
+        '  --dsa-shadow-card:0 1px 2px rgba(16,24,40,.05);--dsa-shadow-pop:0 18px 50px rgba(12,16,24,.18);',
+        '  --dsa-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;',
+        '  --dsa-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;',
+        '}',
+        '[data-dsa-theme="dark"]{',
+        '  --dsa-bg:#0c0e13;--dsa-band:#101319;--dsa-panel:#141820;--dsa-card2:#1a1f28;',
+        '  --dsa-ink:#e9edf3;--dsa-ink2:#a6aebb;--dsa-ink3:#7f8896;',
+        '  --dsa-line:rgba(255,255,255,.10);--dsa-line2:rgba(255,255,255,.18);',
+        '  --dsa-accent:#7fa2ff;--dsa-accent2:#9db8ff;--dsa-soft:rgba(90,130,255,.16);',
+        '  --dsa-danger:#f08b83;--dsa-danger-soft:rgba(240,139,131,.12);',
+        '  --dsa-shadow-card:0 1px 2px rgba(0,0,0,.35);--dsa-shadow-pop:0 18px 50px rgba(0,0,0,.5);',
+        '}',
+        '.dsa-root{position:relative;display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden;background:var(--dsa-bg);color:var(--dsa-ink);',
+        '  font-family:var(--dsa-sans);font-size:var(--dsa-fs-m);line-height:1.55;-webkit-font-smoothing:antialiased;}',
+        '.dsa-root *{box-sizing:border-box;}',
+        '.dsa-root :focus-visible{outline:2px solid color-mix(in srgb,var(--dsa-accent) 60%,transparent);outline-offset:2px;}',
+        '.dsa-root button{font-family:inherit;}',
+        '.dsa-top{height:52px;flex:0 0 52px;display:flex;align-items:center;gap:10px;padding:0 18px;background:var(--dsa-panel);border-bottom:.5px solid var(--dsa-line);}',
+        '.dsa-brand{display:flex;align-items:center;gap:8px;min-width:0;}',
+        '.dsa-brand b{font-size:var(--dsa-fs-l);font-weight:600;letter-spacing:.01em;white-space:nowrap;}',
+        '.dsa-logo{display:inline-flex;color:var(--dsa-accent);}',
+        '.dsa-spacer{flex:1 1 auto;min-width:4px;}',
+        '.dsa-icon{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex:0 0 auto;}',
+        '.dsa-icon svg{display:block;}',
+        '.dsa-spin{animation:dsa-spin .8s linear infinite;transform-origin:50% 50%;}',
+        '@keyframes dsa-spin{to{transform:rotate(360deg);}}',
+        '.dsa-chip{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 9px;border:.5px solid var(--dsa-line);border-radius:var(--dsa-r-sm);',
+        '  color:var(--dsa-ink2);font-size:var(--dsa-fs-s);background:transparent;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis;}',
+        '.dsa-chip.err{color:var(--dsa-danger);border-color:color-mix(in srgb,var(--dsa-danger) 35%,var(--dsa-line));}',
+        '.dsa-chip.quiet{color:var(--dsa-ink3);border-style:dashed;}',
+        '.dsa-chip-name{min-width:0;overflow:hidden;text-overflow:ellipsis;}',
+        '.dsa-dot{width:6px;height:6px;border-radius:50%;background:var(--dsa-accent);flex:0 0 6px;}',
+        '.dsa-btn{appearance:none;display:inline-flex;align-items:center;justify-content:center;gap:6px;height:30px;padding:0 10px;border:.5px solid var(--dsa-line2);border-radius:var(--dsa-r-sm);',
+        '  background:transparent;color:var(--dsa-ink);font-size:var(--dsa-fs-m);line-height:1;cursor:pointer;white-space:nowrap;',
+        '  transition:background-color .12s ease,border-color .12s ease,color .12s ease;}',
+        '.dsa-btn:hover{background:color-mix(in srgb,var(--dsa-ink) 4%,transparent);}',
+        '.dsa-btn:disabled{opacity:.45;cursor:default;}',
+        '.dsa-btn.primary{color:var(--dsa-accent2);border-color:color-mix(in srgb,var(--dsa-accent) 42%,var(--dsa-line2));}',
+        '.dsa-btn.primary:hover{background:var(--dsa-soft);}',
+        '.dsa-btn.danger{color:var(--dsa-danger);border-color:color-mix(in srgb,var(--dsa-danger) 38%,var(--dsa-line2));}',
+        '.dsa-btn.danger:hover{background:var(--dsa-danger-soft);}',
+        '.dsa-btn.ghost{border-color:transparent;color:var(--dsa-ink2);}',
+        '.dsa-btn.ghost:hover{background:color-mix(in srgb,var(--dsa-ink) 4%,transparent);color:var(--dsa-ink);}',
+        '.dsa-body{flex:1 1 auto;display:flex;min-height:0;}',
+        '.dsa-rail{flex:0 0 272px;width:272px;background:var(--dsa-band);border-right:.5px solid var(--dsa-line);display:flex;flex-direction:column;min-height:0;}',
+        '.dsa-rail-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;padding:14px 10px 16px;}',
+        '.dsa-rail-h{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:0 8px 6px;color:var(--dsa-ink3);font-size:var(--dsa-fs-s);font-weight:600;letter-spacing:.03em;}',
+        '.dsa-ws-list{display:flex;flex-direction:column;gap:2px;}',
+        '.dsa-ws-row{position:relative;}',
+        '.dsa-ws{display:flex;flex-direction:column;gap:2px;width:100%;padding:8px 48px 8px 10px;border:.5px solid transparent;border-radius:var(--dsa-r-sm);background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;',
+        '  transition:background-color .12s ease,border-color .12s ease;}',
+        '.dsa-ws:hover{background:color-mix(in srgb,var(--dsa-ink) 3.5%,transparent);}',
+        '.dsa-ws-row.sel .dsa-ws{background:var(--dsa-panel);border-color:var(--dsa-line);box-shadow:var(--dsa-shadow-card);}',
+        '.dsa-ws-line{display:flex;align-items:center;gap:7px;min-width:0;}',
+        '.dsa-ws-name{flex:1 1 auto;min-width:0;font-size:var(--dsa-fs-m);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+        '.dsa-ws-row.sel .dsa-ws-name{color:var(--dsa-ink);font-weight:600;}',
+        '.dsa-ws-count{flex:0 0 auto;font-size:var(--dsa-fs-s);color:var(--dsa-ink3);font-variant-numeric:tabular-nums;}',
+        '.dsa-ws-path{display:block;font-size:var(--dsa-fs-s);color:var(--dsa-ink3);font-family:var(--dsa-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+        '.dsa-ws-remove{position:absolute;right:8px;top:9px;z-index:1;padding:2px 5px;border:0;border-radius:4px;background:var(--dsa-panel);color:var(--dsa-ink3);font:inherit;font-size:var(--dsa-fs-s);cursor:pointer;opacity:0;',
+        '  transition:opacity .12s ease,color .12s ease;}',
+        '.dsa-ws-row:hover .dsa-ws-remove,.dsa-ws-row:focus-within .dsa-ws-remove{opacity:1;}',
+        '.dsa-ws-row.missing .dsa-ws-remove{opacity:1;}',
+        '.dsa-ws-row.missing .dsa-ws-count{color:var(--dsa-danger);}',
+        '.dsa-ws-remove:hover{color:var(--dsa-danger);}',
+        '.dsa-prog{margin-top:16px;padding-top:10px;border-top:.5px solid var(--dsa-line);}',
+        '.dsa-prog-empty{padding:4px 10px 8px;color:var(--dsa-ink3);font-size:var(--dsa-fs-s);}',
+        '.dsa-prog-item{display:flex;flex-direction:column;gap:2px;width:100%;padding:7px 10px;border:.5px solid transparent;border-radius:var(--dsa-r-sm);background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;',
+        '  transition:background-color .12s ease,border-color .12s ease;}',
+        '.dsa-prog-item:hover{background:color-mix(in srgb,var(--dsa-ink) 3.5%,transparent);}',
+        '.dsa-prog-item.sel{background:var(--dsa-panel);border-color:var(--dsa-line);box-shadow:var(--dsa-shadow-card);}',
+        '.dsa-prog-name{font-size:var(--dsa-fs-m);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+        '.dsa-prog-item.sel .dsa-prog-name{color:var(--dsa-accent2);font-weight:600;}',
+        '.dsa-prog-meta{display:flex;align-items:center;gap:10px;font-size:var(--dsa-fs-s);color:var(--dsa-ink3);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;}',
+        '.dsa-main{flex:1 1 auto;min-width:0;min-height:0;display:flex;flex-direction:column;padding:16px;background:var(--dsa-bg);}',
+        '.dsa-canvas{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;background:var(--dsa-panel);border:.5px solid var(--dsa-line);border-radius:var(--dsa-r-lg);overflow:hidden;}',
+        '.dsa-viewer-host{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;}',
+        '.dsa-viewer{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;}',
+        '.dsa-vbar{flex:0 0 auto;min-height:52px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:9px 16px;border-bottom:.5px solid var(--dsa-line);}',
+        '.dsa-tabs{display:inline-flex;align-items:center;gap:2px;padding:3px;border:.5px solid var(--dsa-line);border-radius:8px;background:var(--dsa-card2);}',
+        '.dsa-tab{appearance:none;display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 9px;border:0;border-radius:5px;background:transparent;color:var(--dsa-ink2);',
+        '  font-size:var(--dsa-fs-m);font-weight:500;line-height:1;cursor:pointer;white-space:nowrap;transition:background-color .12s ease,color .12s ease;}',
+        '.dsa-tab:hover{color:var(--dsa-ink);}',
+        '.dsa-tab.sel{background:var(--dsa-panel);color:var(--dsa-ink);box-shadow:0 1px 2px rgba(16,24,40,.06);}',
+        '.dsa-tab-count{font-size:var(--dsa-fs-s);font-weight:400;color:var(--dsa-ink3);font-variant-numeric:tabular-nums;}',
+        '.dsa-tab.sel .dsa-tab-count{color:var(--dsa-accent2);}',
+        '.dsa-filter{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 8px;border:.5px dashed var(--dsa-line2);border-radius:var(--dsa-r-sm);font-size:var(--dsa-fs-s);color:var(--dsa-ink2);background:transparent;}',
+        '.dsa-meta{display:inline-flex;align-items:center;gap:12px;font-size:var(--dsa-fs-s);color:var(--dsa-ink3);font-variant-numeric:tabular-nums;white-space:nowrap;}',
+        '.dsa-search{display:inline-flex;align-items:center;gap:6px;height:26px;min-width:0;padding:0 8px;border:.5px solid var(--dsa-line);border-radius:var(--dsa-r-sm);background:var(--dsa-panel);color:var(--dsa-ink3);}',
+        '.dsa-search:focus-within{border-color:color-mix(in srgb,var(--dsa-accent) 50%,var(--dsa-line));box-shadow:0 0 0 3px color-mix(in srgb,var(--dsa-accent) 10%,transparent);}',
+        '.dsa-search-input{width:150px;min-width:0;border:0;background:transparent;color:var(--dsa-ink);font:inherit;font-size:var(--dsa-fs-s);outline:none;}',
+        '.dsa-search-input::placeholder{color:var(--dsa-ink3);}',
+        '.dsa-search-clear{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--dsa-ink3);cursor:pointer;}',
+        '.dsa-search-clear:hover{background:color-mix(in srgb,var(--dsa-ink) 6%,transparent);color:var(--dsa-ink);}',
+        '.dsa-root[data-dsa-width="narrow"] .dsa-search-input{width:110px;}',
+        '.dsa-viewer-body{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;overflow:auto;padding:16px;}',
+        '.dsa-viewer-split{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:224px minmax(0,1fr);gap:16px;padding:16px;}',
+        '.dsa-viewer-split>.dsa-viewer-body{padding:0;}',
+        '.dsa-tree-pane{min-height:0;overflow:auto;padding:8px;border:.5px solid var(--dsa-line);border-radius:var(--dsa-r-md);background:var(--dsa-card2);}',
+        '.dsa-tree-wrap{font-size:var(--dsa-fs-s);}',
+        '.dsa-tree{list-style:none;margin:0;padding-left:12px;}',
+        '.dsa-tree-root{margin-bottom:2px;}',
+        '.dsa-tree summary{display:flex;align-items:center;gap:4px;padding:2px 4px;border-radius:4px;color:var(--dsa-ink2);cursor:pointer;font-size:var(--dsa-fs-s);white-space:nowrap;}',
+        '.dsa-tree summary:hover{background:color-mix(in srgb,var(--dsa-ink) 4%,transparent);color:var(--dsa-ink);}',
+        '.dsa-tree-item{display:block;width:100%;padding:2px 6px;border:.5px solid transparent;border-radius:4px;background:transparent;color:var(--dsa-ink2);font:inherit;font-size:var(--dsa-fs-s);text-align:left;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+        '.dsa-tree-item:hover{background:color-mix(in srgb,var(--dsa-ink) 4%,transparent);color:var(--dsa-ink);}',
+        '.dsa-tree-item.sel{background:var(--dsa-soft);border-color:color-mix(in srgb,var(--dsa-accent) 22%,transparent);color:var(--dsa-accent2);}',
+        '.dsa-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(172px,1fr));gap:12px;align-content:start;}',
+        '.dsa-card{display:flex;flex-direction:column;gap:4px;min-width:0;padding:6px;border:.5px solid var(--dsa-line);border-radius:var(--dsa-r-md);background:var(--dsa-panel);color:inherit;font:inherit;text-align:left;cursor:pointer;',
+        '  transition:border-color .12s ease,box-shadow .12s ease;}',
+        '.dsa-card:hover{border-color:var(--dsa-line2);box-shadow:var(--dsa-shadow-card);}',
+        '.dsa-card.sel{border-color:color-mix(in srgb,var(--dsa-accent) 50%,var(--dsa-line));}',
+        '.dsa-card-thumb{display:block;width:100%;height:112px;object-fit:contain;border-radius:calc(var(--dsa-r-md) - 6px);background:var(--dsa-card2);}',
+        '.dsa-card-ext{display:flex;align-items:center;justify-content:center;height:112px;border-radius:calc(var(--dsa-r-md) - 6px);background:var(--dsa-card2);color:var(--dsa-ink3);font-family:var(--dsa-mono);font-size:var(--dsa-fs-s);letter-spacing:.04em;}',
+        '.dsa-card-name{font-size:var(--dsa-fs-m);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+        '.dsa-card-meta{font-size:var(--dsa-fs-s);color:var(--dsa-ink3);font-variant-numeric:tabular-nums;}',
+        '.dsa-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;flex:1 1 auto;min-height:220px;padding:32px 20px;text-align:center;color:var(--dsa-ink2);}',
+        '.dsa-empty-icon{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;color:var(--dsa-ink3);opacity:.9;}',
+        '.dsa-empty b{font-size:var(--dsa-fs-l);font-weight:600;color:var(--dsa-ink);}',
+        '.dsa-empty p{max-width:380px;margin:0;font-size:var(--dsa-fs-m);line-height:1.6;color:var(--dsa-ink2);}',
+        '.dsa-welcome{height:100%;}',
+        '.dsa-hint{font-size:var(--dsa-fs-s);line-height:1.6;color:var(--dsa-ink3);}',
+        '.dsa-error{font-size:var(--dsa-fs-s);line-height:1.5;color:var(--dsa-danger);background:var(--dsa-danger-soft);border:.5px solid color-mix(in srgb,var(--dsa-danger) 28%,transparent);border-radius:var(--dsa-r-sm);padding:8px 10px;margin:0 0 12px;}',
+        '.dsa-canvas>.dsa-error{margin:12px 16px 0;}',
+        '.dsa-mask{position:absolute;inset:0;z-index:40;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(12,16,24,.32);}',
+        '.dsa-modal{width:min(540px,100%);max-height:88%;overflow:auto;padding:22px;border:.5px solid var(--dsa-line2);border-radius:var(--dsa-r-lg);background:var(--dsa-panel);box-shadow:var(--dsa-shadow-pop);}',
+        '.dsa-modal h2{margin:0 0 6px;font-size:var(--dsa-fs-l);font-weight:600;letter-spacing:.01em;}',
+        '.dsa-modal:focus{outline:none;}',
+        '.dsa-modal p{margin:0 0 16px;font-size:var(--dsa-fs-m);line-height:1.6;color:var(--dsa-ink2);}',
+        '.dsa-modal-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:20px;}',
+        '.dsa-form{display:flex;flex-direction:column;gap:14px;}',
+        '.dsa-field{display:flex;flex-direction:column;gap:6px;}',
+        '.dsa-field label,.dsa-field>span{font-size:var(--dsa-fs-s);color:var(--dsa-ink2);}',
+        '.dsa-input{width:100%;height:34px;padding:0 10px;border:.5px solid var(--dsa-line2);border-radius:var(--dsa-r-sm);background:var(--dsa-panel);color:var(--dsa-ink);font:inherit;font-size:var(--dsa-fs-m);}',
+        '.dsa-input:focus{outline:none;border-color:color-mix(in srgb,var(--dsa-accent) 60%,var(--dsa-line2));box-shadow:0 0 0 3px color-mix(in srgb,var(--dsa-accent) 12%,transparent);}',
+        '.dsa-input-row{display:flex;align-items:center;gap:8px;}',
+        '.dsa-kv{display:flex;flex-direction:column;gap:6px;font-size:var(--dsa-fs-m);word-break:break-all;}',
+        '.dsa-mono{font-family:var(--dsa-mono);font-size:var(--dsa-fs-s);color:var(--dsa-ink3);}',
+        '.dsa-link{border:0;background:transparent;color:var(--dsa-ink2);font:inherit;font-size:var(--dsa-fs-s);cursor:pointer;padding:2px 0;text-decoration:none;}',
+        '.dsa-link:hover{color:var(--dsa-accent2);}',
+        '.dsa-lightbox{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(8,10,14,.78);}',
+        '.dsa-lightbox-card{position:relative;display:flex;flex-direction:column;width:min(1000px,96vw);max-height:92vh;overflow:hidden;border:.5px solid var(--dsa-line2);border-radius:var(--dsa-r-lg);background:var(--dsa-panel);box-shadow:var(--dsa-shadow-pop);}',
+        '.dsa-lightbox-card.wide{width:min(1180px,96vw);}',
+        '.dsa-lightbox-card:focus{outline:none;}',
+        '.dsa-lightbox-bar{flex:0 0 auto;min-height:48px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:8px 12px 8px 16px;border-bottom:.5px solid var(--dsa-line);background:var(--dsa-panel);}',
+        '.dsa-lightbox-name{min-width:0;max-width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--dsa-mono);font-size:var(--dsa-fs-s);font-weight:500;color:var(--dsa-ink);}',
+        '.dsa-lightbox-stage{display:flex;align-items:center;justify-content:center;min-height:340px;padding:24px;overflow:auto;background:#0e1117;}',
+        '.dsa-lightbox-img{display:block;max-width:100%;max-height:74vh;object-fit:contain;}',
+        '.dsa-lightbox-pdf{width:100%;height:76vh;border:0;background:#0e1117;}',
+        '.dsa-lightbox-navs{position:absolute;left:14px;right:14px;bottom:14px;display:flex;justify-content:space-between;pointer-events:none;}',
+        '.dsa-lightbox-nav{pointer-events:auto;display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border:.5px solid rgba(255,255,255,.24);border-radius:var(--dsa-r-sm);background:rgba(14,17,23,.62);color:#fff;font-size:var(--dsa-fs-l);line-height:1;cursor:pointer;backdrop-filter:blur(6px);}',
+        '.dsa-lightbox-nav:hover{background:rgba(14,17,23,.86);}',
+        '.dsa-tablewrap{max-height:72vh;overflow:auto;padding:12px 16px 16px;}',
+        // 默认滚动条在宽表格里几乎是覆盖式的细线：显式加宽成常驻轨道（勿混用 scrollbar-width，Chromium 会忽略 webkit 伪元素）
+        '.dsa-tablewrap::-webkit-scrollbar{width:12px;height:12px;}',
+        '.dsa-tablewrap::-webkit-scrollbar-track{background:color-mix(in srgb,var(--dsa-ink) 7%,transparent);}',
+        '.dsa-tablewrap::-webkit-scrollbar-thumb{background:var(--dsa-ink3);border:3px solid transparent;border-radius:6px;background-clip:padding-box;}',
+        '.dsa-tablewrap::-webkit-scrollbar-thumb:hover{background:var(--dsa-ink2);}',
+        '.dsa-tablewrap::-webkit-scrollbar-corner{background:transparent;}',
+        '.dsa-tablewrap-lg{max-height:76vh;}',
+        '.dsa-table{width:100%;border-collapse:collapse;font-size:var(--dsa-fs-s);}',
+        '.dsa-table th{position:sticky;top:0;z-index:1;padding:7px 8px;border-bottom:.5px solid var(--dsa-line2);background:var(--dsa-panel);color:var(--dsa-ink2);font-weight:600;text-align:left;white-space:nowrap;}',
+        '.dsa-table td{max-width:420px;padding:6px 8px;border-bottom:.5px solid var(--dsa-line);vertical-align:top;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+        '.dsa-pre{margin:0;padding:16px;border:.5px solid var(--dsa-line);border-radius:var(--dsa-r-md);background:var(--dsa-card2);font-family:var(--dsa-mono);font-size:var(--dsa-fs-s);line-height:1.7;white-space:pre-wrap;word-break:break-word;overflow:auto;}',
+        '.dsa-pre-lg{max-height:76vh;border:0;border-radius:0;background:var(--dsa-card2);}',
+        '.dsa-rail-toggle{display:none;}',
+        '.dsa-rail-backdrop{position:absolute;left:0;right:0;top:52px;bottom:0;z-index:25;background:rgba(12,16,24,.24);}',
+        '.dsa-root[data-dsa-width="compact"] .dsa-rail{flex-basis:248px;width:248px;}',
+        '.dsa-root[data-dsa-width="compact"] .dsa-viewer-split{grid-template-columns:196px minmax(0,1fr);}',
+        '.dsa-root[data-dsa-width="narrow"] .dsa-rail{position:absolute;left:0;top:52px;bottom:0;z-index:30;width:280px;flex-basis:280px;box-shadow:var(--dsa-shadow-pop);}',
+        '.dsa-root[data-dsa-width="narrow"] .dsa-rail-toggle{display:inline-flex;}',
+        '.dsa-root[data-dsa-width="narrow"] .dsa-brand b{display:none;}',
+        '.dsa-root[data-dsa-width="narrow"] .dsa-btn .dsa-btn-label{display:none;}',
+        '.dsa-root[data-dsa-width="narrow"] .dsa-main{padding:10px;}',
+        '.dsa-root[data-dsa-width="narrow"] .dsa-vbar{padding:8px 10px;}',
+        '.dsa-root[data-dsa-width="narrow"] .dsa-viewer-body{padding:12px;}',
+        '.dsa-root[data-dsa-width="narrow"] .dsa-viewer-split{padding:12px;grid-template-columns:minmax(0,1fr);}',
+        '.dsa-root[data-dsa-width="narrow"] .dsa-tree-pane{max-height:170px;}',
+        '.dsa-root[data-dsa-width="narrow"] .dsa-chip{max-width:150px;}',
+        '.dsa-root[data-dsa-width="narrow"] .dsa-ws-remove{opacity:1;}',
+        '.dsa-cmp{display:inline-flex;align-items:center;min-width:0;max-width:min(280px,52vw);flex:0 1 auto;overflow:hidden;}',
+        '.dsa-chat-btn{display:inline-flex;align-items:center;gap:6px;height:24px;min-width:0;max-width:100%;padding:0 8px;',
+        '  border:.5px solid color-mix(in srgb,currentColor 20%,transparent);border-radius:6px;background:transparent;color:inherit;',
+        '  font-size:12px;line-height:1;white-space:nowrap;cursor:pointer;}',
+        '.dsa-chat-btn:hover{background:color-mix(in srgb,currentColor 7%,transparent);border-color:color-mix(in srgb,currentColor 32%,transparent);}',
+        '.dsa-chat-glyph{display:inline-flex;align-items:center;justify-content:center;font-size:12px;line-height:1;}',
+      ];
+
+      function installStyles() {
+        if (typeof document === 'undefined' || !document.head) return function () {};
+        var tag = document.createElement('style');
+        tag.setAttribute('data-dsa-style', 'data-analysis');
+        tag.textContent = CSS.join('');
+        document.head.appendChild(tag);
+        return function () {
+          try {
+            tag.remove();
+          } catch (error) {
+            /* ignore */
+          }
+        };
+      }
+
+      /* ------------------------------------------------------------------ *
+       * 装配
+       * ------------------------------------------------------------------ */
       function apply(ctx) {
         runtime.ctx = ctx;
         ctx.effect(installStyles, 'data-analysis: styles');
@@ -5845,73 +1671,35 @@
             return ctx.slots.register({ name: 'main', key: 'data-analysis' }, Panel);
           }));
           offs.push(ctx.slots.inject('sidebar.panellist', function () {
-            return ctx.slots.register(
-              {
-                name: 'sidebar.panellist',
-                id: 'data-analysis',
-                order: 6,
-                label: function () {
-                  return t('title');
-                }
-              },
-              WorkbenchIcon            );
+            return ctx.slots.register({
+              name: 'sidebar.panellist',
+              id: 'data-analysis',
+              order: 6,
+              label: function () { return t('title'); },
+            }, WorkbenchIcon);
           }));
-          // 原生对话里的三处装饰 + 工具卡（全部只做加法，不替换宿主组件）
           offs.push(ctx.slots.inject('conversation.session.header.actions', function () {
-            return ctx.slots.register(
-              {
-                name: 'conversation.session.header.actions',
-                id: 'data-analysis-workbench',
-                order: 90,
-                // 拿到「这条对话是谁」：工作台据此把面板跟到对话所属的项目上
-                inject: function (sessionId) {
-                  return { sessionId: sessionId };
-                }
+            return ctx.slots.register({
+              name: 'conversation.session.header.actions',
+              id: 'data-analysis-viewer',
+              order: 90,
+              inject: function (sessionId) {
+                return { sessionId: sessionId };
               },
-              OpenWorkbenchAction            );
+            }, OpenWorkbenchAction);
           }));
-          offs.push(ctx.slots.inject('conversation.chat.turnTail', function () {
-            return ctx.slots.register(
-              {
-                name: 'conversation.chat.turnTail',
-                id: 'data-analysis-gates',
-                order: 60,
-                inject: function (sessionId) {
-                  return { sessionId: sessionId };
-                }
-              },
-              WorkbenchTail            );
-          }));
-          offs.push(ctx.slots.inject('conversation.input.left', function () {
-            return ctx.slots.register(
-              {
-                name: 'conversation.input.left',
-                id: 'data-analysis-next',
-                order: 70,
-                inject: function (sessionId) {
-                  return { sessionId: sessionId };
-                }
-              },
-              NextStepControl            );
-          }));
-          DATA_TOOLS.forEach(function (toolName) {
-            offs.push(ctx.slots.inject('tool.call.toolview', function () {
-              return ctx.slots.register({ name: 'tool.call.toolview', key: toolName }, makeToolRow(toolName));
-            }));
-          });
           return function () {
             offs.forEach(function (off) {
               if (typeof off === 'function') off();
             });
           };
         }, 'data-analysis: slots');
-        ctx.effect(function () {
-          return function () {
-            releaseRef();
-          };
-        }, 'data-analysis: session');
       }
+
       return {
         inject: ['slots'],
-        apply: apply      };
-    }  });})();
+        apply: apply,
+      };
+    },
+  });
+})();

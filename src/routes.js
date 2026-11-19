@@ -1,25 +1,29 @@
 /**
- * 面板数据通道：同源 HTTP 路由（与工具共用 Workbench）。
+ * 面板数据通道：同源 HTTP 路由（只读 + 工作区登记）。
  *
  * webServer 没有认证层，所以自带两道防护：只接受 loopback Host、带 Origin 时必须同源。
- * 面板是「浏览与操作」的另一个入口，不是第二套规则。
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 
-const MAX_BODY = 128 * 1024;
-const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]', '::1', '0:0:0:0:0:0:0:1']);
+import { withReadCache } from './read-scope.js';
 
-/** 产物中心的二进制直出：只按扩展名给 content-type，不做内容嗅探。 */
+const MAX_BODY = 128 * 1024;
+const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]', '::1', '0:0:0:0:0:0:0:1', '[::ffff:127.0.0.1]', '::ffff:127.0.0.1']);
+
 const MIME = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
   '.webp': 'image/webp',
   '.gif': 'image/gif',
+  '.bmp': 'image/bmp',
+  '.avif': 'image/avif',
   '.tif': 'image/tiff',
   '.tiff': 'image/tiff',
+  '.heic': 'image/heic',
+  '.heif': 'image/heif',
   '.pdf': 'application/pdf',
   '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   '.csv': 'text/csv; charset=utf-8',
@@ -30,6 +34,11 @@ const MIME = {
   '.txt': 'text/plain; charset=utf-8',
   '.log': 'text/plain; charset=utf-8',
   '.html': 'text/html; charset=utf-8',
+  '.py': 'text/x-python; charset=utf-8',
+  '.r': 'text/plain; charset=utf-8',
+  '.jl': 'text/plain; charset=utf-8',
+  '.do': 'text/plain; charset=utf-8',
+  '.sps': 'text/plain; charset=utf-8',
 };
 
 function hostIsLoopback(hostHeader) {
@@ -75,7 +84,6 @@ function originMatches(originHeader, allowed) {
   }
 }
 
-/** JSON 里的布尔偶尔会被写成字符串；`Boolean('false')` 是 true，破坏性开关不能这么转。 */
 function isTrue(value) {
   if (value === true) return true;
   if (value === false || value === undefined || value === null) return false;
@@ -133,11 +141,7 @@ function send(res, status, payload) {
   res.end(body);
 }
 
-/**
- * 二进制直出（图片 / docx / pdf）。
- * 只允许工作台已经解析过、且确认落在项目内的绝对路径——路由层不再自己拼路径。
- */
-function sendFile(res, file, { type = 'application/octet-stream', download = false, name = '' } = {}) {
+function sendFile(res, file, { type = 'application/octet-stream', download = false, name = '', ascii = '' } = {}) {
   if (res.headersSent) return;
   let stat;
   try {
@@ -152,12 +156,15 @@ function sendFile(res, file, { type = 'application/octet-stream', download = fal
     'cache-control': 'private, max-age=60',
     'x-content-type-options': 'nosniff',
   };
-  // 产物是「不可信数据」：万一以后放进可渲染的 HTML/SVG，也不给它同源脚本能力
-  if (/^text\/html|^image\/svg/i.test(type)) headers['content-security-policy'] = "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:";
+  // 产物是不可信数据：HTML/SVG 一律不给同源脚本能力
+  if (/^text\/html|^image\/svg/i.test(type)) {
+    headers['content-security-policy'] = "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:";
+  }
   if (download) {
-    const ascii = String(name || path.basename(file)).replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_') || 'download';
-    const label = encodeURIComponent(name || path.basename(file));
-    headers['content-disposition'] = `attachment; filename="${ascii}"; filename*=UTF-8''${label}`;
+    // filename= 用英文回退（兼容老浏览器），filename*=UTF-8 用中文显示名（现代浏览器优先取它）
+    const fallback = String(ascii || name || path.basename(file)).replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_') || 'download';
+    const label = encodeURIComponent(name || path.basename(file)).replace(/['()*]/g, (ch) => '%' + ch.charCodeAt(0).toString(16).toUpperCase());
+    headers['content-disposition'] = `attachment; filename="${fallback}"; filename*=UTF-8''${label}`;
   }
   res.writeHead(200, headers);
   const stream = fs.createReadStream(file);
@@ -176,176 +183,53 @@ function headerValue(req, name) {
   return Array.isArray(value) ? value[0] : value;
 }
 
-export function registerRoutes(ctx, workbench, helpers = {}) {
-  const { logger, basePath = '/data-analysis', assistant, tasks = [] } = helpers;
+export function registerRoutes(ctx, services, helpers = {}) {
+  const { logger, basePath = '/data-analysis', getConfig = () => ({}), setDataDir = async () => {} } = helpers;
+  const { store, viewer, workspace } = services;
+
+  const buildState = (wsId = '') => {
+    const requested = String(wsId || '');
+    const activeId = requested || String(store.get('activeWorkspaceId') || '');
+    let snap = viewer.snapshot(activeId);
+    // 面板手里的选择可能已过期：退回台账里的当前工作区，不让界面卡在空态
+    if (!snap.ok && requested) snap = viewer.snapshot('');
+    return {
+      workspaces: workspace.list(),
+      active: snap.workspace || null,
+      activeError: snap.ok ? '' : snap.error,
+      progress: snap.progress || [],
+      tree: snap.tree || null,
+      config: getConfig(),
+    };
+  };
 
   const routes = [
-    {path:`${basePath}/api/workflow`,method:'GET',handler:()=>({ok:true,workflow:workbench.workflow()})},
-    {path:`${basePath}/api/workflow/action`,method:'POST',handler:async body=>({...await workbench.runWorkflowAction(String(body?.actionId||'')),state:workbench.snapshot()})},
-
+    {
+      path: `${basePath}/api/health`,
+      method: 'GET',
+      handler: () => ({ ok: true, plugin: 'data-analysis', viewer: true, workspaces: workspace.workspaces().length }),
+    },
     {
       path: `${basePath}/api/state`,
       method: 'GET',
-      handler: () => ({ ok: true, state: workbench.snapshot() }),
+      handler: (_body, query) => ({ ok: true, state: withReadCache(() => buildState(String(query?.workspaceId || ''))) }),
     },
     {
-      // 原生对话里的徽章轮询它：只回摘要，避免每 8 秒搬一次图表清单。
-      path: `${basePath}/api/summary`,
-      method: 'GET',
-      // 对话里的徽章带着 sessionId 来问：按「这条对话自己的项目」回答，
-      // 而不是按左栏最近点开的那个——否则在 A 的对话里看到的是 B 的进度
-      handler: (_body, query) => workbench.runForSession(String(query?.sessionId || ''), () => workbench.summary()),
-    },
-    {
-      path: `${basePath}/api/project/create`,
-      method: 'POST',
-      handler: (body) => {
-        const result = workbench.createProject(body?.dir, body?.name);
-        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
-        return { ok: true, project: result.project, root: result.root, state: workbench.snapshot() };
-      },
-    },
-    {
-      path: `${basePath}/api/project/open`,
-      method: 'POST',
-      handler: (body) => {
-        const result = workbench.openProject(body?.dir);
-        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
-        return { ok: true, project: result.project, root: result.path, state: workbench.snapshot() };
-      },
-    },
-    {
-      path: `${basePath}/api/project/close`,
-      method: 'POST',
-      handler: () => {
-        workbench.closeProject();
-        return { ok: true, state: workbench.snapshot() };
-      },
-    },
-    {
-      path: `${basePath}/api/project/forget`,
-      method: 'POST',
-      handler: (body) => {
-        const result = workbench.forgetProject(String(body?.id || ''));
-        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
-        return {
-          ok: true,
-          id: result.id,
-          name: result.name,
-          path: result.path,
-          active: result.active,
-          cancelled: result.cancelled,
-          removed: result.removed,
-          // 明确告诉面板「磁盘没动」：这条不改，用户会以为点的是删文件
-          diskKept: true,
-          state: result.state,
-        };
-      },
-    },
-    {
-      // 项目 ⇄ 研究对话：一条会话只属于一个项目。
-      // sessionId 为空 = 解绑；projectId 为空 = 当前项目；会话已经绑在别处且没 force 时回 409，
-      // 让面板去问用户，而不是悄悄改绑。
-      path: `${basePath}/api/project/session`,
-      method: 'POST',
-      handler: (body) => {
-        const sessionId = String(body?.sessionId || '').trim();
-        const projectId = String(body?.projectId || '').trim();
-        if (!sessionId) {
-          const cleared = workbench.unbindSession(projectId);
-          return { ok: true, sessionId: '', projectId: cleared.projectId, cleared: cleared.cleared, state: workbench.snapshot() };
-        }
-        const result = workbench.bindSessionTo(sessionId, projectId, { force: body?.force === true });
-        if (!result.ok) {
-          return {
-            status: ['SESSION_BOUND_ELSEWHERE','PROJECT_BOUND_ELSEWHERE'].includes(result.code) ? 409 : 400,
-            payload: { ok: false, code: result.code || '', error: result.error, bound: result.bound || null },
-          };
-        }
-        return { ok: true, sessionId: result.sessionId, projectId: result.projectId, movedFrom: result.movedFrom || '', state: workbench.snapshot() };
-      },
-    },
-    {
-      // 这条会话属于哪个项目：面板跟着对话走、对话里的徽章判断「是不是我的项目」都问它
-      path: `${basePath}/api/session/project`,
-      method: 'GET',
-      handler: (_body, query) => workbench.projectForSession(String(query?.sessionId || '')),
-    },
-    {
-      // 触发门（档②）：显式启用一条对话。绑定项目会自动启用；这个入口给「还没有项目」的
-      // 临时会话用（面板的「让 AI 装环境」就是这种），也留给将来面板的启用按钮。
-      path: `${basePath}/api/session/arm`,
-      method: 'POST',
-      handler: (body) => workbench.armSession(String(body?.sessionId || ''), String(body?.reason || 'panel')),
-    },
-    {
-      // 停用只清显式登记；还关联着项目的对话仍然是启用的（要停就先解绑）
-      path: `${basePath}/api/session/disarm`,
-      method: 'POST',
-      handler: (body) => workbench.disarmSession(String(body?.sessionId || '')),
-    },
-    {
-      // 「现在屏幕上是哪条对话」：只在对话里那条工作台按钮出现时报一次，宿主只记事实
-      path: `${basePath}/api/chat/focus`,
-      method: 'POST',
-      handler: (body) => {
-        const result = workbench.focusSession(String(body?.sessionId || ''));
-        return { ok: true, sessionId: result.sessionId, bound: result.bound || null, focus: workbench.focusSnapshot() };
-      },
-    },
-    {
-      /* ------------------------------ v2 契约 ------------------------------ */
-      path: `${basePath}/api/registry`,
-      method: 'GET',
-      handler: () => workbench.registrySnapshot(),
-    },
-    {
-      path: `${basePath}/api/registry/save`,
-      method: 'POST',
-      handler: (body) => {
-        const result = workbench.registrySave({ kind: body?.kind, data: body?.data });
-        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error, warnings: result.warnings || [] } };
-        return result;
-      },
-    },
-    {
-      path: `${basePath}/api/registry/remove`,
-      method: 'POST',
-      handler: (body) => {
-        const result = workbench.registryRemove({ kind: body?.kind, id: body?.id });
-        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
-        return result;
-      },
-    },
-    {
-      path: `${basePath}/api/registry/confirm`,
-      method: 'POST',
-      handler: (body) => {
-        const result = workbench.registryConfirm({ kind: body?.kind, id: body?.id });
-        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
-        return result;
-      },
-    },
-    {
-      path: `${basePath}/api/registry/adopt`,
-      method: 'POST',
-      handler: (body) => {
-        const result = workbench.registryAdopt({ overwrite: isTrue(body?.overwrite) });
-        if (!result.ok) return { status: 409, payload: { ok: false, error: result.error } };
-        return result;
-      },
-    },
-    {
-      /* ------------------------------ 产物中心 ------------------------------ */
       path: `${basePath}/api/artifacts/tree`,
       method: 'GET',
-      handler: (_body, query) => workbench.artifactTree({ limit: Number(query?.limit) || 800 }),
+      handler: (_body, query) => {
+        const wsId = String(query?.workspaceId || '');
+        const limit = Number(query?.limit) || 800;
+        const result = viewer.artifactTree({ limit }, wsId);
+        if (!result.ok && wsId) return viewer.artifactTree({ limit }, '');
+        return result;
+      },
     },
     {
       path: `${basePath}/api/artifacts/file`,
       method: 'GET',
       handler: (_body, query) => {
-        const result = workbench.artifactRead(String(query?.path || ''), { limit: Number(query?.limit) || 200 });
+        const result = viewer.artifactRead(String(query?.path || ''), { limit: Number(query?.limit) || 200 }, String(query?.workspaceId || ''));
         if (!result.ok) return { status: 404, payload: { ok: false, error: result.error } };
         return result;
       },
@@ -354,392 +238,105 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
       path: `${basePath}/api/artifacts/raw`,
       method: 'GET',
       handler: (_body, query) => {
-        const result = workbench.artifactResolve(String(query?.path || ''));
+        const result = viewer.artifactResolve(String(query?.path || ''), String(query?.workspaceId || ''));
         if (!result.ok) {
           const error = new Error(result.error);
           error.status = 404;
           throw error;
         }
+        const wantDownload = isTrue(query?.download) || result.ext === '.html';
+        // 只有下载才需要中文文件名；内联缩略图/预览不必读 figure_map/manuscript，省掉每张图两次解析
+        const dn = wantDownload
+          ? viewer.downloadName(result.rel, String(query?.workspaceId || ''))
+          : { name: path.basename(result.abs), ascii: '' };
         return {
           __file: result.abs,
           __type: MIME[result.ext] || 'application/octet-stream',
-          // .html 一律当下载：它和 GUI 同源，内联渲染等于把产物里的脚本放进插件源执行
-          __download: isTrue(query?.download) || result.ext === '.html',
-          __name: path.basename(result.abs),
+          __download: wantDownload,
+          __name: dn.name,
+          __ascii: dn.ascii,
         };
       },
     },
     {
-      path: `${basePath}/api/artifacts/thumb`,
-      method: 'GET',
-      handler: async (_body, query) => {
-        const result = await workbench.artifactThumb(String(query?.path || ''), { width: Number(query?.w) || 320 });
-        if (!result.ok) {
-          const error = new Error(result.error);
-          error.status = 404;
-          throw error;
+      path: `${basePath}/api/workspace`,
+      method: 'POST',
+      handler: (body) => {
+        if (body?.id && !body?.dir) {
+          const selected = workspace.select(String(body.id));
+          if (!selected.ok) return { status: 404, payload: { ok: false, error: selected.error } };
+          return { ok: true, workspace: selected.workspace, state: buildState(selected.workspace.id) };
         }
-        return { __file: result.abs, __type: 'image/png' };
+        const result = workspace.bind({ dir: body?.dir, name: body?.name, sessionId: body?.sessionId });
+        if (!result.ok) {
+          return { status: 400, payload: { ok: false, code: result.code, error: result.error, text: result.text } };
+        }
+        return {
+          ok: true,
+          workspace: result.workspace,
+          already: result.already,
+          movedFrom: result.movedFrom,
+          text: result.text,
+          state: buildState(result.workspace.id),
+        };
       },
     },
     {
-      path: `${basePath}/api/task-card`,
+      path: `${basePath}/api/workspace/list`,
       method: 'GET',
-      // 任务卡要按「哪条对话要的」来生成：卡的正文里写着投递到哪条会话
-      handler: (_body, query) => workbench.runForSession(String(query?.sessionId || ''), () => {
-        const result = workbench.taskCard(String(query?.stageId || ''));
-        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
-        return result;
-      }),
+      handler: () => ({ ok: true, workspaces: workspace.list() }),
     },
     {
-      path: `${basePath}/api/stage/run`,
-      method: 'POST',
-      // 输入行那个「运行下一步」是在某条对话里点的：就让它跑那条对话的项目
-      handler: (body) => workbench.runForSession(String(body?.sessionId || ''), () => {
-        const result = workbench.runStage(String(body?.stageId || ''), { force: isTrue(body?.force) });
-        if (!result.ok) return { status: 409, payload: { ok: false, error: result.error, blockers: result.blockers || [] } };
-        return { ok: true, run: result.run, command: result.command, state: workbench.snapshot() };
-      }),
-    },
-    {
-      path: `${basePath}/api/stage/cancel`,
+      path: `${basePath}/api/workspace/forget`,
       method: 'POST',
       handler: (body) => {
-        const result = workbench.cancelStage(String(body?.stageId || ''));
-        if (!result.ok) return { status: 409, payload: { ok: false, error: result.error } };
-        return { ok: true, state: workbench.snapshot() };
+        const result = workspace.forget(String(body?.id || ''));
+        if (!result.ok) return { status: 404, payload: { ok: false, error: result.error } };
+        return { ok: true, ...result, state: buildState() };
       },
     },
     {
-      path: `${basePath}/api/run/log`,
+      path: `${basePath}/api/session/project`,
       method: 'GET',
-      handler: (body, query) => {
-        const result = workbench.runLog(String(query?.id || ''), Math.min(500, Math.max(10, Number(query?.limit) || 200)));
-        if (!result.ok) return { status: 404, payload: { ok: false, error: '找不到这次运行' } };
-        return { ok: true, run: result.run, lines: result.lines };
+      handler: (_body, query) => {
+        const sessionId = String(query?.sessionId || '').trim();
+        if (!sessionId) return { status: 400, payload: { ok: false, error: '缺 sessionId' } };
+        const hit = workspace.forSession(sessionId);
+        return {
+          ok: true,
+          sessionId,
+          workspace: hit ? { id: hit.id, name: hit.name, root: hit.root } : null,
+        };
       },
     },
     {
-      path: `${basePath}/api/adjudicate`,
-      method: 'POST',
-      handler: (body) => {
-        const result = workbench.adjudicate({
-          stageId: String(body?.stageId || ''),
-          gateId: String(body?.gateId || ''),
-          status: String(body?.status || ''),
-          note: body?.note,
-        });
-        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
-        return { ok: true, adjudications: result.adjudications, state: workbench.snapshot() };
-      },
+      path: `${basePath}/api/config`,
+      method: 'GET',
+      handler: () => ({ ok: true, config: getConfig() }),
     },
     {
       path: `${basePath}/api/config`,
       method: 'POST',
       handler: async (body) => {
-        const patch = body?.patch || body || {};
-        const result = await workbench.updateConfig(patch);
-        if(!result.ok)return {status:409,payload:{ok:false,error:result.error}};
-        return { ok: true, config: result.config, state: workbench.snapshot() };
-      },
-    },
-    {
-      path: `${basePath}/api/preflight`,
-      method: 'GET',
-      handler: async () => {
-        await workbench.ensurePreflight();
-        return { ok: true, preflight: workbench.preflightSummary() };
-      },
-    },
-    {
-      path: `${basePath}/api/preflight/refresh`,
-      method: 'POST',
-      handler: async () => {
-        await workbench.ensurePreflight({ force: true });
-        return { ok: true, preflight: workbench.preflightSummary(), state: workbench.snapshot() };
-      },
-    },
-    {
-      path: `${basePath}/api/assistant/models`,
-      method: 'GET',
-      handler: async (_body, query) => {
-        if (!assistant) return { ok: false, error: '模型服务不可用' };
-        const models = await assistant.models({ force: query?.refresh === '1' });
-        return { ok: models.ok !== false, ...models, tasks: assistant.tasks(), config: workbench.snapshot().config };
-      },
-    },
-    {
-      path: `${basePath}/api/assistant/draft`,
-      method: 'POST',
-      handler: async (body) => {
-        if (!assistant) return { ok: false, error: '模型服务不可用' };
-        const result = await assistant.draft({ taskId: body.taskId, instruction: body.instruction,projectId:body.projectId });
-        return result;
-      },
-    },
-    {
-      path: `${basePath}/api/assistant/save`,
-      method: 'POST',
-      handler: async (body) => {
-        if (!assistant) return { ok: false, error: '模型服务不可用' };
-        const result = assistant.save({ taskId: body.taskId, text: body.text,projectId:body.projectId });
-        if (result.ok) result.state = workbench.snapshot();
-        return result;
-      },
-    },
-    {
-      path: `${basePath}/api/gates/control`,
-      method: 'POST',
-      handler: body => workbench.gateControl(body || {}),
-    },
-    {
-      path: `${basePath}/api/gates/resource`,
-      method: 'GET',
-      handler: (_body,query) => {
-        const result=workbench.gateResource({stageId:String(query?.stageId||''),gateId:String(query?.gateId||''),resourceId:String(query?.resourceId||'')});
-        if(!result.ok){const error=new Error(result.error);error.status=409;throw error;}
-        return {__file:result.abs,__type:'application/octet-stream',__download:true,__name:path.basename(result.abs)};
-      },
-    },
-    {
-      path: `${basePath}/api/gates/evidence`,
-      method: 'GET',
-      handler: (_body,query) => workbench.gateEvidence({stageId:String(query?.stageId||''),gateId:String(query?.gateId||'')}),
-    },
-    {
-      path: `${basePath}/api/recheck`,
-      method: 'GET',
-      handler: () => workbench.recheckState(),
-    },
-    {
-      // 模型审计用的证据包：只读、受控截断，不搬整份语料
-      path: `${basePath}/api/recheck/evidence`,
-      method: 'GET',
-      handler: () => workbench.recheckEvidence(),
-    },
-    {
-      path: `${basePath}/api/recheck/issue`,
-      method: 'POST',
-      handler: (body) => {
-        const result = workbench.updateIssue({
-          id: String(body?.id || ''),
-          status: String(body?.status || ''),
-          note: body?.note,
-        });
-        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
-        return { ok: true, issue: result.issue, state: workbench.snapshot() };
-      },
-    },
-    {
-      path: `${basePath}/api/recheck/apply`,
-      method: 'POST',
-      handler: (body) => {
-        const result = workbench.applyIssue(String(body?.id || ''), {
-          advance: body?.advance === undefined || body?.advance === null ? true : isTrue(body.advance),
-        });
-        if (!result.ok) return { status: 409, payload: { ok: false, error: result.error } };
-        return { ok: true, ...result, state: workbench.snapshot() };
-      },
-    },
-    {
-      path: `${basePath}/api/recheck/cancel-chain`,
-      method: 'POST',
-      handler: () => {
-        const result = workbench.cancelChain();
-        if (!result.ok) return { status: 409, payload: { ok: false, error: result.error } };
-        return { ok: true, state: workbench.snapshot() };
-      },
-    },
-    {
-      // 人工步骤（数据集宽表、复核 final、前置闸门未过）停下后的续跑入口。
-      // force 只在这一步生效：用户已经看过 blockers 并决定跳过。
-      path: `${basePath}/api/recheck/resume-chain`,
-      method: 'POST',
-      handler: (body) => {
-        const result = workbench.resumeChain({ force: isTrue(body?.force) });
-        if (!result.ok) return { status: 409, payload: { ok: false, error: result.error, chain: result.chain || null } };
-        return { ok: true, ...result, state: workbench.snapshot() };
-      },
-    },
-    {
-      path: `${basePath}/api/materials`,
-      method: 'GET',
-      handler: () => {
-        const state = workbench.mountsStateSafe();
-        return {
-          ok: true,
-          sources: workbench.sources(),
-          platform: process.platform,
-          isWindows: process.platform === 'win32',
-          ...state,
-          vision: workbench.visionStatus(),
-        };
-      },
-    },
-    {
-      path: `${basePath}/api/materials/card`,
-      method: 'GET',
-      handler: () => {
-        // 面板「让 AI 处理这些材料」拿这张卡再投进研究对话；解析由会话决定
-        const result = workbench.materialsCard();
-        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
-        return result;
-      },
-    },
-    {
-      path: `${basePath}/api/manuscript/brief`,
-      method: 'GET',
-      handler: () => {
-        // 面板「让 AI 写成正文」拿这张卡投进研究对话；改稿与跑阶段都由会话决定
-        const result = workbench.manuscriptBrief();
-        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
-        return result;
-      },
-    },
-    {
-      path: `${basePath}/api/manuscript/scaffold`,
-      method: 'POST',
-      handler: (body) => {
-        // 破坏性：overwrite 会覆盖已有的 manuscript.json，字符串 'false' 不能被当成真
-        const result = workbench.manuscriptScaffold({ overwrite: isTrue(body?.overwrite) });
-        if (!result.ok) {
-          // 「文件已经存在、要不要覆盖」是资源状态冲突，不是请求格式错——外部调用方要能按状态码区分
-          const status = /已经存在/.test(String(result.error || '')) ? 409 : 400;
-          return { status, payload: { ok: false, error: result.error, file: result.file } };
+        const patch = body?.patch && typeof body.patch === 'object' ? body.patch : body || {};
+        if (typeof patch.dataDir !== 'string') {
+          return { status: 400, payload: { ok: false, error: '只支持 dataDir' } };
         }
-        return result;
-      },
-    },
-    {
-      path: `${basePath}/api/materials/add`,
-      method: 'POST',
-      handler: (body) => {
-        const result = workbench.addSource({ label: body?.label, path: body?.path, note: body?.note });
-        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
-        return { ok: true, source: result.source, sources: result.sources, state: workbench.snapshot() };
-      },
-    },
-    {
-      path: `${basePath}/api/materials/scan`,
-      method: 'POST',
-      handler: (body) => {
-        const result = workbench.rescanSource(String(body?.id || ''));
-        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
-        return { ok: true, source: result.source, sources: workbench.sources(), state: workbench.snapshot() };
-      },
-    },
-    {
-      path: `${basePath}/api/materials/remove`,
-      method: 'POST',
-      handler: async (body) => {
-        const result = await workbench.removeSource(String(body?.id || ''), { force: isTrue(body?.force) });
-        if (!result.ok) {
-          return { status: 409, payload: { ok: false, error: result.error, usedBy: result.refs || [] } };
+        if (workspace.isInsideWorkspace(patch.dataDir)) {
+          return { status: 409, payload: { ok: false, error: '台账目录不能放在工作区内（插件只读研究目录）' } };
         }
-        return { ok: true, sources: result.sources, detached: result.detached || [], state: workbench.snapshot() };
+        await setDataDir(patch.dataDir);
+        return { ok: true, config: getConfig(), state: buildState() };
       },
-    },
-    {
-      path: `${basePath}/api/materials/mount`,
-      method: 'POST',
-      handler: async (body) => {
-        const entries = Array.isArray(body?.entries)
-          ? body.entries
-          : String(body?.entries || '').split(/[\n,，;；]+/).map((item) => item.trim()).filter(Boolean);
-        const result = await workbench.mountSource({ sourceId: String(body?.sourceId || ''), entries, as: body?.as });
-        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
-        return { ok: true, mounts: result.mounts, note: result.note, state: workbench.snapshot() };
-      },
-    },
-    {
-      path: `${basePath}/api/materials/unmount`,
-      method: 'POST',
-      handler: async (body) => {
-        const result = await workbench.unmountSource({ as: String(body?.as || '') });
-        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
-        return { ok: true, removed: result.removed, note: result.note, state: workbench.snapshot() };
-      },
-    },
-    {
-      path: `${basePath}/api/materials/repair`,
-      method: 'POST',
-      handler: async () => {
-        const result = await workbench.repairMounts();
-        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
-        return { ok: true, fixed: result.fixed, state: workbench.snapshot() };
-      },
-    },
-    {
-      path: `${basePath}/api/materials/migrate`,
-      method: 'POST',
-      handler: async (body) => {
-        const entries = Array.isArray(body?.entries)
-          ? body.entries
-          : String(body?.entries || '').split(/[\n,，;；]+/).map((item) => item.trim()).filter(Boolean);
-        const result = await workbench.migrateSource({ sourceId: String(body?.sourceId || ''), entries, as: body?.as || '', apply: isTrue(body?.apply) });
-        if (!result.ok) return { status: 409, payload: { ok: false, error: result.error, report: result.report || [] } };
-        return { ok: true, ...result, state: workbench.snapshot() };
-      },
-    },
-    {
-      path: `${basePath}/api/materials/vision`,
-      method: 'GET',
-      handler: () => {
-        const status = workbench.visionStatus();
-        const plan = workbench.visionPlan();
-        const ok = plan.ok !== false && status.ok !== false;
-        // ok 必须最后写：status 里恒为 ok:true，先写会被它盖掉
-        return {
-          ...status,
-          plan,
-          ok,
-          ...(plan.ok === false ? { error: plan.error } : {}),
-        };
-      },
-    },
-    {
-      path: `${basePath}/api/materials/vision/run`,
-      method: 'POST',
-      handler: async (body) => {
-        const result = await workbench.startVision({
-          limit: Number(body?.limit) || 40,
-          pages: String(body?.pages || ''),
-          wait: isTrue(body?.wait),
-        });
-        if (!result.ok) return { status: 409, payload: { ok: false, error: result.error, plan: result.plan || null } };
-        return result;
-      },
-    },
-    {
-      path: `${basePath}/api/materials/vision/cancel`,
-      method: 'POST',
-      handler: () => {
-        const result = workbench.cancelVision();
-        if (!result.ok) return { status: 409, payload: result };
-        return result;
-      },
-    },
-    {
-      path: `${basePath}/api/materials/vision/verify`,
-      method: 'POST',
-      handler: (body) => {
-        const relPaths = Array.isArray(body?.relPaths)
-          ? body.relPaths
-          : String(body?.relPaths || '').split(/[\n,，;；]+/).map((item) => item.trim()).filter(Boolean);
-        const result = workbench.verifyVision({ relPaths, all: isTrue(body?.all) });
-        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
-        return { ok: true, ...result, state: workbench.snapshot() };
-      },
-    },
-    {
-      path: `${basePath}/api/health`,
-      method: 'GET',
-      handler: () => ({ ok: true, version: '0.1.0', skill: workbench.skill().ok }),
     },
   ];
 
-  const table = new Map(routes.map((route) => [route.path, route]));
+  const table = new Map();
+  for (const route of routes) {
+    const list = table.get(route.path) || [];
+    list.push(route);
+    table.set(route.path, list);
+  }
 
   const dispose = ctx.effect(() => {
     const webServer = ctx.webServer ?? ctx.get('webServer');
@@ -761,46 +358,46 @@ export function registerRoutes(ctx, workbench, helpers = {}) {
         try {
           const hostHeader = headerValue(req, 'host');
           const remote = String(req.socket?.remoteAddress || '');
-          const remoteLoopback = /^(::1|::ffff:127\.|127\.)/.test(remote) || remote === '';
-          // 缺少 Host 时不能直接放行（那是 fail-open）：有 Host 就按 Host 判，没有 Host 就必须
-          // 来自 loopback 套接字，两道门不能同时失效。
-          if (hostHeader ? !hostIsLoopback(hostHeader) : !remoteLoopback) {
+          // 远程地址必须是 loopback；Host 只是第二道检查，不能因为 Host 可伪造就跳过远程检查。
+          if (!/^(::1|::ffff:127\.|127\.)/.test(remote)) {
+            return send(res, 403, { ok: false, error: '仅允许本机访问' });
+          }
+          if (hostHeader && !hostIsLoopback(hostHeader)) {
             return send(res, 403, { ok: false, error: '仅允许本机访问' });
           }
           if (!originMatches(headerValue(req, 'origin'), allowedOrigins(selfOrigin, hostHeader))) {
             return send(res, 403, { ok: false, error: '跨源请求被拒绝' });
           }
           const url = new URL(req.url || '/', 'http://localhost');
-          const route = table.get(url.pathname);
-          if (!route) return send(res, 404, { ok: false, error: `未知接口 ${url.pathname}` });
-          if (req.method !== route.method) {
-            res.setHeader?.('allow', route.method);
-            return send(res, 405, { ok: false, error: `只支持 ${route.method}` });
+          const candidates = table.get(url.pathname);
+          if (!candidates) return send(res, 404, { ok: false, error: `未知接口 ${url.pathname}` });
+          const route = candidates.find((item) => item.method === req.method);
+          if (!route) {
+            res.setHeader?.('allow', candidates.map((item) => item.method).join(', '));
+            return send(res, 405, { ok: false, error: `只支持 ${candidates.map((item) => item.method).join(' / ')}` });
           }
           let body = {};
           if (route.method === 'POST') {
-            const contentType = String(headerValue(req, 'content-type') || '').toLowerCase();
-            if (!contentType.includes('application/json')) {
+            const contentType = String(headerValue(req, 'content-type') || '').trim().toLowerCase();
+            if (!/^application\/json(?:\s*;.*)?$/.test(contentType)) {
               return send(res, 415, { ok: false, error: '只接受 application/json' });
             }
             body = await readBody(req);
           }
           const query = Object.fromEntries(url.searchParams.entries());
           const result = await route.handler(body || {}, query);
-          // 产物中心要直出图片/文档：handler 只回路径与类型，真正发字节在这里
           if (result && result.__file) {
             return sendFile(res, result.__file, {
               type: result.__type || 'application/octet-stream',
               download: result.__download === true,
               name: result.__name || '',
+              ascii: result.__ascii || '',
             });
           }
           if (result && result.status && result.payload) return send(res, result.status, result.payload);
           return send(res, 200, result);
         } catch (error) {
           const message = String(error?.message || error);
-          // 只有 readBody 会带 status（400/413）；其余都是内部异常，必须按 500 报并且留日志，
-          // 否则前端看到「400 参数错」、宿主日志里一行没有。
           const status = Number(error?.status) || 500;
           if (status >= 500) logger?.error?.(`[data-analysis] 路由处理失败：${message}`, error?.stack || '');
           else logger?.warn?.(`[data-analysis] 路由请求被拒：${message}`);

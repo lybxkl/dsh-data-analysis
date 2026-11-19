@@ -1,8 +1,8 @@
 {
   "name": "@local/dsh-data-analysis",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "实证研究工作台：把 empirical-research-pipeline 技能变成可点、可看、可拦住的数据分析流水线（面板 + 工具）。",
+  "description": "实证研究查看器：把 skill 产物目录只读展示成通用文件查看器（图/表/文档/代码 + 目录进度）。",
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -41,36 +41,27 @@
     "client.js",
     "icon.svg",
     "src",
-    "assets",
     "locale",
     "tests",
     "cordis.patch.yml",
     "README.md"
   ],
   "scripts": {
-    "test": "node tests/materials.test.mjs && node tests/runner.test.mjs && node tests/gates.test.mjs && node tests/admission-tier.test.mjs && node tests/registry.test.mjs && node tests/provenance.test.mjs && node tests/artifacts.test.mjs && node tests/artifact-paths.test.mjs && node tests/recheck.test.mjs && node tests/readcache.test.mjs && node tests/consistency.test.mjs && node tests/skill-contract.test.mjs && node tests/binding.test.mjs && node tests/gating.test.mjs && node tests/bootstrap.test.mjs && node tests/tool-output.test.mjs && node tests/regression-20261113.test.mjs && node tests/client-smoke.test.mjs && node tests/visual.mjs",
-    "test:readcache": "node tests/readcache.test.mjs",
-    "test:gates:integration": "node tests/gate-report.test.mjs && node tests/gate-workflow.test.mjs && node tests/gate-audit.test.mjs && node tests/workflow-contract.test.mjs",
-    "test:visual": "node tests/visual.mjs",
-    "test:e2e": "node tests/e2e-corpus.test.mjs",
-    "test:client": "node tests/client-smoke.test.mjs",
-    "test:runner": "node tests/runner.test.mjs",
-    "test:gates": "node tests/gates.test.mjs",
-    "test:registry": "node tests/registry.test.mjs",
-    "test:provenance": "node tests/provenance.test.mjs",
+    "test": "node tests/artifacts.test.mjs && node tests/artifact-paths.test.mjs && node tests/readcache.test.mjs && node tests/binding.test.mjs && node tests/tool-output.test.mjs && node tests/client-smoke.test.mjs && node tests/visual.mjs",
     "test:artifacts": "node tests/artifacts.test.mjs",
-    "test:skill-contract": "node tests/skill-contract.test.mjs",
+    "test:paths": "node tests/artifact-paths.test.mjs",
+    "test:readcache": "node tests/readcache.test.mjs",
     "test:binding": "node tests/binding.test.mjs",
-    "test:regression": "node tests/regression-20261113.test.mjs",
-    "test:workflow": "node tests/workflow-contract.test.mjs",
-    "test:bootstrap": "node tests/bootstrap.test.mjs"
+    "test:tool-output": "node tests/tool-output.test.mjs",
+    "test:client": "node tests/client-smoke.test.mjs",
+    "test:visual": "node tests/visual.mjs"
   },
   "keywords": [
     "dsh",
     "deepseek-harness",
     "dsh-plugin",
     "data-analysis",
-    "research-workbench"
+    "research-viewer"
   ],
   "license": "MIT"
 }

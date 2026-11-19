@@ -1,31 +1,45 @@
 /**
- * 极小的 JSON 状态仓：原子写、串行落盘、读坏了不致命。
+ * 极小的 JSON 台账：工作区登记、会话绑定、配置（只剩 dataDir）。
  *
- * 状态文件里只放「台账」（项目登记、运行记录、裁定），项目自己的产物一律留在项目目录，
- * 这样删掉插件数据也不会动到用户的研究资料。
+ * 原子写、串行落盘、读坏了重建。台账里不存运行记录/判定/裁定——
+ * 那些都是流水线时代的字段，读到时直接忽略。
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 
 function shape(data) {
-  if (!data || typeof data !== 'object') data = {};
-  if (!data.version) data.version = 1;
-  if (!Array.isArray(data.projects)) data.projects = [];
-  if (!Array.isArray(data.runs)) data.runs = [];
-  // 会话 → 项目 的反向表。项目和它的研究对话是一对一的，projects[].sessionId 是对外那一份，
-  // 这张表是「这条对话属于哪个项目」的查询入口：工具调用要按会话找回项目，不能靠「最近点开的那个」。
-  if (!data.bindings || typeof data.bindings !== 'object' || Array.isArray(data.bindings)) data.bindings = {};
-  // 「这条对话已启用工作台」的登记（触发门）。绑定项目时自动写一条；解绑 / 移除项目时清掉。
-  // 与 bindings 分开存：绑定是「属于哪个项目」，启用是「这条对话要不要用工作台」，两者不等价
-  // （装环境的临时会话没有项目，但需要 doctor/configure）。
-  if (!data.armings || typeof data.armings !== 'object' || Array.isArray(data.armings)) data.armings = {};
-  if (!data.adjudications || typeof data.adjudications !== 'object' || Array.isArray(data.adjudications)) data.adjudications = {};
-  if (!data.recheckChains || typeof data.recheckChains !== 'object' || Array.isArray(data.recheckChains)) data.recheckChains = {};
-  if (!data.meta || typeof data.meta !== 'object') data.meta = {};
-  if (typeof data.activeProjectId !== 'string') data.activeProjectId = '';
-  if (typeof data.activeProjectPath !== 'string') data.activeProjectPath = '';
-  return data;
+  const raw = data && typeof data === 'object' ? data : {};
+  const next = {};
+  next.version = 2;
+  next.workspaces = Array.isArray(raw.workspaces)
+    ? raw.workspaces
+        .filter((item) => item && typeof item === 'object' && typeof item.id === 'string' && typeof item.root === 'string')
+        .map((item) => ({
+          id: item.id,
+          name: typeof item.name === 'string' ? item.name : '',
+          root: item.root,
+          createdAt: item.createdAt || '',
+        }))
+    : [];
+  // 旧台账只有 projects[]：只取 id/name/root 映射成工作区，不写迁移报告。
+  if (!next.workspaces.length && Array.isArray(raw.projects)) {
+    for (const item of raw.projects) {
+      if (!item || typeof item !== 'object') continue;
+      if (typeof item.id !== 'string' || typeof item.path !== 'string') continue;
+      next.workspaces.push({ id: item.id, name: item.name || '', root: item.path, createdAt: item.createdAt || '' });
+    }
+  }
+  // 绑定表只保留「会话 → 工作区 id」；旧版本把值写成 {projectId, at}，这里只取 projectId。
+  const rawBindings = raw.bindings && typeof raw.bindings === 'object' && !Array.isArray(raw.bindings) ? raw.bindings : {};
+  next.bindings = {};
+  for (const [sessionId, value] of Object.entries(rawBindings)) {
+    const id = typeof value === 'string' ? value : value && typeof value.projectId === 'string' ? value.projectId : '';
+    if (sessionId && id) next.bindings[sessionId] = id;
+  }
+  next.config = { dataDir: raw.config && typeof raw.config.dataDir === 'string' ? raw.config.dataDir : '' };
+  next.activeWorkspaceId = typeof raw.activeWorkspaceId === 'string' ? raw.activeWorkspaceId : '';
+  return next;
 }
 
 export class Store {
@@ -36,6 +50,7 @@ export class Store {
     this.loadError = null;
     this.pending = Promise.resolve();
     this.dirty = false;
+    this.timer = null;
   }
 
   load() {
@@ -45,21 +60,19 @@ export class Store {
     } catch (error) {
       if (error && error.code !== 'ENOENT') {
         this.loadError = error?.message || String(error);
-        this.logger?.warn?.(`[data-analysis] 状态文件读取失败，将重建：${this.loadError}`);
+        this.logger?.warn?.(`[data-analysis] 台账读取失败，将重建：${this.loadError}`);
       }
       this.data = shape({});
     }
     return this;
   }
 
-  /** get() 返回整份状态；get('runs') 取其中一个键。 */
   get(key, fallback) {
     if (key === undefined) return this.data;
     const value = this.data?.[key];
     return value === undefined ? fallback : value;
   }
 
-  /** set({...}) 合并顶层键；set('key', value) 也支持。 */
   set(key, value) {
     if (typeof key === 'object' && key !== null) {
       Object.assign(this.data, key);
@@ -70,10 +83,6 @@ export class Store {
     return this;
   }
 
-  /**
-   * 换一个台账文件（用户在面板里改了 dataDir 时）。
-   * 先把旧台账落盘，再加载新文件；新文件不存在就从空状态开始。
-   */
   async rebase(filePath) {
     const target = path.resolve(String(filePath));
     if (target === path.resolve(this.filePath)) return this;
@@ -90,7 +99,6 @@ export class Store {
     return this;
   }
 
-  /** 落盘：写入临时文件再 rename，避免断电留下半个 JSON。 */
   flush() {
     if (!this.dirty) return this.pending;
     this.dirty = false;
@@ -105,7 +113,9 @@ export class Store {
         await fs.promises.rename(tmp, target);
       })
       .catch((error) => {
-        this.logger?.warn?.(`[data-analysis] 状态落盘失败：${error?.message || error}`);
+        // 写失败不能把未落盘的数据当成已保存：恢复 dirty，下一次 flush 还会重试
+        this.dirty = true;
+        this.logger?.warn?.(`[data-analysis] 台账落盘失败：${error?.message || error}`);
       });
     return this.pending;
   }

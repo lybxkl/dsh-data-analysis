@@ -1,57 +1,79 @@
-/** Assert what DSH renders to the model, beyond the service's JSON return value. */
+/** 模型可见面：只注册 1 个工具，结果经 jsonSafe 归一后由 render 回到模型。 */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {pathToFileURL} from 'node:url';
-import {defaultWorkflow} from '../src/workflow.js';
+import { pathToFileURL } from 'node:url';
 
-const root=fs.mkdtempSync(path.join(os.tmpdir(),'dsa-tool-output-'));
-try{
-  // The SDK's defineTool is an identity declaration builder; all actual tool code,
-  // session wrapping and admission remain the production implementation.
-  let source=fs.readFileSync(new URL('../src/tools.js',import.meta.url),'utf8');
+import { Store } from '../src/store.js';
+import { Viewer } from '../src/viewer.js';
+import { WorkspaceService } from '../src/workspace.js';
+
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dsa-tool-output-'));
+try {
+  // SDK 的 defineTool 只是声明构造器；替换掉它后才能在没有宿主依赖的环境里加载真实工具代码。
+  let source = fs.readFileSync(new URL('../src/tools.js', import.meta.url), 'utf8');
   assert.ok(source.includes("import { defineTool } from '@deepseek-ai/dsh-tools';"));
-  source=source.replace("import { defineTool } from '@deepseek-ai/dsh-tools';",'const defineTool=value=>value;');
-  source=source.replaceAll(/from '(\.\/[^']+)'/g,(_all,rel)=>'from '+JSON.stringify(new URL('../src/'+rel.slice(2),import.meta.url).href));
-  const file=path.join(root,'actual-tools.mjs');fs.writeFileSync(file,source);
-  const {registerTools}=await import(pathToFileURL(file).href);
-  const workflow=structuredClone(defaultWorkflow());
-  workflow.stages.push({id:'unseen-stage',dependsOn:[],steps:[{script:'scripts/unseen.py',args:['--value','新参数']}],artifacts:['output/unseen.json']});
-  workflow.actions.push({id:'unseen-action',stage:'unseen-stage',label:'新动作'});
-  const evidence={ok:true,gate:{id:'synthetic-gate',status:'fail',detail:'content changed',resources:[{id:'input',sha256:'a'.repeat(64)}]}};
-  const action={ok:false,runId:'synthetic-run',exitCode:0,error:'quality failed',result:{quality:'fail'}};
-  const wb={workflow:()=>workflow,runWorkflowAction:()=>action,gateEvidence:()=>evidence,isArmed:()=>false};
-  const definitions=new Map(),admissions=new Map();
-  registerTools({tools:{register:(definition,admission)=>{definitions.set(definition.name,definition);admissions.set(definition.name,admission);}}},wb);
-  const visible=async(name,args)=>{
-    const definition=definitions.get(name);assert.ok(definition,'actual tool must be registered');
-    const result=await definition.execute(args,{});
-    const blocks=definition.output.render(args,result);
-    assert.equal(blocks.length,1);assert.equal(blocks[0].type,'text');return JSON.parse(blocks[0].text);
+  source = source.replace("import { defineTool } from '@deepseek-ai/dsh-tools';", 'const defineTool=value=>value;');
+  source = source.replaceAll(/from '(\.\/[^']+)'/g, (_all, rel) => 'from ' + JSON.stringify(new URL('../src/' + rel.slice(2), import.meta.url).href));
+  const file = path.join(root, 'actual-tools.mjs');
+  fs.writeFileSync(file, source);
+  const { registerTools } = await import(pathToFileURL(file).href);
+
+  const stateDir = path.join(root, 'ledger');
+  const store = new Store({ filePath: path.join(stateDir, 'data-analysis.json') }).load();
+  const viewer = new Viewer({ store });
+  const workspace = new WorkspaceService({ store, viewer });
+
+  const definitions = new Map();
+  const admissions = new Map();
+  registerTools({ tools: { register: (definition, admission) => {
+    definitions.set(definition.name, definition);
+    admissions.set(definition.name, admission);
+  } } }, workspace);
+
+  assert.deepEqual([...definitions.keys()], ['data_analysis_workspace'], '必须只有 1 个工具');
+  const tool = definitions.get('data_analysis_workspace');
+  assert.equal(admissions.get('data_analysis_workspace'), undefined, '不设触发门/准入条件');
+  assert.match(tool.description, /只读展示/);
+  assert.match(tool.description, /SKILL\.md/);
+  assert.ok(!/第一步|首先|然后|必须调用|按阶段/.test(tool.description), '工具描述不得指挥研究步骤');
+
+  const dir = path.join(root, 'research');
+  fs.mkdirSync(path.join(dir, 'output'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'output', 'a.csv'), 'a\n1\n');
+
+  const result = await tool.execute({ dir, name: '输出' }, { agent: { session: { id: 'session-1' } } });
+  assert.equal(result.ok, true);
+  assert.equal(result.workspace.name, '输出');
+  const blocks = tool.output.render({}, result);
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].type, 'text');
+  assert.match(blocks[0].text, /已绑定工作区/);
+  assert.equal(store.get('bindings')['session-1'], result.workspace.id);
+
+  const missingSession = await tool.execute({ dir }, {});
+  assert.equal(missingSession.ok, false);
+  assert.equal(missingSession.code, 'SESSION_REQUIRED');
+
+  // jsonSafe：Date / NaN / undefined / 函数都要归一，否则宿主判为不可序列化
+  const noisy = {
+    bindForExec: () => ({ ok: true, at: new Date('2026-01-02T03:04:05Z'), bad: NaN, skip: undefined, fn() {}, list: [undefined, 1] }),
   };
-  const described=await visible('data_analysis_workflow',{action:'describe',full:true});
-  assert.deepEqual(described.workflow,workflow,'the complete declaration must survive the host render step');
-  assert.equal(described.workflow.stages.at(-1).steps[0].args[1],'新参数');
-  const card=await visible('data_analysis_workflow',{action:'describe'});
-  assert.equal(card.text,'当前没有任务卡');
-  assert.equal(card.workflow,undefined);
-  assert.deepEqual(await visible('data_analysis_workflow',{action:'run-action',actionId:'unseen-action'}),action,'a zero production exit must not hide failed quality');
-  assert.deepEqual(await visible('data_analysis_gates',{action:'evidence'}),evidence,'the model must see the exact evidence and currentness binding');
-  wb.gateControl=()=>({ok:true,status:'completed',state:{gateMode:'legacy',gateModeNotice:'Compatibility is not quality approval',deliveryReady:false,
-    stages:[{id:'custom',status:'review',gates:[{id:'currentness',status:'unjudged',reason:'binding-mismatch',resources:[{payload:'x'.repeat(1024*1024)}]}]}]}});
-  const inspected=await visible('data_analysis_gates',{action:'inspect'});
-  assert.equal(inspected.state.deliveryReady,false);
-  assert.equal(inspected.state.gateMode,'legacy');
-  assert.equal(inspected.state.stages[0].gates[0].reason,'binding-mismatch');
-  assert.ok(JSON.stringify(inspected).length<3000,'inspection summaries must not duplicate per-file evidence');
-  assert.equal(admissions.get('data_analysis_start'),undefined);
-  assert.equal(admissions.get('data_analysis_workflow').when({agent:{id:'unarmed'}}),false);
-  console.log('PASS Model-visible workflow retains all dynamic stage arguments, dependencies, actions and instructions');
-  console.log('PASS Model-visible action results retain failed quality despite a successful production exit');
-  console.log('PASS Model-visible gate evidence retains status and exact resource hashes');
-  console.log('PASS Output rendering preserves the startup and stage-tool admission boundary');
-}finally{
-  assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir())+path.sep));
-  fs.rmSync(root,{recursive:true,force:true});
+  const noisyDefinitions = new Map();
+  registerTools({ tools: { register: (definition) => noisyDefinitions.set(definition.name, definition) } }, noisy);
+  const normalized = await noisyDefinitions.get('data_analysis_workspace').execute({ dir }, {});
+  assert.equal(normalized.at, '2026-01-02T03:04:05.000Z');
+  assert.equal(normalized.bad, null);
+  assert.equal('skip' in normalized, false);
+  assert.equal('fn' in normalized, false);
+  assert.deepEqual(normalized.list, [null, 1]);
+  const fallback = noisyDefinitions.get('data_analysis_workspace').output.render({}, { ok: true });
+  assert.equal(fallback[0].text, '已绑定工作区');
+
+  console.log('PASS 只注册 data_analysis_workspace（无触发门、描述非指令性）');
+  console.log('PASS 工具结果经 jsonSafe 归一并由 render 返回模型可见文本');
+} finally {
+  assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep));
+  fs.rmSync(root, { recursive: true, force: true });
 }

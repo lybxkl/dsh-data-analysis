@@ -1,47 +1,41 @@
 /**
- * @local/dsh-data-analysis —— 实证研究工作台（Host 半片）
+ * @local/dsh-data-analysis —— 只读渲染层（Host 半片）。
  *
- * 职责：
- *   1. 只读加载 skill 的工作流声明，动态组织阶段、动作和脚本；
- *   2. 按阶段起子进程跑脚本，日志落项目的 runs/，退出状态如实记录；
- *   3. 只读解析产物（sample_flow / manifest / coef / number_issues），把闸门拆成
- *      pass / fail / unjudged 三态——判不了就说判不了；
- *   4. 给面板开同源 HTTP 路由，给模型开 data_analysis_* 工具。
- *
- * 隔离契约：skillRoot 只读，插件不复制、不 vendor、不改写 skill；每次运行记录 SKILL.md 的 sha256。
+ * 绑定一个研究产物目录 → 通用文件查看器（output/ 产物 + scripts/ 代码 + 目录进度）。
+ * 不注入系统提示、不运行脚本、不写研究目录、不做闸门/判定/解释。
  */
 
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { DEFAULT_CONFIG, normalizeConfig, SKILL_PACKAGE } from './src/defaults.js';
 import { Store } from './src/store.js';
-import { Runner } from './src/runner.js';
-import { Workbench } from './src/service.js';
-import { Assistant, DRAFT_TASKS } from './src/assistant.js';
-import { Vision } from './src/vision.js';
+import { Viewer } from './src/viewer.js';
+import { WorkspaceService } from './src/workspace.js';
 import { registerTools } from './src/tools.js';
 import { registerRoutes } from './src/routes.js';
-import { registerPrompt } from './src/prompt.js';
 
 export const name = 'data-analysis';
 
-/** tools 与 webServer 是硬依赖；systemPrompt 可选，缺了只是不注入使用规则。 */
 export const inject = ['tools', 'webServer'];
 
 const ROUTE_BASE = '/data-analysis';
 
+function normalizeConfig(raw) {
+  const dataDir = raw && typeof raw.dataDir === 'string' ? raw.dataDir.trim() : '';
+  return { dataDir };
+}
+
 function hasData(filePath) {
   try {
     const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    return Array.isArray(raw?.projects) ? raw.projects.length > 0 : false;
+    return Array.isArray(raw?.workspaces) ? raw.workspaces.length > 0 : false;
   } catch {
     return false;
   }
 }
 
-/** 数据目录：优先选「已经有项目登记」的那个，避免宿主重启后换目录让用户以为数据丢了。 */
+/** 数据目录：优先选「已经有工作区登记」的那个，避免宿主重启后换目录让用户以为数据丢了。 */
 function resolveDataDir(config, logger) {
   if (config.dataDir) return path.resolve(String(config.dataDir));
   const homes = [];
@@ -62,7 +56,7 @@ function resolveDataDir(config, logger) {
   const existing = dirs.find((dir) => hasData(path.join(dir, 'data-analysis.json')));
   if (existing) {
     if (dirs[0] && existing !== dirs[0]) {
-      logger?.info?.(`[data-analysis] 数据目录按已有项目选定：${existing}`);
+      logger?.info?.(`[data-analysis] 数据目录按已有工作区选定：${existing}`);
     }
     return existing;
   }
@@ -79,120 +73,55 @@ export function apply(ctx, rawConfig = {}) {
   };
   const logger = safeGet('logger');
 
-  let config = normalizeConfig({ ...DEFAULT_CONFIG, ...(rawConfig || {}) });
+  let config = normalizeConfig(rawConfig);
   const dir = resolveDataDir(config, logger);
   const store = new Store({ filePath: path.join(dir, 'data-analysis.json'), logger }).load();
 
-  // 面板里改过的设置优先于 cordis.patch.yml：用户现场改的最准
-  const saved = store.get('config');
-  if (saved && typeof saved === 'object') config = normalizeConfig({ ...config, ...saved });
+  // 面板里改过的设置次之：显式配置优先，只有它为空时才用台账里保存的值
+  const savedConfig = normalizeConfig(store.get('config'));
+  config = normalizeConfig({ dataDir: config.dataDir || savedConfig.dataDir });
   if (store.loadError) logger?.warn?.(`[data-analysis] 台账有问题已重建：${store.loadError}`);
 
   const getConfig = () => config;
-  const setConfig = (patch) => {
-    config = normalizeConfig({ ...config, ...(patch || {}) });
+
+  const setDataDir = async (value) => {
+    config = normalizeConfig({ dataDir: value });
+    const target = path.join(resolveDataDir(config, logger), 'data-analysis.json');
+    if (path.resolve(target) !== path.resolve(store.filePath)) {
+      await store.rebase(target);
+      // 新台账里可能留着旧配置；以用户刚提交的为准
+      config = normalizeConfig({ dataDir: value });
+    }
     store.set('config', config);
     store.flushSoon(50);
+    return config;
   };
 
-  const runner = new Runner({
-    getConfig,
-    store,
-    onChange: () => {
-      store.flushSoon(200);
-    },
-  });
-  // 宿主上次是异常退出的：台账里可能留着「running」，那些进程早没了
-  const repaired = runner.reconcile();
-  if (repaired) logger?.warn?.(`[data-analysis] ${repaired} 条遗留运行记录已标记为中断`);
+  const viewer = new Viewer({ store });
+  const workspace = new WorkspaceService({ store, viewer });
 
-  const workbench = new Workbench({
-    getConfig,
-    store,
-    runner,
-    // 宿主 context：只用来读「这条会话的 cwd」这种只读事实（自动关联的强信号）
-    hostCtx: ctx,
-    onChange: (event) => {
-      store.flushSoon(120);
-      try {
-        void event;
-      } catch {
-        /* ignore */
-      }
-    },
-  });
-
-  // 复核闭环：一次运行结束后，若是重跑链的当前步，由服务层推进下一步
-  runner.onFinish = (run) => workbench.onRunFinished(run);
-
-  // 重跑链的回调不会跨进程回来：留在 running 的链会把「套用」永久挡住，这里统一标中断
-  const interrupted = workbench.recoverChains();
-  workbench.recoverGateLeases().catch(error=>logger?.warn?.(`[data-analysis] 中断体检恢复失败：${error.message}`));
-  if (interrupted) logger?.warn?.(`[data-analysis] ${interrupted} 条重跑链已标记为中断`);
-
-  // LLM 桥：用宿主自己的模型选择（agentDefaultModel）与 llm 服务起草文本。
-  // 缺服务时只降级，不让插件挂掉——面板会显示「模型不可用」而不是白屏。
-  const assistant = new Assistant({
-    getConfig,
-    getActive: () => workbench.active(),
-    llm: safeGet('llm'),
-    agentDefaultModel: safeGet('agentDefaultModel'),
-    attachments: safeGet('attachments'),
+  const disposeTools = registerTools(ctx, workspace, { logger });
+  const disposeRoutes = registerRoutes(ctx, { store, viewer, workspace }, {
     logger,
-  });
-
-  // 材料库的识图执行器：扫描件与图片才需要它，且只被工具显式调用（不做自动流水线）。
-  // 它持有「当前任务」状态，必须是单例；缓存目录跟着台账走，改 dataDir 后自动换位置。
-  const vision = new Vision({
+    basePath: ROUTE_BASE,
     getConfig,
-    getCacheDir: () => workbench.cacheDir(),
-    logger,
-    assistant,
+    setDataDir,
   });
-  workbench.materials = { vision };
-
-  // updateConfig 走 store，这里把「内存配置」同步回 workbench 的读取源；
-  // dataDir 变了要换成另一份台账，否则「改了目录但项目列表还是旧的」。
-  const originalUpdate = workbench.updateConfig.bind(workbench);
-  workbench.updateConfig = async (patch) => {
-    const touchesDataDir = patch && Object.prototype.hasOwnProperty.call(patch, 'dataDir');
-    const result = originalUpdate(patch);
-    if (result.ok) setConfig(result.config);
-    if (result.ok && touchesDataDir) {
-      const targetFile = path.join(resolveDataDir(result.config, logger), 'data-analysis.json');
-      if (path.resolve(targetFile) !== path.resolve(store.filePath)) {
-        await store.rebase(targetFile);
-        // 新台账里可能留着旧配置；以用户刚提交的为准
-        config = result.config;
-        store.set('config', config);
-        store.flushSoon(50);
-      }
-    }
-    return { ...result, config };
-  };
-
-  const disposeTools = registerTools(ctx, workbench, { logger, assistant });
-  const disposeRoutes = registerRoutes(ctx, workbench, { logger, basePath: ROUTE_BASE, assistant, tasks: DRAFT_TASKS });
-  const disposePrompt = registerPrompt(ctx, { logger });
 
   ctx.effect(() => () => {
     try {
-      disposePrompt?.();
-    } catch {
-      /* ignore */
-    }
-    try {
-      disposeTools?.();
+      disposeTools?.forEach?.((dispose) => {
+        try {
+          dispose();
+        } catch {
+          /* ignore */
+        }
+      });
     } catch {
       /* ignore */
     }
     try {
       disposeRoutes?.();
-    } catch {
-      /* ignore */
-    }
-    try {
-      runner.killAll();
     } catch {
       /* ignore */
     }
@@ -203,39 +132,5 @@ export function apply(ctx, rawConfig = {}) {
     }
   }, 'data-analysis: lifecycle');
 
-  // 启动自检：后台跑（不阻塞宿主启动），结果会出现在面板顶部与 data_analysis_doctor。
-  // 它只读探测，不装任何东西；skill 没配好或 python 缺失都会如实记下来，而不是等第一次运行才报错。
-  void workbench
-    .ensurePreflight()
-    .then((pre) => {
-      const label = pre.status === 'pass' ? '通过' : pre.status === 'warn' ? '可用但有降级' : '未通过';
-      const problems = (pre.checks || [])
-        .filter((item) => item.status === 'fail')
-        .map((item) => `${item.label}：${item.detail}`)
-        .join('；');
-      logger?.info?.(`[data-analysis] 环境自检${label}${pre.python ? ` · Python ${pre.python}` : ''}${problems ? `；${problems}` : ''}`);
-    })
-    .catch(() => {})
-    .finally(() => {
-      // 首屏预热：等自检与界面启动都过去了，再算一次快照，把「读盘 + 语料指纹」的缓存垫热，
-      // 结果直接丢掉。这样用户第一次点进面板不用等冷启动的整项目扫描（本机实测 2.8s → 约 0.2s）。
-      // 判定仍然每次现算：这里只提前把文件读进缓存，不缓存任何结论，也不改任何产物。
-      setTimeout(() => {
-        try {
-          if (!workbench.active().ok) return;
-          const started = Date.now();
-          workbench.snapshot();
-          logger?.info?.(`[data-analysis] 首屏预热完成（${Date.now() - started}ms）`);
-        } catch (error) {
-          logger?.warn?.(`[data-analysis] 首屏预热跳过：${String(error?.message || error)}`);
-        }
-      }, 3000)?.unref?.();
-    });
-
-  const skill = workbench.skill();
-  logger?.info?.(
-    skill.ok
-      ? `[data-analysis] 已启动，skill ${skill.version}（${skill.scripts.length} 脚本）· 台账 ${dir}`
-      : `[data-analysis] 已启动，但 skill 未就位：${skill.reason}（在面板或 data_analysis_configure 里设置 skillRoot，期望包含 ${SKILL_PACKAGE}）`,
-  );
+  logger?.info?.(`[data-analysis] 已启动（只读查看器）· 工作区 ${workspace.workspaces().length} 个 · 台账 ${dir}`);
 }

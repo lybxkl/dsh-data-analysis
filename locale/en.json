@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Research workbench",
-    "description": "Create an empirical paper project, register and run the skill's scripts, and audit every number behind a sample funnel and compliance gates."
+    "title": "Research viewer",
+    "description": "Read-only view of a research output directory: figures, tables, documents and scripts, plus per-directory progress."
   }
 }

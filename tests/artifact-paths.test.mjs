@@ -1,34 +1,150 @@
+/**
+ * 路径边界回归：工作区登记校验 + artifactResolve 的四道防护。
+ *
+ * 四道防护是查看器唯一的安全边界：词法越界、realpath 越界、扩展名白名单、32MB 上限。
+ */
+
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {artifactPath,readFigures,readModels,readQaReports,readVerify,analysisFile,withReadCache} from '../src/audit.js';
-import {productionReceipt,currentProductionReceipt} from '../src/gate-production.js';
-const root=fs.mkdtempSync(path.join(os.tmpdir(),'dsa-artifact-paths-'));
-const write=(rel,value)=>{const file=path.join(root,rel);fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,typeof value==='string'?value:JSON.stringify(value));};
-try{
-  write('research_registry.json',{artifact_paths:{'output/chart_pack/chart_manifest.csv':'output/custom/charts.csv','output/models':'output/custom/models','output/qa/qa_report.json':'output/quality','output/verify/number_issues.csv':'output/numbers/issues.csv','output/dataset/analysis.csv':'output/custom/data.csv'}});
-  write('output/custom/charts.csv','id,png,n,width_cm,dpi,status\nF1,f.png,3,15,600,ok\n');write('output/custom/f.png','fixture');
-  write('output/custom/models/coef_M1.csv','model,term,b,n\nM1,x,2,3\n');
-  write('output/quality',{error_count:0,warning_count:1});
-  write('output/numbers/issues.csv','severity,check,where,detail\n');write('output/custom/data.csv','id,in_analysis\na,1\n');
-  withReadCache(()=>{
-    const figures=readFigures(root);assert.equal(figures.rows.length,1);assert.equal(figures.rows[0].pngExists,true);assert.equal(figures.file,'output/custom/charts.csv');
-    assert.equal(readModels(root).dir,'output/custom/models');
-    assert.equal(readQaReports(root)[0].json.warning_count,1);
-    assert.equal(readVerify(root).file,'output/numbers/issues.csv');
-    assert.equal(analysisFile(root).rel,'output/custom/data.csv');
-  });
-  write('script.py','# Actual operation code binding fixture\n');
-  write('output/audit/result.csv','old');write('output/audit/report.md','old metadata');
-  const step={scriptAbs:path.join(root,'script.py'),argv:[path.join(root,'script.py'),'--out-dir','output/audit'],produces:['output/audit/result.csv']};
-  const production=productionReceipt(root,'audit','repeat-run',[step]);
-  write('output/audit/result.csv','new');write('output/audit/report.md','new metadata');write('output/audit/history-new.csv','new history');
-  production.stepFinished(step,0);assert.equal(production.finish('ok').status,'completed');
-  assert.equal(currentProductionReceipt(root,{stage:'audit',runId:'repeat-run',requiredOutputs:['output/audit/result.csv']}).ok,true);
-  write('script.py','# changed implementation\n');
-  assert.equal(currentProductionReceipt(root,{stage:'audit',runId:'repeat-run'}).ok,false);
-  write('research_registry.json',{artifact_paths:{'output/models':'../outside'}});
-  assert.throws(()=>artifactPath(root,'output/models/coef.csv'));
-  console.log('PASS Declared custom artifact paths work in panel readers and preserve physical boundaries');
-}finally{fs.rmSync(root,{recursive:true,force:true});}
+
+import { Store } from '../src/store.js';
+import { Viewer } from '../src/viewer.js';
+import { WorkspaceService, workspaceIdOf } from '../src/workspace.js';
+
+let passed = 0;
+const failures = [];
+function check(label, fn) {
+  try {
+    fn();
+    passed += 1;
+    console.log(`✓ ${label}`);
+  } catch (error) {
+    failures.push(`${label}：${error.message}`);
+    console.log(`✗ ${label} — ${error.message}`);
+  }
+}
+
+const temps = [];
+function tmp(name) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `dsa-path-${name}-`));
+  temps.push(dir);
+  return dir;
+}
+
+function makeService() {
+  const stateDir = tmp('ledger');
+  const store = new Store({ filePath: path.join(stateDir, 'data-analysis.json') }).load();
+  const viewer = new Viewer({ store });
+  const workspace = new WorkspaceService({ store, viewer });
+  return { store, viewer, workspace };
+}
+
+check('工作区 id 对大小写稳定', () => {
+  const dir = tmp('IdCase').replace(/\\/g, '\\');
+  assert.equal(workspaceIdOf(dir), workspaceIdOf(dir.toUpperCase()));
+  assert.match(workspaceIdOf(dir), /^[0-9a-f]{12}$/);
+});
+
+check('相对路径 / 空路径 / 磁盘根一律拒绝', () => {
+  const { workspace } = makeService();
+  const relative = workspace.bind({ dir: 'relative\\path' });
+  assert.equal(relative.ok, false);
+  assert.equal(relative.code, 'ABSOLUTE_REQUIRED');
+  const empty = workspace.bind({ dir: '   ' });
+  assert.equal(empty.ok, false);
+  assert.equal(empty.code, 'DIR_REQUIRED');
+  const root = workspace.bind({ dir: path.parse(process.cwd()).root });
+  assert.equal(root.ok, false);
+  assert.equal(root.code, 'ROOT_REFUSED');
+});
+
+check('文件路径不能当工作区', () => {
+  const { workspace } = makeService();
+  const dir = tmp('file');
+  const file = path.join(dir, 'a.txt');
+  fs.writeFileSync(file, 'x');
+  const got = workspace.bind({ dir: file });
+  assert.equal(got.ok, false);
+  assert.equal(got.code, 'NOT_DIRECTORY');
+});
+
+check('接受已有非空目录，且不写目录', () => {
+  const { workspace } = makeService();
+  const dir = tmp('nonempty');
+  fs.writeFileSync(path.join(dir, 'existing.txt'), 'keep');
+  const got = workspace.bind({ dir });
+  assert.equal(got.ok, true);
+  assert.deepEqual(fs.readdirSync(dir), ['existing.txt']);
+});
+
+check('真实路径越界：目录 junction 指向工作区外', () => {
+  const dir = tmp('link');
+  fs.mkdirSync(path.join(dir, 'output'), { recursive: true });
+  const outside = tmp('target');
+  fs.writeFileSync(path.join(outside, 'secret.csv'), 'a\n1\n');
+  const link = path.join(dir, 'output', 'escape');
+  fs.symlinkSync(outside, link, 'junction');
+  const { viewer, workspace } = makeService();
+  assert.equal(workspace.bind({ dir }).ok, true);
+  try {
+    const got = viewer.artifactResolve('output/escape/secret.csv');
+    assert.equal(got.ok, false);
+    assert.match(got.error, /路径指向工作区外/);
+  } finally {
+    fs.rmSync(link, { recursive: true, force: true });
+  }
+});
+
+check('词法越界：编码后的 .. 不会绕过 resolve', () => {
+  const dir = tmp('traversal');
+  fs.mkdirSync(path.join(dir, 'output'), { recursive: true });
+  fs.writeFileSync(path.join(path.dirname(dir), 'outside.csv'), 'a\n1\n');
+  const { viewer, workspace } = makeService();
+  assert.equal(workspace.bind({ dir }).ok, true);
+  for (const rel of ['output/../' + path.basename(path.dirname(dir)) + '/outside.csv', '../outside.csv', './../outside.csv']) {
+    assert.equal(viewer.artifactResolve(rel).ok, false);
+  }
+});
+
+check('白名单与大小上限仍在', () => {
+  const dir = tmp('limits');
+  fs.mkdirSync(path.join(dir, 'output'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'output', 'x.bin'), 'x');
+  const big = path.join(dir, 'output', 'big.txt');
+  fs.writeFileSync(big, '');
+  fs.truncateSync(big, 32 * 1024 * 1024 + 1);
+  const { viewer, workspace } = makeService();
+  assert.equal(workspace.bind({ dir }).ok, true);
+  assert.match(viewer.artifactResolve('output/x.bin').error, /不支持的扩展名/);
+  assert.match(viewer.artifactResolve('output/big.txt').error, /文件太大/);
+});
+
+check('目录改名/删除后给出 WORKSPACE_MISSING', () => {
+  const dir = tmp('missing');
+  fs.mkdirSync(path.join(dir, 'output'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'output', 'a.csv'), 'a\n1\n');
+  const { viewer, workspace } = makeService();
+  assert.equal(workspace.bind({ dir }).ok, true);
+  fs.rmSync(dir, { recursive: true, force: true });
+  const got = viewer.artifactTree({});
+  assert.equal(got.ok, false);
+  assert.equal(got.code, 'WORKSPACE_MISSING');
+});
+
+for (const dir of temps) {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+}
+
+console.log('');
+if (failures.length) {
+  console.log(`✗ ${failures.length} 项失败`);
+  for (const item of failures) console.log('  - ' + item);
+  process.exit(1);
+}
+console.log(`✓ 全部通过（${passed} 项）`);
