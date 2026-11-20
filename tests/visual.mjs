@@ -233,6 +233,15 @@ function fixtures() {
       { dir: 'output/figures', name: 'figures', fileCount: 2, latestMtime: now - 2 * 3600000 },
       { dir: 'output/models', name: 'models', fileCount: 1, latestMtime: now - 86400000 },
     ],
+    layout: {
+      ok: true,
+      groups: [
+        { key: 'output/audit', label: '审计', dirs: ['output/audit'] },
+        { key: 'output/figures', label: '图', dirs: ['output/figures'] },
+        { key: 'output/stats', label: '统计', dirs: ['output/models'] },
+      ],
+      stray: [],
+    },
     tree,
     config: { dataDir: '' },
   };
@@ -392,6 +401,7 @@ async function main() {
             mainW: Math.round(main.getBoundingClientRect().width),
             tabs: tabs.length,
             tabTexts: tabs.map((tab) => tab.textContent.trim()),
+            progNames: [...document.querySelectorAll('.dsa-prog-name')].map((el) => el.textContent.trim()),
             cards: cards.length,
             cardW: cards[0] ? Math.round(cards[0].getBoundingClientRect().width) : 0,
             toggleDisplay: toggle ? getComputedStyle(toggle).display : 'none',
@@ -418,6 +428,7 @@ async function main() {
           expect(probe.railW >= 230 && probe.railW <= 290, '左栏宽度合理（' + probe.railW + 'px）');
           expect(probe.mainW > probe.railW, '查看器是主区域（' + probe.mainW + 'px）');
           expect(probe.missingRemoveOpacity === '1', '目录已删除的登记常显移除入口（' + probe.missingRemoveOpacity + '）');
+          expect(probe.progNames.includes('统计') && !probe.progNames.includes('models'), '侧栏按规范组渲染（' + probe.progNames.join('/') + '）');
         }
         const rgb = (probe.bg.match(/\d+/g) || []).map(Number);
         const dark = rgb.length >= 3 ? (rgb[0] + rgb[1] + rgb[2]) / 3 < 60 : false;

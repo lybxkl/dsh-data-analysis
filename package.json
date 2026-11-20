@@ -47,12 +47,13 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node tests/artifacts.test.mjs && node tests/artifact-paths.test.mjs && node tests/readcache.test.mjs && node tests/binding.test.mjs && node tests/tool-output.test.mjs && node tests/client-smoke.test.mjs && node tests/visual.mjs",
+    "test": "node tests/artifacts.test.mjs && node tests/artifact-paths.test.mjs && node tests/readcache.test.mjs && node tests/binding.test.mjs && node tests/tool-output.test.mjs && node tests/name-layout.test.mjs && node tests/client-smoke.test.mjs && node tests/visual.mjs",
     "test:artifacts": "node tests/artifacts.test.mjs",
     "test:paths": "node tests/artifact-paths.test.mjs",
     "test:readcache": "node tests/readcache.test.mjs",
     "test:binding": "node tests/binding.test.mjs",
     "test:tool-output": "node tests/tool-output.test.mjs",
+    "test:name-layout": "node tests/name-layout.test.mjs",
     "test:client": "node tests/client-smoke.test.mjs",
     "test:visual": "node tests/visual.mjs"
   },

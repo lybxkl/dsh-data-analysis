@@ -198,6 +198,7 @@ export function registerRoutes(ctx, services, helpers = {}) {
       active: snap.workspace || null,
       activeError: snap.ok ? '' : snap.error,
       progress: snap.progress || [],
+      layout: snap.layout || { ok: false, groups: [], stray: [] },
       tree: snap.tree || null,
       config: getConfig(),
     };

@@ -241,7 +241,8 @@ export class Viewer {
     return { ...base, kind: 'text', text: text.length > 200000 ? `${text.slice(0, 200000)}\n…（已截断）` : text };
   }
 
-  /** 中文显示名来自 skill 现成产物：output/figure_map.json（图）+ 根目录 manuscript.json（文稿标题/表题），不另造文件。 */
+  /** 中文显示名来自 skill 现成产物：output/figure_map.json（图）+ 根目录 manuscript.json（文稿标题/表题）
+   * + output/table_map.json / output/doc_map.json（全部交付表/文档），不另造文件。 */
   titleMap(wsId) {
     const active = this.workspaceById(wsId);
     if (!active.ok) return {};
@@ -252,7 +253,56 @@ export class Viewer {
     const map = {};
     this.mergeFigureMap(active, map);
     this.mergeManuscript(active, map);
+    this.mergeNameMap(active, map, 'output/table_map.json', 'tables');
+    this.mergeNameMap(active, map, 'output/doc_map.json', 'docs');
     return map;
+  }
+
+  /** table_map/doc_map 与 figure_map 同构（[{tag,title,file}]），按工作区相对 rel 合并。 */
+  mergeNameMap(active, map, rel, wrapper) {
+    const resolved = this.artifactResolve(rel, active.id);
+    if (!resolved.ok) return;
+    let data;
+    try {
+      data = JSON.parse(fs.readFileSync(resolved.abs, 'utf8'));
+    } catch {
+      return;
+    }
+    const items = Array.isArray(data) ? data : data && Array.isArray(data[wrapper]) ? data[wrapper] : [];
+    for (const item of items) {
+      if (!item || typeof item !== 'object') continue;
+      const title = String(item.title || '').trim();
+      if (!title) continue;
+      const key = this.relKey(active, item.file || item.csv);
+      if (!key || map[key]) continue;
+      const tag = String(item.tag || '').trim();
+      map[key] = tag ? `${tag} ${title}` : title;
+    }
+  }
+
+  /** 目录骨架分组来自 skill 闸门现成产物 output/qa/layout_conformance.json；插件不内嵌别名表。 */
+  layout(wsId) {
+    const active = this.workspaceById(wsId);
+    if (!active.ok) return { ok: false, code: active.code, error: active.error, groups: [], stray: [] };
+    return readMemo(`layout:${active.id}`, () => this.readLayout(active));
+  }
+
+  readLayout(active) {
+    const resolved = this.artifactResolve('output/qa/layout_conformance.json', active.id);
+    if (!resolved.ok) return { ok: false, groups: [], stray: [] };
+    let data;
+    try {
+      data = JSON.parse(fs.readFileSync(resolved.abs, 'utf8'));
+    } catch {
+      return { ok: false, groups: [], stray: [] };
+    }
+    const groups = (Array.isArray(data.groups) ? data.groups : [])
+      .filter((g) => g && typeof g === 'object' && typeof g.key === 'string'
+        && typeof g.label === 'string' && Array.isArray(g.dirs))
+      .map((g) => ({ key: g.key, label: g.label, dirs: g.dirs.filter((d) => typeof d === 'string') }))
+      .filter((g) => g.dirs.length > 0);
+    const stray = Array.isArray(data.stray) ? data.stray.filter((s) => typeof s === 'string') : [];
+    return { ok: groups.length > 0, groups, stray };
   }
 
   /** 把 figure_map/manuscript 里的绝对或相对路径归一成工作区相对 rel；越界返回空。 */
@@ -393,7 +443,7 @@ export class Viewer {
   snapshot(wsId) {
     const active = this.workspaceById(wsId);
     if (!active.ok) {
-      return { ok: false, code: active.code, error: active.error, workspace: null, tree: null, progress: [] };
+      return { ok: false, code: active.code, error: active.error, workspace: null, tree: null, progress: [], layout: { ok: false, groups: [], stray: [] } };
     }
     const progress = this.progress(active.id);
     return {
@@ -401,6 +451,7 @@ export class Viewer {
       workspace: active.workspace,
       tree: this.artifactTree({}, active.id),
       progress: progress.ok ? progress.progress : [],
+      layout: this.layout(active.id),
     };
   }
 }

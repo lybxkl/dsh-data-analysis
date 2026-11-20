@@ -97,6 +97,7 @@
         unviewable: '无法在线预览，请下载原文件。',
         emptyTab: '暂无文件',
         emptyPrefix: '该目录暂无文件',
+        other: '其他',
         treeHint: '产物写入 output/ 后会自动出现。',
         tooMany: '仅显示前 200 个，共 %n 个。',
         preview: '预览',
@@ -532,9 +533,14 @@
         }, [wsId]);
 
         var files = entries.filter(function (entry) { return entry.kind === 'file'; });
-        var scoped = prefix
-          ? files.filter(function (entry) { return entry.rel === prefix || entry.rel.indexOf(prefix + '/') === 0; })
-          : files;
+        var prefixDirs = props.prefixDirs || [];
+        var scoped = prefixDirs.length
+          ? files.filter(function (entry) {
+            return prefixDirs.some(function (d) { return entry.rel === d || entry.rel.indexOf(d + '/') === 0; });
+          })
+          : prefix
+            ? files.filter(function (entry) { return entry.rel === prefix || entry.rel.indexOf(prefix + '/') === 0; })
+            : files;
         var twins = artifactTwins(scoped);
         var shown = scoped.filter(function (entry) { return !twins.hide[entry.rel]; });
         var activeTab = ARTIFACT_TABS.filter(function (item) { return item.id === tab; })[0] || ARTIFACT_TABS[0];
@@ -781,7 +787,7 @@
           ),
           h('span', { className: 'dsa-spacer' }),
           prefix ? h('span', { className: 'dsa-filter' },
-            h('span', null, t('filter') + ' ' + prefix),
+            h('span', null, t('filter') + ' ' + (props.prefixLabel || prefix)),
             h('button', { type: 'button', className: 'dsa-link', title: t('clearFilter'), 'aria-label': t('clearFilter'), onClick: props.onClearPrefix }, t('clearFilter'))
           ) : null,
           h('span', { className: 'dsa-meta' },
@@ -826,23 +832,53 @@
        * ------------------------------------------------------------------ */
       function ProgressRail(props) {
         var progress = props.progress || [];
+        var layout = props.layout || { ok: false, groups: [], stray: [] };
+        var byDir = {};
+        progress.forEach(function (item) { byDir[item.dir] = item; });
+        function agg(dirs) {
+          var count = 0;
+          var latest = 0;
+          dirs.forEach(function (d) {
+            var it = byDir[d];
+            if (it) {
+              count += Number(it.fileCount) || 0;
+              latest = Math.max(latest, Number(it.latestMtime) || 0);
+            }
+          });
+          return { count: count, latest: latest || null };
+        }
+        // 有闸门分组报告时渲染规范组（跨运行稳定）；旧工作区无报告回退物理目录
+        var rows;
+        if (layout.ok && layout.groups.length) {
+          rows = layout.groups.map(function (g) {
+            return { key: g.key, name: g.label, dirs: g.dirs, title: g.dirs.join(', ') };
+          });
+          if (layout.stray.length) {
+            rows.push({ key: '__stray', name: t('other'), dirs: layout.stray, title: layout.stray.join(', ') });
+          }
+        } else {
+          rows = progress.map(function (item) {
+            return { key: item.dir, name: item.name, dirs: [item.dir], title: item.dir };
+          });
+        }
         return h('div', { className: 'dsa-prog' },
           h('div', { className: 'dsa-rail-h' }, h('span', null, t('progress'))),
-          !progress.length ? h('div', { className: 'dsa-prog-empty' }, t('noProgress')) : null,
-          progress.map(function (item) {
-            var active = props.prefix === item.dir;
+          !rows.length ? h('div', { className: 'dsa-prog-empty' }, t('noProgress')) : null,
+          rows.map(function (row) {
+            var active = props.prefix === row.key;
+            var meta = agg(row.dirs);
             return h('button', {
-              key: item.dir,
+              key: row.key,
               type: 'button',
               className: 'dsa-prog-item' + (active ? ' sel' : ''),
-              title: item.dir,
+              title: row.title,
               'aria-pressed': active ? 'true' : undefined,
-              onClick: function () { props.onPick(active ? '' : item.dir); },
+              onClick: function () { props.onPick(active ? '' : row.key); },
             },
-              h('span', { className: 'dsa-prog-name' }, item.name),
+              h('span', { className: 'dsa-prog-name' }, row.name),
               h('span', { className: 'dsa-prog-meta' },
-                h('span', null, item.fileCount + ' ' + t('fileCount')),
-                h('span', null, t('at') + ' ' + agoText(item.latestMtime))
+                h('span', null, meta.count + ' ' + t('fileCount')),
+                h('span', null, t('at') + ' ' + agoText(meta.latest))
               )
             );
           })
@@ -885,7 +921,7 @@
               );
             })
           ),
-          h(ProgressRail, { progress: props.progress, prefix: props.prefix, onPick: props.onPickPrefix })
+          h(ProgressRail, { progress: props.progress, layout: props.layout, prefix: props.prefix, onPick: props.onPickPrefix })
         );
       }
 
@@ -1312,6 +1348,26 @@
         var active = snap && snap.active;
         var activeError = (snap && snap.activeError) || '';
         var progress = (snap && snap.progress) || [];
+        var layout = (snap && snap.layout) || { ok: false, groups: [], stray: [] };
+        var prefixDirs = [];
+        var prefixLabel = '';
+        if (prefix && layout.ok) {
+          if (prefix === '__stray') {
+            prefixDirs = layout.stray;
+            prefixLabel = t('other');
+          } else {
+            var pickedGroup = layout.groups.filter(function (g) { return g.key === prefix; })[0];
+            if (pickedGroup) {
+              prefixDirs = pickedGroup.dirs;
+              prefixLabel = pickedGroup.label;
+            }
+          }
+        }
+        // 分组报告消失时残留的组前缀会空过滤：非物理目录前缀一律清空回退
+        var usablePrefix = prefix;
+        if (prefix && !layout.ok && !progress.some(function (p) { return p.dir === prefix; })) {
+          usablePrefix = '';
+        }
         var treeEntries = (tree && tree.ok && tree.entries) || [];
         var treeError = tree && tree.ok === false ? (tree.error || t('treeMissing')) : '';
 
@@ -1353,7 +1409,9 @@
               error: treeError,
               truncated: tree && tree.truncated === true,
               totalBytes: tree && tree.totalBytes,
-              prefix: prefix,
+              prefix: usablePrefix,
+              prefixDirs: prefixDirs,
+              prefixLabel: prefixLabel,
               onClearPrefix: function () { setPrefix(''); },
             })
           );
@@ -1385,7 +1443,8 @@
             workspaces: workspaces,
             activeId: selectedId || (active && active.id) || '',
             progress: progress,
-            prefix: prefix,
+            layout: layout,
+            prefix: usablePrefix,
             onSelect: selectWorkspace,
             onForget: function (item) { setDialog({ kind: 'forget', workspace: item }); },
             onPickPrefix: function (value) { setPrefix(value); },
